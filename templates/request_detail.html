@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><a class="link" href="/requests">← Заявки</a><h1>{{ req.number }}</h1></div>
+<div class="cards">
+  <div class="card"><div class="card-title">Статус</div><span class="status status-{{ req.status.value }}">{{ req.status.value }}</span></div>
+  <div class="card"><div class="card-title">Направление</div><div class="card-value">{{ req.kind.value }}</div></div>
+  <div class="card"><div class="card-title">Дата</div><div class="card-value">{{ req.planned_date }}</div></div>
+  <div class="card"><div class="card-title">Сумма водителю</div><div class="card-value">{{ "%.0f"|format(req.sum_driver or 0) }} ₽</div></div>
+</div>
+<div class="details">
+  <div><b>Водитель:</b> {{ req.driver.full_name if req.driver else '—' }}</div>
+  <div><b>Автомобиль:</b> {{ req.vehicle.name if req.vehicle else '—' }}</div>
+  <div><b>Госномер:</b> {{ req.vehicle.plate if req.vehicle else '—' }}</div>
+  <div><b>Адрес подачи:</b> {{ req.load_address }}</div>
+  <div><b>Адрес выгрузки:</b> {{ req.unload_address }}</div>
+  <div><b>Маршрут:</b> {{ req.route_name }}</div>
+  <div><b>Километраж:</b> {{ req.km }}</div>
+  <div><b>Объем:</b> {{ req.volume }}</div>
+  <div><b>Рейсов:</b> {{ req.trips_count }}</div>
+  <div><b>Факт. км:</b> {{ req.actual_km or '—' }}</div>
+  <div><b>Факт. объем:</b> {{ req.actual_volume or '—' }}</div>
+  <div><b>Тариф:</b> {{ req.tariff.title if req.tariff else '—' }}</div>
+  <div><b>Полигон:</b> {{ req.polygon.name if req.polygon else '—' }}</div>
+  <div><b>КБ мусора:</b> {{ req.waste_bin_count or '—' }}</div>
+  <div><b>Комментарий:</b> {{ req.comment or '—' }}</div>
+</div>
+{% if user.role == 'driver' %}
+{% if req.status.value in ['Новая','Назначена водителю'] %}
+<form method="post" action="/requests/{{ req.id }}/accept"><button class="btn btn-primary">Принять заявку</button></form>
+{% endif %}
+{% if req.status.value == 'Принята водителем' %}
+<form method="post" action="/requests/{{ req.id }}/start" class="form-row">
+  <input type="number" step="any" name="actual_km" placeholder="Факт. км" />
+  <input type="number" step="any" name="actual_volume" placeholder="Факт. объем" />
+  <button class="btn btn-primary" type="submit">Начать рейс</button>
+</form>
+{% endif %}
+{% if req.status.value == 'В работе' %}
+<form method="post" action="/requests/{{ req.id }}/complete" class="form-row">
+  <input type="number" step="any" name="actual_km" placeholder="Факт. км" value="{{ req.actual_km or '' }}" />
+  <input type="number" step="any" name="actual_volume" placeholder="Факт. объем" value="{{ req.actual_volume or '' }}" />
+  <input name="comment" placeholder="Комментарий" />
+  <button class="btn btn-primary" type="submit">Завершить рейс</button>
+</form>
+{% endif %}
+{% endif %}
+{% if user.role in ['admin','logist'] %}
+<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+  {% if req.status.value == 'Завершена водителем' %}
+  <form method="post" action="/requests/{{ req.id }}/confirm">
+    <button class="btn btn-primary" type="submit">Подтвердить</button>
+  </form>
+  {% endif %}
+  <form method="post" action="/requests/{{ req.id }}/delete" onsubmit="return confirm('Удалить заявку?')">
+    <button class="btn btn-danger" type="submit">Удалить</button>
+  </form>
+</div>
+{% endif %}
+<h3>История статусов</h3>
+<table class="table">
+  <thead><tr><th>Дата</th><th>Пользователь</th><th>Было</th><th>Стало</th></tr></thead>
+  <tbody>
+  {% for h in history %}
+  <tr><td>{{ h.created_at }}</td><td>{{ h.user.full_name if h.user else '—' }}</td><td>{{ h.old_status or '—' }}</td><td>{{ h.new_status }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

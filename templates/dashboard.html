@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <h1>{{ app_name }}</h1>
+  <p class="muted">Добро пожаловать в корпоративный сервис учета рейсов.</p>
+</div>
+<div class="cards">
+  <div class="card"><div class="card-title">Заявки сегодня</div><div class="card-value">{{ stats.today }}</div></div>
+  <div class="card"><div class="card-title">Новые заявки</div><div class="card-value">{{ stats.new }}</div></div>
+  <div class="card"><div class="card-title">В работе</div><div class="card-value">{{ stats.in_work }}</div></div>
+  <div class="card"><div class="card-title">Пухтовозы</div><div class="card-value">{{ stats.pukhtovoz }}</div></div>
+  <div class="card"><div class="card-title">Самосвалы</div><div class="card-value">{{ stats.samosval }}</div></div>
+  <div class="card"><div class="card-title">Сумма водителям сегодня</div><div class="card-value">{{ "%.0f"|format(stats.sum_today) }} ₽</div></div>
+</div>
+{% if user.role != 'driver' %}
+<div class="actions">
+  <a href="/requests/new" class="btn btn-primary">+ Создать заявку</a>
+  <a href="/requests" class="btn">Все заявки</a>
+  <a href="/reports" class="btn">Отчеты</a>
+  <a href="/salary" class="btn">Зарплата</a>
+</div>
+{% endif %}
+{% endblock %}

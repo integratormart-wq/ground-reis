@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><h1>Мои рейсы</h1></div>
+
+<h2>Заявки на сегодня</h2>
+<div class="cards">
+  {% for r in rows %}
+  <a href="/requests/{{ r.id }}" class="card">
+    <div><strong>{{ r.number }}</strong></div>
+    <div class="muted">{{ r.planned_date }} · {{ r.kind.value }}</div>
+    <div class="status">{{ r.status.value }}</div>
+    {% if r.status.value == 'Новая' %}
+    <form method="post" action="/requests/{{ r.id }}/accept" style="margin-top:10px">
+      <button class="btn btn-primary" type="submit" style="width:100%">Принять заявку</button>
+    </form>
+    {% endif %}
+    {% if r.status.value == 'Принята водителем' %}
+    <form method="post" action="/requests/{{ r.id }}/start" style="margin-top:10px">
+      <button class="btn btn-primary" type="submit" style="width:100%">Начать рейс</button>
+    </form>
+    {% endif %}
+    {% if r.status.value == 'В работе' %}
+    <form method="post" action="/requests/{{ r.id }}/complete" style="margin-top:10px">
+      <button class="btn btn-primary" type="submit" style="width:100%">Завершить рейс</button>
+    </form>
+    {% endif %}
+  </a>
+  {% else %}
+  <div class="muted">На сегодня заявок нет</div>
+  {% endfor %}
+</div>
+
+<h2>Новые заявки</h2>
+<div class="cards">
+  {% for r in new_reqs %}
+  <a href="/requests/{{ r.id }}" class="card">
+    <div><strong>{{ r.number }}</strong></div>
+    <div class="muted">{{ r.planned_date }} · {{ r.kind.value }}</div>
+    <div class="status">{{ r.status.value }}</div>
+    {% if r.status.value == 'Новая' %}
+    <form method="post" action="/requests/{{ r.id }}/accept" style="margin-top:10px">
+      <button class="btn btn-primary" type="submit" style="width:100%">Принять заявку</button>
+    </form>
+    {% endif %}
+    {% if r.status.value == 'Принята водителем' %}
+    <form method="post" action="/requests/{{ r.id }}/start" style="margin-top:10px">
+      <button class="btn btn-primary" type="submit" style="width:100%">Начать рейс</button>
+    </form>
+    {% endif %}
+    {% if r.status.value == 'В работе' %}
+    <form method="post" action="/requests/{{ r.id }}/complete" style="margin-top:10px">
+      <button class="btn btn-primary" type="submit" style="width:100%">Завершить рейс</button>
+    </form>
+    {% endif %}
+  </a>
+  {% else %}
+  <div class="muted">Нет новых заявок</div>
+  {% endfor %}
+</div>
+
+<h2>В работе</h2>
+<div class="cards">
+  {% for r in work_reqs %}
+  <a href="/requests/{{ r.id }}" class="card">
+    <div><strong>{{ r.number }}</strong></div>
+    <div class="muted">{{ r.planned_date }} · {{ r.kind.value }}</div>
+    <div class="status">{{ r.status.value }}</div>
+    {% if r.status.value == 'Новая' %}
+    <form method="post" action="/requests/{{ r.id }}/accept" style="margin-top:10px">
+      <button class="btn btn-primary" type="submit" style="width:100%">Принять заявку</button>
+    </form>
+    {% endif %}
+    {% if r.status.value == 'Принята водителем' %}
+    <form method="post" action="/requests/{{ r.id }}/start" style="margin-top:10px">
+      <button class="btn btn-primary" type="submit" style="width:100%">Начать рейс</button>
+    </form>
+    {% endif %}
+    {% if r.status.value == 'В работе' %}
+    <form method="post" action="/requests/{{ r.id }}/complete" style="margin-top:10px">
+      <button class="btn btn-primary" type="submit" style="width:100%">Завершить рейс</button>
+    </form>
+    {% endif %}
+  </a>
+  {% else %}
+  <div class="muted">Нет заявок в работе</div>
+  {% endfor %}
+</div>
+{% endblock %}

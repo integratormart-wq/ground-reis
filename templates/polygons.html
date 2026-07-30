@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><h1>Полигоны</h1></div>
+<div class="filters">
+  <form method="get" style="display:flex;flex-wrap:wrap;gap:10px;align-items:end">
+    <select name="polygon_id"><option value="">Все полигоны</option>{% for p in polygons %}<option value="{{ p.id }}" {% if polygon_id==p.id|string %}selected{% endif %}>{{ p.name }}</option>{% endfor %}</select>
+    <select name="driver_id"><option value="">Все водители</option>{% for d in drivers %}<option value="{{ d.id }}" {% if driver_id==d.id|string %}selected{% endif %}>{{ d.full_name }}</option>{% endfor %}</select>
+    <input type="date" name="date_from" value="{{ date_from or '' }}" />
+    <input type="date" name="date_to" value="{{ date_to or '' }}" />
+    <button class="btn" type="submit">Фильтр</button>
+    <a class="btn" href="/export/polygons.csv?polygon_id={{ polygon_id }}&driver_id={{ driver_id }}&date_from={{ date_from }}&date_to={{ date_to }}">CSV</a>
+  </form>
+</div>
+<div class="table-wrap"><table class="table">
+  <thead><tr><th>Полигон</th><th>Заявок</th><th>Объем</th><th>КБ мусора</th><th>Сумма</th></tr></thead>
+  <tbody>
+  {% for it in items %}
+  <tr><td>{{ it.name }}</td><td>{{ it.trips }}</td><td>{{ it.volume }}</td><td>{{ it.bins }}</td><td>{{ "%.0f"|format(it.sum) }} ₽</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endblock %}

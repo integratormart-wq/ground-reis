@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><h1>Создание заявки</h1></div>
+<div class="form">
+  <form method="post" action="/requests/new" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+    <label>Номер заявки<input name="number" placeholder="{{ next_number_hint or 'П-1' }}" /></label>
+    <label>Дата<input type="date" name="planned_date" required /></label>
+    <label>Время<input type="time" name="planned_time" /></label>
+    <label>Направление
+      <select name="kind" id="kind" required>
+        <option value="пухтовоз" {% if kind=='пухтовоз' %}selected{% endif %}>Пухтовоз</option>
+        <option value="самосвал" {% if kind=='самосвал' %}selected{% endif %}>Самосвал</option>
+      </select>
+    </label>
+    <label>Водитель
+      <select name="driver_id" required>
+        <option value="">— выберите —</option>
+        {% for d in drivers %}
+        <option value="{{ d.id }}">{{ d.full_name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Автомобиль
+      <select name="vehicle_id">
+        <option value="">—</option>
+        {% for v in vehicles %}
+        <option value="{{ v.id }}">{{ v.name }} {{ v.plate }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Адрес подачи<input name="load_address" /></label>
+    <label>Адрес выгрузки<input name="unload_address" /></label>
+    <label>Маршрут<input name="route_name" /></label>
+    <label>Километраж<input type="number" step="any" name="km" id="km" value="0" /></label>
+    <label>Объем<input type="number" step="any" name="volume" id="volume" value="0" /></label>
+    <label>Количество рейсов<input type="number" name="trips_count" value="1" /></label>
+    <label>Тип груза
+      <select name="cargo_type_id">
+        <option value="">—</option>
+        {% for c in cargo_types %}
+        <option value="{{ c.id }}">{{ c.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Заказчик
+      <select id="customer_id" name="customer_id">
+        <option value="">— выберите или введите —</option>
+        {% for c in customers %}
+        <option value="{{ c.id }}">{{ c.name }}</option>
+        {% endfor %}
+      </select>
+      <input id="customer_name_manual" placeholder="Или новый заказчик" />
+    </label>
+    <label>Полигон
+      <select name="polygon_id">
+        <option value="">—</option>
+        {% for p in polygons %}
+        <option value="{{ p.id }}">{{ p.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Тариф
+      <select name="tariff_id" id="tariff_id">
+        <option value="">— авто —</option>
+      </select>
+    </label>
+    <label>КБ мусора<input type="number" step="any" name="waste_bin_count" value="" placeholder="0" /></label>
+    <label>Комментарий<textarea name="comment" rows="3"></textarea></label>
+    <div class="form-row">
+      <div><b>Сумма:</b> <span id="sum_driver">0</span> ₽</div>
+      <button class="btn btn-primary" type="submit">Создать</button>
+      <a class="btn btn-ghost" href="{% if kind=='самосвал' %}/samosval{% else %}/pukhtovoz{% endif %}">Отмена</a>
+    </div>
+  </form>
+</div>
+<script>
+const tariffOptions = {{ tariffs | map(attribute='id') | list | tojson }};
+const tariffData = {};
+{% for t in tariffs %}
+tariffData[{{ t.id }}] = {{ {
+  'formula': t.formula,
+  'trip_price': t.trip_price or 0,
+  'km_price': t.km_price or 0,
+  'volume_price': t.volume_price or 0,
+  'fixed_sum': t.fixed_sum or 0,
+  'kind': t.kind.value if t.kind else ''
+} | tojson }};
+{% endfor %}
+const kindEl = document.getElementById('kind');
+const kmEl = document.getElementById('km');
+const volEl = document.getElementById('volume');
+const tariffEl = document.getElementById('tariff_id');
+const sumEl = document.getElementById('sum_driver');
+function recalc(){
+  const kind = kindEl.value;
+  const km = parseFloat(kmEl.value || 0);
+  const vol = parseFloat(volEl.value || 0);
+  const list = tariffs.filter(t => t.kind === kind || t.kind === (kind === 'пухтовоз' ? 'pukhtovoz' : 'samosval') || t.title.toLowerCase().includes(kind));
+  tariffEl.innerHTML = '<option value="">— авто —</option>' + list.map(t => `<option value="${t.id}" data-formula="${t.formula}" data-trip="${t.trip_price||0}" data-km="${t.km_price||0}" data-volume="${t.volume_price||0}" data-fixed="${t.fixed_sum||0}">${t.title}</option>`).join('');
+  const opt = tariffEl.options[tariffEl.selectedIndex];
+  const chosen = list[0];
+  let sum = 0;
+  const t = (opt && opt.dataset) ? opt.dataset : (chosen ? chosen : {});
+  sum += (km || 0) * parseFloat(t.km || 0);
+  sum += (vol || 0) * parseFloat(t.volume || 0);
+  sum += (parseFloat(document.querySelector('input[name=trips_count]').value || 1)) * parseFloat(t.trip || 0);
+  sum += parseFloat(t.fixed || 0);
+  sumEl.textContent = (sum || 0).toFixed(2);
+}
+[kindEl, kmEl, volEl, tariffEl].forEach(el => el.addEventListener('change', recalc));
+document.querySelector('input[name=trips_count]').addEventListener('input', recalc);
+recalc();
+</script>
+{% endblock %}

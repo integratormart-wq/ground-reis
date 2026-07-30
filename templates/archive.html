@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><h1>Архив</h1></div>
+<div class="table-wrap">
+  <table class="table">
+    <thead><tr><th>Номер</th><th>Дата</th><th>Статус</th><th>Водитель</th><th>Сумма</th><th></th></tr></thead>
+    <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.number }}</td>
+      <td>{{ row.planned_date }}</td>
+      <td>{{ row.status }}</td>
+      <td>{{ row.driver.full_name if row.driver else '' }}</td>
+      <td>{{ row.sum_driver or 0 }}</td>
+      <td>
+        <form method="post" action="/archive/{{ row.id }}/restore" onsubmit="return confirm('Восстановить?')">
+          <button class="btn btn-primary" type="submit">Восстановить</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

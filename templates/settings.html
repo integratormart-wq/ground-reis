@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><h1>Настройки</h1></div>
+
+<h3>Тарифы</h3>
+<table class="table">
+  <thead><tr><th>Название</th><th>Направление</th><th>Формула</th><th>Ставка за рейс</th><th>Активен</th><th></th></tr></thead>
+  <tbody>
+  {% for t in tariffs %}
+  <tr>
+    <td>{{ t.title }}</td>
+    <td>{{ t.kind.value }}</td>
+    <td>{{ t.formula }}</td>
+    <td>{{ t.trip_price }}</td>
+    <td>{{ 'Да' if t.is_active else 'Нет' }}</td>
+    <td>
+      <form method="post" action="/settings/tariffs/{{ t.id }}/delete" onsubmit="return confirm('Удалить?')">
+        <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if user.role in ['admin','logist'] %}
+<form method="post" action="/settings/tariffs" class="filters">
+  <input name="title" placeholder="Название" required />
+  <select name="kind">
+    <option value="pukhtovoz">Пухтовоз</option>
+    <option value="samosval">Самосвал</option>
+  </select>
+  <select name="formula">
+    <option value="trip">За рейс</option>
+    <option value="km">За км</option>
+    <option value="volume">За объем</option>
+  </select>
+  <input name="trip_price" type="number" step="any" placeholder="Ставка" required />
+  <label><input type="checkbox" name="is_active" checked /> Активен</label>
+  <button class="btn" type="submit">Добавить тариф</button>
+</form>
+{% endif %}
+
+<h3>Автомобили</h3>
+<table class="table">
+  <thead><tr><th>Имя</th><th>Госномер</th><th>Тип</th><th>Вместимость</th><th></th></tr></thead>
+  <tbody>
+  {% for v in vehicles %}
+  <tr>
+    <td>{{ v.name }}</td>
+    <td>{{ v.plate }}</td>
+    <td>{{ v.type.name if v.type else '' }}</td>
+    <td>{{ v.capacity }}</td>
+    <td>
+      <form method="post" action="/settings/vehicles/{{ v.id }}/delete" onsubmit="return confirm('Удалить?')">
+        <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if user.role in ['admin','logist'] %}
+<form method="post" action="/settings/vehicles" class="filters">
+  <input name="name" placeholder="Имя" required />
+  <input name="plate" placeholder="Госномер" required />
+  <select name="type_id">
+    {% for vt in vtypes %}
+    <option value="{{ vt.id }}">{{ vt.name }}</option>
+    {% endfor %}
+  </select>
+  <input name="capacity" type="number" step="any" placeholder="Вместимость" />
+  <button class="btn" type="submit">Добавить авто</button>
+</form>
+{% endif %}
+
+<h3>Заказчики</h3>
+<table class="table">
+  <thead><tr><th>Имя</th><th>Адрес</th><th></th></tr></thead>
+  <tbody>
+  {% for c in customers %}
+  <tr>
+    <td>{{ c.name }}</td>
+    <td>{{ c.address }}</td>
+    <td>
+      <form method="post" action="/settings/customers/{{ c.id }}/delete" onsubmit="return confirm('Удалить?')">
+        <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if user.role in ['admin','logist'] %}
+<form method="post" action="/settings/customers" class="filters">
+  <input name="name" placeholder="Имя" required />
+  <input name="address" placeholder="Адрес" />
+  <button class="btn" type="submit">Добавить</button>
+</form>
+{% endif %}
+
+<h3>Типы грузов</h3>
+<table class="table">
+  <thead><tr><th>Имя</th><th>Единица</th><th></th></tr></thead>
+  <tbody>
+  {% for c in cargo_types %}
+  <tr>
+    <td>{{ c.name }}</td>
+    <td>{{ c.unit }}</td>
+    <td>
+      <form method="post" action="/settings/cargo-types/{{ c.id }}/delete" onsubmit="return confirm('Удалить?')">
+        <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if user.role in ['admin','logist'] %}
+<form method="post" action="/settings/cargo-types" class="filters">
+  <input name="name" placeholder="Имя" required />
+  <input name="unit" placeholder="Единица" required />
+  <button class="btn" type="submit">Добавить</button>
+</form>
+{% endif %}
+
+<h3>Полигоны</h3>
+<table class="table">
+  <thead><tr><th>Название</th><th>Адрес</th><th></th></tr></thead>
+  <tbody>
+  {% for p in polygons %}
+  <tr>
+    <td>{{ p.name }}</td>
+    <td>{{ p.address }}</td>
+    <td>
+      <form method="post" action="/settings/polygons/{{ p.id }}/delete" onsubmit="return confirm('Удалить?')">
+        <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if user.role in ['admin','logist'] %}
+<form method="post" action="/settings/polygons" class="filters">
+  <input name="name" placeholder="Название" required />
+  <input name="address" placeholder="Адрес" />
+  <button class="btn" type="submit">Добавить</button>
+</form>
+{% endif %}
+
+{% if user.role in ['admin','logist'] %}
+<form method="post" action="/settings/integrations" class="filters" style="margin-top:18px">
+  <h3>Интеграции</h3>
+  <label>Битрикс24 вебхук URL
+    <input name="webhook_url" value="{{ integrations.get('bitrix24').webhook_url if integrations.get('bitrix24') else '' }}" placeholder="https://..." />
+  </label>
+  <label>Ключ интеграции
+    <input name="secret" value="{{ integrations.get('bitrix24').secret if integrations.get('bitrix24') else '' }}" placeholder="секрет" />
+  </label>
+  <label>Ответственный
+    <input name="responsible_id" value="{{ integrations.get('bitrix24').responsible_id if integrations.get('bitrix24') else '' }}" placeholder="ID пользователя" />
+  </label>
+  <input type="hidden" name="provider" value="bitrix24" />
+  <button class="btn" type="submit">Сохранить</button>
+</form>
+{% endif %}
+{% endblock %}
