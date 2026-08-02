@@ -1,39 +1,15 @@
-{% extends "base.html" %}
-{% block content %}
-<div class="page-header"><h1>Пользователи</h1></div>
-<div class="form">
-  <form method="post" action="/users/new" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
-    <label>Имя<input name="full_name" required /></label>
-    <label>Логин<input name="login" required /></label>
-    <label>Пароль<input type="password" name="password" required /></label>
-    <label>Роль
-      <select name="role">
-        <option value="admin">Админ</option>
-        <option value="logist">Логист</option>
-        <option value="driver">Водитель</option>
-      </select>
-    </label>
-    <div class="form-row"><button class="btn btn-primary" type="submit">Добавить</button></div>
-  </form>
-</div>
-<table class="table">
-  <thead><tr><th>Имя</th><th>Логин</th><th>Роль</th><th>Активен</th><th></th></tr></thead>
-  <tbody>
-  {% for u in users %}
-  <tr>
-    <td>{{ u.full_name }}</td>
-    <td>{{ u.login }}</td>
-    <td>{{ u.role.value }}</td>
-    <td>{{ 'Да' if u.is_active else 'Нет' }}</td>
-    <td>
-      {% if u.id != user.id %}
-      <form method="post" action="/users/{{ u.id }}/delete" style="display:inline" onsubmit="return confirm('Удалить пользователя?')">
-        <button class="btn btn-danger" type="submit">Удалить</button>
-      </form>
-      {% endif %}
-    </td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% endblock %}
+fastapi==0.115.0
+uvicorn==0.30.0
+sqlalchemy==2.0.31
+python-multipart==0.0.9
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.1.2
+python-dotenv==1.0.1
+psycopg2-binary==2.9.9
+openpyxl==3.1.5
+xlsxwriter==3.2.0
+reportlab==4.0.9
+aiofiles==23.3.1
+pydantic-settings==2.5.2
+jinja2==3.1.4
