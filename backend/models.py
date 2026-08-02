@@ -6,8 +6,19 @@ from datetime import datetime
 import os
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///ground.db")
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+_engine = None
+def _build_engine(url: str):
+    from sqlalchemy import create_engine
+    if url.startswith("sqlite"):
+        return create_engine(url, connect_args={"check_same_thread": False})
+    try:
+        return create_engine(url, pool_pre_ping=True)
+    except Exception as e:
+        print("DB_ENGINE_FALLBACK", repr(e), flush=True)
+        return create_engine("sqlite:///ground.db", connect_args={"check_same_thread": False})
+
+engine = _build_engine(DATABASE_URL)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 Base = declarative_base()
 
 class UserRole(str, PyEnum):
