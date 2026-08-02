@@ -1,4 +1,4 @@
-import os, io, csv
+import os, io, csv, traceback, sys
 from datetime import datetime, timedelta, date
 from typing import Optional
 from dotenv import load_dotenv
@@ -18,6 +18,7 @@ from backend.models import UserRole, RequestStatus, TripType, CalcStatus, Polygo
 
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY", "ground_secret_key_2026")
+print("BOOT SECRET_KEY_SET=", bool(SECRET_KEY), flush=True)
 
 app = FastAPI(title="GRUND | Рейсы")
 root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -28,54 +29,62 @@ def render_template(name: str, context: dict) -> HTMLResponse:
     return HTMLResponse(content=html)
 UPLOAD_DIR = os.path.join(root_dir, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-models.Base.metadata.create_all(bind=engine)
+print("BOOT creating tables", flush=True)
+try:
+    models.Base.metadata.create_all(bind=engine)
+    print("BOOT tables_created", flush=True)
+except Exception as e:
+    print("BOOT DB_INIT_ERROR", repr(e), flush=True)
+    traceback.print_exc()
+    sys.exit(1)
 pwd_hash = lambda pw: bcrypt.hashpw(pw[:72].encode(), bcrypt.gensalt()).decode()
 pwd_check = lambda pw, h: bcrypt.checkpw(pw[:72].encode(), h.encode())
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=60*24))
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm="HS256")
-
-with SessionLocal() as _db:
-    if _db.query(models.User).count() == 0:
-        admin = models.User(full_name="Администратор", login="admin", password_hash=pwd_hash("admin123"), role=UserRole.ADMIN, is_active=True)
-        logist = models.User(full_name="Логист Иван", login="logist", password_hash=pwd_hash("logist123"), role=UserRole.LOGIST, is_active=True)
-        driver1 = models.User(full_name="Петров Петр", login="driver1", password_hash=pwd_hash("driver123"), role=UserRole.DRIVER, is_active=True)
-        driver2 = models.User(full_name="Сидоров Алексей", login="driver2", password_hash=pwd_hash("driver123"), role=UserRole.DRIVER, is_active=True)
-        _db.add_all([admin, logist, driver1, driver2]); _db.flush()
-        vt1 = models.VehicleType(name="КАМАЗ пухтовоз", kind=TripType.PUKHTOVOZ)
-        vt2 = models.VehicleType(name="Урал самосвал", kind=TripType.SAMOSVAL)
-        _db.add_all([vt1, vt2]); _db.flush()
-        v1 = models.Vehicle(name="КАМАЗ-65115", plate="А 123 БС 78", type_id=vt1.id, capacity=12)
-        v2 = models.Vehicle(name="Урал-6560", plate="В 456 КТ 99", type_id=vt2.id, capacity=20)
-        _db.add_all([v1, v2]); _db.flush()
-        cust = models.Customer(name="ООО СтройГарант", address="СПб, пр. Просвещения, 12")
-        _db.add(cust); _db.flush()
-        cargo = models.CargoType(name="Строймусор", unit="м3")
-        _db.add(cargo); _db.flush()
-        t1 = models.Tariff(title="Пухтовоз до 15км", vehicle_type_id=vt1.id, kind=TripType.PUKHTOVOZ, min_km=0, max_km=15, trip_price=3500, formula="trip")
-        t2 = models.Tariff(title="Самосвал до 15км", vehicle_type_id=vt2.id, kind=TripType.SAMOSVAL, min_km=0, max_km=15, trip_price=2800, formula="trip")
-        t3 = models.Tariff(title="Пухтовоз 15-30км", vehicle_type_id=vt1.id, kind=TripType.PUKHTOVOZ, min_km=15, max_km=30, trip_price=4200, formula="trip")
-        _db.add_all([t1, t2, t3])
-        for i in range(1,4):
-            req = models.TripRequest(
-                number=f"П-2026-{i:03d}", planned_date=date.today() - timedelta(days=i),
-                planned_time="08:00" if i%2 else "14:00",
-                driver_id=driver1.id if i%2 else driver2.id,
-                vehicle_id=v1.id if i%2 else v2.id,
-                load_address="СПб, ул. Строителей, 1", unload_address="Полигон Ленинградская обл.",
-                route_name="Маршрут А", km=12+i, volume=8+i, trips_count=1,
-                cargo_type_id=cargo.id, customer_id=cust.id,
-                kind=TripType.PUKHTOVOZ if i%2 else TripType.SAMOSVAL,
-                status=RequestStatus.LOGIST_CONFIRMED, actual_km=12+i, actual_volume=8+i,
-                sum_trip=3500+i*200, sum_driver=3500+i*200, tariff_id=t1.id if i%2 else t2.id,
-                logist_comment="Без замечаний"
-            )
-            _db.add(req); _db.flush()
-            _db.add(models.StatusHistory(trip_request_id=req.id, user_id=logist.id, old_status=RequestStatus.NEW.value, new_status=RequestStatus.LOGIST_CONFIRMED.value))
-        _db.commit()
+print("BOOT seed_start", flush=True)
+try:
+    with SessionLocal() as _db:
+        if _db.query(models.User).count() == 0:
+            admin = models.User(full_name="Администратор", login="admin", password_hash=pwd_hash("admin123"), role=UserRole.ADMIN, is_active=True)
+            logist = models.User(full_name="Логист Иван", login="logist", password_hash=pwd_hash("logist123"), role=UserRole.LOGIST, is_active=True)
+            driver1 = models.User(full_name="Петров Петр", login="driver1", password_hash=pwd_hash("driver123"), role=UserRole.DRIVER, is_active=True)
+            driver2 = models.User(full_name="Сидоров Алексей", login="driver2", password_hash=pwd_hash("driver123"), role=UserRole.DRIVER, is_active=True)
+            _db.add_all([admin, logist, driver1, driver2]); _db.flush()
+            vt1 = models.VehicleType(name="КАМАЗ пухтовоз", kind=TripType.PUKHTOVOZ)
+            vt2 = models.VehicleType(name="Урал самосвал", kind=TripType.SAMOSVAL)
+            _db.add_all([vt1, vt2]); _db.flush()
+            v1 = models.Vehicle(name="КАМАЗ-65115", plate="А 123 БС 78", type_id=vt1.id, capacity=12)
+            v2 = models.Vehicle(name="Урал-6560", plate="В 456 КТ 99", type_id=vt2.id, capacity=20)
+            _db.add_all([v1, v2]); _db.flush()
+            cust = models.Customer(name="ООО СтройГарант", address="СПб, пр. Просвещения, 12")
+            _db.add(cust); _db.flush()
+            cargo = models.CargoType(name="Строймусор", unit="м3")
+            _db.add(cargo); _db.flush()
+            t1 = models.Tariff(title="Пухтовоз до 15км", vehicle_type_id=vt1.id, kind=TripType.PUKHTOVOZ, min_km=0, max_km=15, trip_price=3500, formula="trip")
+            t2 = models.Tariff(title="Самосвал до 15км", vehicle_type_id=vt2.id, kind=TripType.SAMOSVAL, min_km=0, max_km=15, trip_price=2800, formula="trip")
+            t3 = models.Tariff(title="Пухтовоз 15-30км", vehicle_type_id=vt1.id, kind=TripType.PUKHTOVOZ, min_km=15, max_km=30, trip_price=4200, formula="trip")
+            _db.add_all([t1, t2, t3])
+            for i in range(1,4):
+                req = models.TripRequest(
+                    number=f"П-2026-{i:03d}", planned_date=date.today() - timedelta(days=i),
+                    planned_time="08:00" if i%2 else "14:00",
+                    driver_id=driver1.id if i%2 else driver2.id,
+                    vehicle_id=v1.id if i%2 else v2.id,
+                    load_address="СПб, ул. Строителей, 1", unload_address="Полигон Ленинградская обл.",
+                    route_name="Маршрут А", km=12+i, volume=8+i, trips_count=1,
+                    cargo_type_id=cargo.id, customer_id=cust.id,
+                    kind=TripType.PUKHTOVOZ if i%2 else TripType.SAMOSVAL,
+                    status=RequestStatus.LOGIST_CONFIRMED, actual_km=12+i, actual_volume=8+i,
+                    sum_trip=3500+i*200, sum_driver=3500+i*200, tariff_id=t1.id if i%2 else t2.id,
+                    logist_comment="Без замечаний"
+                )
+                _db.add(req); _db.flush()
+                _db.add(models.StatusHistory(trip_request_id=req.id, user_id=logist.id, old_status=RequestStatus.NEW.value, new_status=RequestStatus.LOGIST_CONFIRMED.value))
+            _db.commit()
+            print("BOOT seed_ok", flush=True)
+except Exception as e:
+    print("BOOT SEED_ERROR", repr(e), flush=True)
+    traceback.print_exc()
+    sys.exit(1)
 
 def get_db():
     db = SessionLocal()
