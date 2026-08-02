@@ -440,42 +440,30 @@ def salary(request: Request, driver_id: Optional[str] = None, date_from: Optiona
     return render_template("salary.html", {"request": request, "user": current_user, "menu": menu, "items": items, "drivers": drivers if current_user.role != UserRole.DRIVER else [current_user], "date_from": date_from, "date_to": date_to, "app_name": "ГРАУНД | Рейсы"})
 
 @app.get("/reports", response_class=HTMLResponse)
-def reports(request: Request, status_f: Optional[str] = None, driver_id: Optional[str] = None, polygon_id: Optional[str] = None, customer_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+def reports(request: Request, status_f: Optional[str] = None, driver_id: Optional[str] = None, polygon_id: Optional[str] = None, customer_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, q: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
+    q_base = db.query(models.TripRequest)
+    if status_f:
+        try: q_base = q_base.filter(models.TripRequest.status == RequestStatus(status_f))
+        except Exception: pass
+    if driver_id: q_base = q_base.filter(models.TripRequest.driver_id == int(driver_id))
+    if polygon_id: q_base = q_base.filter(models.TripRequest.polygon_id == int(polygon_id))
+    if customer_id: q_base = q_base.filter(models.TripRequest.customer_id == int(customer_id))
+    if date_from: q_base = q_base.filter(models.TripRequest.planned_date >= date.fromisoformat(date_from))
+    if date_to: q_base = q_base.filter(models.TripRequest.planned_date <= date.fromisoformat(date_to))
+    if q:
+        like = f"%{q}%"
+        q_base = q_base.filter(models.TripRequest.number.ilike(like))
+    rows = q_base.order_by(models.TripRequest.planned_date.desc()).all()
     summary = {
-        "requests": db.query(models.TripRequest).count(),
-        "finished": db.query(models.TripRequest).filter(models.TripRequest.status == RequestStatus.LOGIST_CONFIRMED).count(),
-        "km": db.query(func.coalesce(func.sum(models.TripRequest.actual_km), 0)).scalar() or 0,
-        "volume": db.query(func.coalesce(func.sum(models.TripRequest.actual_volume), 0)).scalar() or 0,
-        "bins": db.query(func.coalesce(func.sum(models.TripRequest.waste_bin_count), 0)).scalar() or 0,
-        "sum": db.query(func.coalesce(func.sum(models.TripRequest.sum_driver), 0)).scalar() or 0,
+        "requests": len(rows),
+        "finished": sum(1 for r in rows if r.status == RequestStatus.LOGIST_CONFIRMED),
+        "km": sum((r.actual_km or 0) for r in rows),
+        "volume": sum((r.actual_volume or r.volume or 0) for r in rows),
+        "bins": sum((r.waste_bin_count or 0) for r in rows),
+        "sum": sum((r.sum_driver or 0) for r in rows),
     }
-    return render_template("reports.html", {"request": request, "user": current_user, "menu": menu, "summary": summary, "statuses": RequestStatus, "drivers": db.query(models.User).filter(models.User.role == UserRole.DRIVER).all(), "polygons": db.query(models.Polygon).all(), "customers": db.query(models.Customer).all(), "app_name": "ГРАУНД | Рейсы"})
-
-@app.post("/archive/{archive_id}/restore")
-def restore_archive(archive_id: int, current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db)):
-    item = db.query(models.TripArchive).filter(models.TripArchive.id == archive_id).first()
-    if not item:
-        raise HTTPException(404)
-    req = models.TripRequest(
-        number=item.number, planned_date=item.planned_date, planned_time=item.planned_time,
-        driver_id=item.driver_id, vehicle_id=item.vehicle_id, load_address=item.load_address, unload_address=item.unload_address,
-        route_name=item.route_name, km=item.km, volume=item.volume, trips_count=item.trips_count,
-        cargo_type_id=item.cargo_type_id, customer_id=item.customer_id, kind=item.kind, status=item.status,
-        started_at=item.started_at, finished_at=item.finished_at, actual_km=item.actual_km, actual_volume=item.actual_volume,
-        sum_trip=item.sum_trip, sum_driver=item.sum_driver, tariff_id=item.tariff_id, comment=item.comment,
-        logist_comment=item.logist_comment, polygon_id=item.polygon_id, waste_bin_count=item.waste_bin_count
-    )
-    db.add(req)
-    db.delete(item)
-    db.commit()
-    return RedirectResponse("/archive", status_code=302)
-
-@app.get("/users", response_class=HTMLResponse)
-def users_list(request: Request, current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
-    menu = menu_for(current_user.role)
-    users = db.query(models.User).all()
-    return render_template("users.html", {"request": request, "user": current_user, "menu": menu, "users": users, "app_name": "ГРАУНД | Рейсы"})
+    return render_template("reports.html", {"request": request, "user": current_user, "menu": menu, "summary": summary, "rows": rows, "statuses": RequestStatus, "drivers": db.query(models.User).filter(models.User.role == UserRole.DRIVER).all(), "polygons": db.query(models.Polygon).all(), "customers": db.query(models.Customer).all(), "status_f": status_f or "", "driver_id": driver_id or "", "polygon_id": polygon_id or "", "customer_id": customer_id or "", "date_from": date_from or "", "date_to": date_to or "", "q": q or "", "app_name": "ГРАУНД | Рейсы"})
 
 @app.get("/users/new", response_class=HTMLResponse)
 def new_user_form(request: Request, current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
