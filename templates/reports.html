@@ -1,15 +1,36 @@
-fastapi==0.115.0
-uvicorn==0.30.0
-sqlalchemy==2.0.31
-python-multipart==0.0.9
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-bcrypt==4.1.2
-python-dotenv==1.0.1
-psycopg2-binary==2.9.9
-openpyxl==3.1.5
-xlsxwriter==3.2.0
-reportlab==4.0.9
-aiofiles==23.3.1
-pydantic-settings==2.5.2
-jinja2==3.1.4
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><h1>Отчеты</h1></div>
+<div class="cards">
+  <a href="/requests?status=new" class="card"><div class="card-title">Заявок всего</div><div class="card-value">{{ summary.requests }}</div></a>
+  <a href="/requests?status=confirmed" class="card"><div class="card-title">Подтверждено</div><div class="card-value">{{ summary.finished }}</div></a>
+  <div class="card"><div class="card-title">Километраж</div><div class="card-value">{{ summary.km }}</div></div>
+  <div class="card"><div class="card-title">Объем</div><div class="card-value">{{ summary.volume }}</div></div>
+  <div class="card"><div class="card-title">КБ мусора</div><div class="card-value">{{ summary.bins }}</div></div>
+  <div class="card"><div class="card-title">Сумма к выплате</div><div class="card-value">{{ "%.0f"|format(summary.sum) }} ₽</div></div>
+</div>
+
+  <form method="get" action="/export/report.csv" style="display:flex;flex-wrap:wrap;gap:10px;align-items:end">
+    <select name="status_f"><option value="">Все статусы</option>{% for s in statuses %}<option value="{{ s.value }}">{{ s.value }}</option>{% endfor %}</select>
+    <select name="driver_id"><option value="">Все водители</option>{% for d in drivers %}<option value="{{ d.id }}">{{ d.full_name }}</option>{% endfor %}</select>
+    <select name="polygon_id"><option value="">Все полигоны</option>{% for p in polygons %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}</select>
+    <select name="customer_id"><option value="">Все компании</option>{% for c in customers %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select>
+    <input type="date" name="date_from" value="{{ request.query_params.date_from or '' }}" />
+    <input type="date" name="date_to" value="{{ request.query_params.date_to or '' }}" />
+    <button class="btn" type="submit">Скачать CSV</button>
+  </form>
+  <form method="get" action="/reports" style="display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin-top:8px">
+    <input name="q" value="{{ request.query_params.q or '' }}" placeholder="Поиск по номеру" />
+    <button class="btn btn-ghost" type="submit">Поиск</button>
+  </form>
+  <form method="get" action="/export/report.xlsx" style="display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin-top:8px">
+    <input type="hidden" name="status_f" value="{{ request.query_params.status_f or '' }}" />
+    <input type="hidden" name="driver_id" value="{{ request.query_params.driver_id or '' }}" />
+    <input type="hidden" name="polygon_id" value="{{ request.query_params.polygon_id or '' }}" />
+    <input type="hidden" name="customer_id" value="{{ request.query_params.customer_id or '' }}" />
+    <input type="hidden" name="date_from" value="{{ request.query_params.date_from or '' }}" />
+    <input type="hidden" name="date_to" value="{{ request.query_params.date_to or '' }}" />
+    <button class="btn btn-ghost" type="submit">Скачать XLSX</button>
+  </form>
+</div>
+{% endblock %}
