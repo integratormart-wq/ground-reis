@@ -1,27 +1,15 @@
-{% extends "base.html" %}
-{% block content %}
-<div class="page-header"><h1>Заявки</h1>
-  {% if user.role != 'driver' %}
-  <a href="/requests/new" class="btn btn-primary">+ Создать заявку</a>
-  {% endif %}
-</div>
-<div class="filters">
-  <form method="get" style="display:flex;flex-wrap:wrap;gap:10px;align-items:end">
-    <input name="q" value="{{ q or request.query_params.q or '' }}" placeholder="Поиск по номеру" />
-    <select name="status_f">
-      <option value="">Все статусы</option>
-      {% for s in statuses %}<option value="{{ s.value }}" {% if (status_f or request.query_params.status_f or '')==s.value %}selected{% endif %}>{{ s.value }}</option>{% endfor %}
-    </select>
-    <select name="kind"><option value="">Направление</option><option value="пухтовоз" {% if (kind_f or request.query_params.kind or '')=='пухтовоз' %}selected{% endif %}>Пухтовозы</option><option value="самосвал" {% if (kind_f or request.query_params.kind or '')=='самосвал' %}selected{% endif %}>Самосвалы</option></select>
-    <button class="btn" type="submit">Фильтр</button>
-  </form>
-</div>
-<div class="table-wrap"><table class="table">
-  <thead><tr><th>Номер</th><th>Дата</th><th>Направление</th><th>Водитель</th><th>Автомобиль</th><th>Статус</th><th></th></tr></thead>
-  <tbody>
-  {% for r in reqs %}
-  <tr><td>{{ r.number }}</td><td>{{ r.planned_date }}</td><td>{{ r.kind.value }}</td><td>{{ r.driver.full_name if r.driver else '—' }}</td><td>{{ r.vehicle.name if r.vehicle else '—' }}</td><td><span class="status">{{ r.status.value }}</span></td><td><a class="link" href="/requests/{{ r.id }}">Открыть</a></td></tr>
-  {% endfor %}
-  </tbody>
-</table></div>
-{% endblock %}
+fastapi==0.115.0
+uvicorn==0.30.0
+sqlalchemy==2.0.31
+python-multipart==0.0.9
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.1.2
+python-dotenv==1.0.1
+psycopg2-binary==2.9.9
+openpyxl==3.1.5
+xlsxwriter==3.2.0
+reportlab==4.0.9
+aiofiles==23.3.1
+pydantic-settings==2.5.2
+jinja2==3.1.4
