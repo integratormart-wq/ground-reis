@@ -1,32 +1,15 @@
-{% extends "base.html" %}
-{% block content %}
-<div class="page-header"><h1>Расчет зарплаты</h1></div>
-<form method="get" class="filters">
-  <select name="driver_id"><option value="">Все водители</option>{% for d in drivers %}<option value="{{ d.id }}" {% if request.query_params.driver_id==d.id|string %}selected{% endif %}>{{ d.full_name }}</option>{% endfor %}</select>
-  <input type="date" name="date_from" value="{{ date_from or '' }}" />
-  <input type="date" name="date_to" value="{{ date_to or '' }}" />
-  <button class="btn" type="submit">Показать</button>
-  <a href="/export/salary.xlsx?driver_id={{ request.query_params.driver_id }}&date_from={{ date_from }}&date_to={{ date_to }}" class="btn">Выгрузить Excel</a>
-</form>
-{% for item in items %}
-<div class="card" style="margin-bottom:12px">
-  <div class="card-title">{{ item.driver.full_name }}</div>
-  <div class="cards" style="margin-top:8px">
-    <div class="card"><div class="card-title">Рейсов</div><div class="card-value">{{ item.trips|length }}</div></div>
-    <div class="card"><div class="card-title">Пухтовозы</div><div class="card-value">{{ item.pukhtovoz_count }}</div></div>
-    <div class="card"><div class="card-title">Самосвалы</div><div class="card-value">{{ item.samosval_count }}</div></div>
-    <div class="card"><div class="card-title">Объем</div><div class="card-value">{{ "%.1f"|format(item.volume) }} м3</div></div>
-    <div class="card"><div class="card-title">КБ</div><div class="card-value">{{ item.bins }}</div></div>
-    <div class="card"><div class="card-title">Сумма</div><div class="card-value">{{ "%.0f"|format(item.total) }} ₽</div></div>
-  </div>
-</div>
-<table class="table">
-  <thead><tr><th>Дата</th><th>Номер</th><th>Направление</th><th>Объем</th><th>КБ</th><th>Полигон</th><th>Сумма</th></tr></thead>
-  <tbody>
-  {% for t in item.trips %}
-  <tr><td>{{ t.planned_date }}</td><td>{{ t.number }}</td><td>{{ t.kind.value }}</td><td>{{ t.actual_volume or t.volume }}</td><td>{{ t.waste_bin_count or 0 }}</td><td>{{ t.polygon.name if t.polygon else '—' }}</td><td>{{ t.sum_driver or 0 }} ₽</td></tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% endfor %}
-{% endblock %}
+fastapi==0.115.0
+uvicorn==0.30.0
+sqlalchemy==2.0.31
+python-multipart==0.0.9
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.1.2
+python-dotenv==1.0.1
+psycopg2-binary==2.9.9
+openpyxl==3.1.5
+xlsxwriter==3.2.0
+reportlab==4.0.9
+aiofiles==23.3.1
+pydantic-settings==2.5.2
+jinja2==3.1.4
