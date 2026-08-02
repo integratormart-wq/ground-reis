@@ -1,16 +1,20 @@
-fastapi==0.115.0
-uvicorn==0.30.0
-sqlalchemy==2.0.31
-python-multipart==0.0.9
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-bcrypt==4.1.2
-python-dotenv==1.0.1
-psycopg2-binary==2.9.9
-openpyxl==3.1.5
-xlsxwriter==3.2.0
-reportlab==4.0.9
-aiofiles==23.3.1
-pydantic-settings==2.5.2
-jinja2==3.1.4
+services:
+  - type: web
+    name: ground-reis
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ground-reis-db
+          property: connectionString
 
+databases:
+  - name: ground-reis-db
+    plan: free
