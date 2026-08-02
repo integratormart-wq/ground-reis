@@ -13,6 +13,7 @@ import bcrypt
 from openpyxl import Workbook
 
 from backend import models, auth
+from backend.auth import create_access_token
 from backend.database import SessionLocal, engine
 from backend.models import UserRole, RequestStatus, TripType, CalcStatus, Polygon, IntegrationSetting, TripArchive
 
