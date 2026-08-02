@@ -2,35 +2,57 @@
 {% block content %}
 <div class="page-header"><h1>Отчеты</h1></div>
 <div class="cards">
-  <a href="/requests?status=new" class="card"><div class="card-title">Заявок всего</div><div class="card-value">{{ summary.requests }}</div></a>
-  <a href="/requests?status=confirmed" class="card"><div class="card-title">Подтверждено</div><div class="card-value">{{ summary.finished }}</div></a>
+  <div class="card"><div class="card-title">Заявок всего</div><div class="card-value">{{ summary.requests }}</div></div>
+  <div class="card"><div class="card-title">Подтверждено</div><div class="card-value">{{ summary.finished }}</div></div>
   <div class="card"><div class="card-title">Километраж</div><div class="card-value">{{ summary.km }}</div></div>
   <div class="card"><div class="card-title">Объем</div><div class="card-value">{{ summary.volume }}</div></div>
   <div class="card"><div class="card-title">КБ мусора</div><div class="card-value">{{ summary.bins }}</div></div>
   <div class="card"><div class="card-title">Сумма к выплате</div><div class="card-value">{{ "%.0f"|format(summary.sum) }} ₽</div></div>
 </div>
 
-  <form method="get" action="/export/report.csv" style="display:flex;flex-wrap:wrap;gap:10px;align-items:end">
-    <select name="status_f"><option value="">Все статусы</option>{% for s in statuses %}<option value="{{ s.value }}">{{ s.value }}</option>{% endfor %}</select>
-    <select name="driver_id"><option value="">Все водители</option>{% for d in drivers %}<option value="{{ d.id }}">{{ d.full_name }}</option>{% endfor %}</select>
-    <select name="polygon_id"><option value="">Все полигоны</option>{% for p in polygons %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}</select>
-    <select name="customer_id"><option value="">Все компании</option>{% for c in customers %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select>
-    <input type="date" name="date_from" value="{{ request.query_params.date_from or '' }}" />
-    <input type="date" name="date_to" value="{{ request.query_params.date_to or '' }}" />
-    <button class="btn" type="submit">Скачать CSV</button>
-  </form>
-  <form method="get" action="/reports" style="display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin-top:8px">
-    <input name="q" value="{{ request.query_params.q or '' }}" placeholder="Поиск по номеру" />
-    <button class="btn btn-ghost" type="submit">Поиск</button>
-  </form>
-  <form method="get" action="/export/report.xlsx" style="display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin-top:8px">
-    <input type="hidden" name="status_f" value="{{ request.query_params.status_f or '' }}" />
-    <input type="hidden" name="driver_id" value="{{ request.query_params.driver_id or '' }}" />
-    <input type="hidden" name="polygon_id" value="{{ request.query_params.polygon_id or '' }}" />
-    <input type="hidden" name="customer_id" value="{{ request.query_params.customer_id or '' }}" />
-    <input type="hidden" name="date_from" value="{{ request.query_params.date_from or '' }}" />
-    <input type="hidden" name="date_to" value="{{ request.query_params.date_to or '' }}" />
-    <button class="btn btn-ghost" type="submit">Скачать XLSX</button>
-  </form>
+<form method="get" action="/reports" style="display:flex;flex-wrap:wrap;gap:10px;align-items:end">
+  <input name="q" value="{{ q or '' }}" placeholder="Поиск по номеру" />
+  <select name="status_f"><option value="">Все статусы</option>{% for s in statuses %}<option value="{{ s.value }}" {% if status_f==s.value %}selected{% endif %}>{{ s.value }}</option>{% endfor %}</select>
+  <select name="driver_id"><option value="">Все водители</option>{% for d in drivers %}<option value="{{ d.id }}" {% if driver_id|string==d.id|string %}selected{% endif %}>{{ d.full_name }}</option>{% endfor %}</select>
+  <select name="polygon_id"><option value="">Все полигоны</option>{% for p in polygons %}<option value="{{ p.id }}" {% if polygon_id|string==p.id|string %}selected{% endif %}>{{ p.name }}</option>{% endfor %}</select>
+  <select name="customer_id"><option value="">Все компании</option>{% for c in customers %}<option value="{{ c.id }}" {% if customer_id|string==c.id|string %}selected{% endif %}>{{ c.name }}</option>{% endfor %}</select>
+  <input type="date" name="date_from" value="{{ date_from or '' }}" />
+  <input type="date" name="date_to" value="{{ date_to or '' }}" />
+  <button class="btn" type="submit">Поиск</button>
+  <button class="btn btn-ghost" type="button" onclick="location.href='/reports'">Сбросить</button>
+</form>
+
+<div class="table-wrap" style="margin-top:14px">
+<table class="table">
+  <thead><tr><th>Номер</th><th>Дата</th><th>Статус</th><th>Водитель</th><th>Полигон</th><th>Компания</th><th>Объем</th><th>КБ</th><th>Сумма</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr><td>{{ r.number }}</td><td>{{ r.planned_date }}</td><td><span class="status">{{ r.status.value }}</span></td><td>{{ r.driver.full_name if r.driver else '—' }}</td><td>{{ r.polygon.name if r.polygon else '—' }}</td><td>{{ r.customer.name if r.customer else '—' }}</td><td>{{ r.actual_volume or r.volume or 0 }}</td><td>{{ r.waste_bin_count or 0 }}</td><td>{{ r.sum_driver or 0 }}</td></tr>
+  {% else %}
+  <tr><td colspan="9" style="text-align:center;padding:18px;color:#888">Ничего не найдено</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
 </div>
+
+<form method="get" action="/export/report.csv" style="display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin-top:14px">
+  <input type="hidden" name="q" value="{{ q or '' }}" />
+  <input type="hidden" name="status_f" value="{{ status_f or '' }}" />
+  <input type="hidden" name="driver_id" value="{{ driver_id or '' }}" />
+  <input type="hidden" name="polygon_id" value="{{ polygon_id or '' }}" />
+  <input type="hidden" name="customer_id" value="{{ customer_id or '' }}" />
+  <input type="hidden" name="date_from" value="{{ date_from or '' }}" />
+  <input type="hidden" name="date_to" value="{{ date_to or '' }}" />
+  <button class="btn btn-ghost" type="submit">Скачать CSV</button>
+</form>
+<form method="get" action="/export/report.xlsx" style="display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin-top:8px">
+  <input type="hidden" name="q" value="{{ q or '' }}" />
+  <input type="hidden" name="status_f" value="{{ status_f or '' }}" />
+  <input type="hidden" name="driver_id" value="{{ driver_id or '' }}" />
+  <input type="hidden" name="polygon_id" value="{{ polygon_id or '' }}" />
+  <input type="hidden" name="customer_id" value="{{ customer_id or '' }}" />
+  <input type="hidden" name="date_from" value="{{ date_from or '' }}" />
+  <input type="hidden" name="date_to" value="{{ date_to or '' }}" />
+  <button class="btn btn-ghost" type="submit">Скачать XLSX</button>
+</form>
 {% endblock %}
