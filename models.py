@@ -6,7 +6,20 @@ from datetime import datetime
 import os
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///ground.db")
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+_engine = None
+
+def _build_engine(url: str):
+    from sqlalchemy import create_engine
+    if url.startswith("sqlite"):
+        return create_engine(url, connect_args={"check_same_thread": False})
+    # Postgres: подключаем опционально, при сбое откатываемся на SQLite
+    try:
+        return create_engine(url, pool_pre_ping=True)
+    except Exception as e:
+        print("DB_ENGINE_FALLBACK", repr(e), flush=True)
+        return create_engine("sqlite:///ground.db", connect_args={"check_same_thread": False})
+
+engine = _build_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 Base = declarative_base()
 
@@ -146,6 +159,7 @@ class TripRequest(Base):
     logist_comment = Column(Text)
     polygon_id = Column(Integer, ForeignKey("polygons.id"), nullable=True)
     waste_bin_count = Column(Integer, nullable=True)
+    bitrix_element_id = Column(Integer, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     driver = relationship("User")
