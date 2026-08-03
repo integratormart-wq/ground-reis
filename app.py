@@ -15,7 +15,19 @@ from openpyxl import Workbook
 from backend import models, auth
 from backend.auth import create_access_token
 from backend.database import SessionLocal, engine
-import backend.bitrix as bitrix
+try:
+    import backend.bitrix as bitrix
+except Exception:
+    # заглушка, если модуль bitrix.py ещё не залит — сайт не падает, интеграция спит
+    class _BitrixStub:
+        @staticmethod
+        def sync_trip(*a, **k): return {"skipped": True, "reason": "bitrix_module_missing"}
+        @staticmethod
+        def delete_trip(*a, **k): return {"skipped": True}
+        @staticmethod
+        def find_smart_process_ids(*a, **k): return {"_error": "bitrix_module_missing"}
+    bitrix = _BitrixStub()
+    print("BOOT bitrix module not found — integration disabled until backend/bitrix.py is deployed", flush=True)
 from backend.models import UserRole, RequestStatus, TripType, CalcStatus, Polygon, IntegrationSetting, TripArchive
 
 load_dotenv()
