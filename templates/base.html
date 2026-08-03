@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{ app_name }}</title>
+  <link rel="manifest" href="/static/manifest.json" />
+  <meta name="theme-color" content="#b91c1c" />
   <link rel="stylesheet" href="/static/css/app.css" />
 </head>
 <body>
@@ -30,5 +32,10 @@
   <footer class="bottom">
     <div>© 2026 ООО «ГРАУНД» | Внутренний сервис учета рейсов</div>
   </footer>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/static/sw.js').catch(function () {});
+    }
+  </script>
 </body>
 </html>

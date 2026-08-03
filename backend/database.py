@@ -1,9 +1,8 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from . import models
+from backend.models import Base, engine
 
-engine = models.engine
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 def get_db():
     db = SessionLocal()
