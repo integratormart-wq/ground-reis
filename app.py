@@ -35,6 +35,7 @@ SECRET_KEY = os.getenv("SECRET_KEY", "ground_secret_key_2026")
 print("BOOT SECRET_KEY_SET=", bool(SECRET_KEY), flush=True)
 
 app = FastAPI(title="GRUND | Рейсы")
+BITRIX_LAST_EVENT = {"received": False}
 root_dir = os.path.dirname(os.path.abspath(__file__))
 app.mount("/static", StaticFiles(directory=os.path.join(root_dir, "static"), html=True), name="static")
 jinja_env = Environment(loader=FileSystemLoader(os.path.join(root_dir, "templates")), autoescape=False)
@@ -750,16 +751,30 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
     else:
         form = await request.form()
         payload = {key: value for key, value in form.multi_items()}
+    global BITRIX_LAST_EVENT
+    BITRIX_LAST_EVENT = {
+        "received": True,
+        "received_at": datetime.now().isoformat(timespec="seconds"),
+        "content_type": content_type,
+        "keys": sorted(str(key) for key in payload.keys() if "token" not in str(key).lower()),
+        "auth_present": bool(payload.get("auth[application_token]") or payload.get("token") or request.query_params.get("token")),
+    }
     settings = db.query(models.IntegrationSetting).filter(models.IntegrationSetting.provider == "bitrix24").first()
     if not settings or not settings.is_active:
+        BITRIX_LAST_EVENT["result"] = "integration_disabled"
         return JSONResponse({"ok": True, "skipped": "integration_disabled"})
     supplied_secret = request.query_params.get("token") or payload.get("token") or payload.get("auth[application_token]")
+    BITRIX_LAST_EVENT["secret_match"] = bool(settings.secret and supplied_secret == settings.secret)
     if settings.secret and supplied_secret != settings.secret:
+        BITRIX_LAST_EVENT["result"] = "secret_mismatch"
         raise HTTPException(403, "Неверный ключ интеграции")
     event, item_id, entity_type_id = bitrix.extract_event_identifiers(payload)
+    BITRIX_LAST_EVENT.update({"event": event, "item_id": item_id, "entity_type_id": entity_type_id})
     if event not in {"ONCRMDYNAMICITEMADD", "ONCRMDYNAMICITEMUPDATE", "ONCRMDYNAMICITEMDELETE"}:
+        BITRIX_LAST_EVENT["result"] = "unsupported_event"
         return JSONResponse({"ok": True, "skipped": "unsupported_event", "event": event})
     if not item_id or not entity_type_id:
+        BITRIX_LAST_EVENT["result"] = "missing_item_or_entity"
         return JSONResponse({"ok": False, "error": "missing_item_or_entity"}, status_code=400)
     if event == "ONCRMDYNAMICITEMDELETE":
         trip = db.query(models.TripRequest).filter(
@@ -769,13 +784,19 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
         if trip:
             trip.status = RequestStatus.CANCELLED
             db.commit()
+        BITRIX_LAST_EVENT["result"] = "cancel"
         return JSONResponse({"ok": True, "action": "cancel", "trip_id": trip.id if trip else None})
     result = bitrix.sync_from_bitrix(item_id, entity_type_id, db, settings=settings)
+    BITRIX_LAST_EVENT["result"] = result
     if result.get("error"):
         db.rollback()
         return JSONResponse(result, status_code=502)
     db.commit()
     return JSONResponse(result)
+
+@app.get("/settings/bitrix/status")
+def bitrix24_status(current_user: models.User = Depends(require_role(UserRole.ADMIN))):
+    return JSONResponse(BITRIX_LAST_EVENT)
 
 @app.post("/requests/{req_id}/delete")
 def delete_request(req_id: int, current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db)):
