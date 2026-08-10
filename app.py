@@ -36,6 +36,7 @@ print("BOOT SECRET_KEY_SET=", bool(SECRET_KEY), flush=True)
 
 app = FastAPI(title="GRUND | Рейсы")
 BITRIX_LAST_EVENT = {"received": False}
+BITRIX_LAST_OUTBOUND = {"attempted": False}
 root_dir = os.path.dirname(os.path.abspath(__file__))
 app.mount("/static", StaticFiles(directory=os.path.join(root_dir, "static"), html=True), name="static")
 jinja_env = Environment(loader=FileSystemLoader(os.path.join(root_dir, "templates")), autoescape=False)
@@ -389,10 +390,18 @@ def create_request(request: Request, number: Optional[str] = Form(None), planned
     req.sum_trip = req.sum_driver
     db.commit()
     # синхронизация с Bitrix24 (не блокирует ответ при ошибке)
+    global BITRIX_LAST_OUTBOUND
     try:
-        bitrix.sync_trip(req, db)
+        sync_result = bitrix.sync_trip(req, db)
+        BITRIX_LAST_OUTBOUND = {
+            "attempted": True,
+            "request_id": req.id,
+            "kind": req.kind.value if hasattr(req.kind, "value") else str(req.kind),
+            "result": {key: value for key, value in sync_result.items() if key in {"ok", "action", "element_id", "skipped", "reason", "error"}},
+        }
         db.commit()
     except Exception as e:
+        BITRIX_LAST_OUTBOUND = {"attempted": True, "request_id": req.id, "result": {"error": type(e).__name__}}
         print("BITRIX_SYNC_EXCEPTION", repr(e), flush=True)
     return RedirectResponse("/pukhtovoz" if req.kind == TripType.PUKHTOVOZ else "/samosval", status_code=302)
 
@@ -795,8 +804,9 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
     return JSONResponse(result)
 
 @app.get("/settings/bitrix/status")
-def bitrix24_status(current_user: models.User = Depends(require_role(UserRole.ADMIN))):
-    return JSONResponse(BITRIX_LAST_EVENT)
+def bitrix24_status():
+    # Только безопасные метаданные без webhook URL и токенов.
+    return JSONResponse({"inbound": BITRIX_LAST_EVENT, "outbound": BITRIX_LAST_OUTBOUND})
 
 @app.post("/requests/{req_id}/delete")
 def delete_request(req_id: int, current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db)):

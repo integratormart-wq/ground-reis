@@ -213,6 +213,19 @@ def test_bitrix_can_upsert_local_trip_from_smart_process(monkeypatch):
     db.close()
 
 
+def test_bitrix_status_probe_is_public_and_reports_both_directions():
+    app_module.BITRIX_LAST_EVENT = {"received": True, "result": "test-inbound"}
+    app_module.BITRIX_LAST_OUTBOUND = {"attempted": True, "result": {"error": "test-outbound"}}
+    app_module.app.dependency_overrides.pop(app_module.get_current_user, None)
+    client = TestClient(app_module.app)
+    response = client.get("/settings/bitrix/status")
+    assert response.status_code == 200
+    assert response.json() == {
+        "inbound": {"received": True, "result": "test-inbound"},
+        "outbound": {"attempted": True, "result": {"error": "test-outbound"}},
+    }
+
+
 def test_ground_bitrix_process_ids_route_and_same_item_id_does_not_collide(monkeypatch):
     db, admin, driver, vt = reset_db()
     settings = models.IntegrationSetting(provider="bitrix24", webhook_url="https://example/rest/1/token/", is_active=True)
