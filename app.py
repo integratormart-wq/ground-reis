@@ -52,7 +52,7 @@ except Exception as e:
     traceback.print_exc()
     sys.exit(1)
 
-# Авто-миграция: добавляем колонку bitrix_element_id, если её ещё нет (create_all не добавляет колонки в существующие таблицы)
+# Авто-миграция: create_all не добавляет колонки в существующие таблицы.
 try:
     with engine.begin() as conn:
         from sqlalchemy import inspect, text
@@ -63,6 +63,11 @@ try:
             print("BOOT migrated: added bitrix_element_id", flush=True)
         else:
             print("BOOT migration: bitrix_element_id already present", flush=True)
+        if "bitrix_entity_type_id" not in cols:
+            conn.execute(text("ALTER TABLE trip_requests ADD COLUMN bitrix_entity_type_id INTEGER"))
+            print("BOOT migrated: added bitrix_entity_type_id", flush=True)
+        else:
+            print("BOOT migration: bitrix_entity_type_id already present", flush=True)
 except Exception as e:
     print("BOOT MIGRATION_WARN", repr(e), flush=True)
 pwd_hash = lambda pw: bcrypt.hashpw(pw[:72].encode(), bcrypt.gensalt()).decode()
@@ -757,7 +762,10 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
     if not item_id or not entity_type_id:
         return JSONResponse({"ok": False, "error": "missing_item_or_entity"}, status_code=400)
     if event == "ONCRMDYNAMICITEMDELETE":
-        trip = db.query(models.TripRequest).filter(models.TripRequest.bitrix_element_id == item_id).first()
+        trip = db.query(models.TripRequest).filter(
+            models.TripRequest.bitrix_element_id == item_id,
+            models.TripRequest.bitrix_entity_type_id == entity_type_id,
+        ).first()
         if trip:
             trip.status = RequestStatus.CANCELLED
             db.commit()

@@ -160,6 +160,7 @@ class TripRequest(Base):
     polygon_id = Column(Integer, ForeignKey("polygons.id"), nullable=True)
     waste_bin_count = Column(Integer, nullable=True)
     bitrix_element_id = Column(Integer, nullable=True, index=True)
+    bitrix_entity_type_id = Column(Integer, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     driver = relationship("User")

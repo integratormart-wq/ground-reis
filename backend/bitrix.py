@@ -1,5 +1,6 @@
 """Двусторонняя синхронизация рейсов со смарт-процессами Bitrix24."""
 import json
+import os
 import re
 import urllib.error
 import urllib.parse
@@ -13,6 +14,12 @@ from backend.models import RequestStatus, TripType
 BITRIX_TIMEOUT = 20
 PROCESS_NAME_PUKHTOVOZ = "пухтовоз"
 PROCESS_NAME_SAMOSVAL = "самосвал"
+PUKHTOVOZ_ENTITY_TYPE_ID = str(os.getenv("BITRIX_PUKHTOVOZ_ENTITY_TYPE_ID", "1088"))
+SAMOSVAL_ENTITY_TYPE_ID = str(os.getenv("BITRIX_SAMOSVAL_ENTITY_TYPE_ID", "1092"))
+KNOWN_PROCESS_KINDS = {
+    PUKHTOVOZ_ENTITY_TYPE_ID: TripType.PUKHTOVOZ,
+    SAMOSVAL_ENTITY_TYPE_ID: TripType.SAMOSVAL,
+}
 
 # Это логические имена. При отправке они автоматически сопоставляются с реальными
 # полями смарт-процесса по коду или русскому названию поля.
@@ -109,7 +116,9 @@ def find_smart_process_ids(webhook_base: str) -> dict:
 
 
 def resolve_process_kinds(webhook_base: str) -> dict:
-    result = {}
+    # Реальные ID портала ООО «ГРАУНД». Автообнаружение ниже дополняет
+    # таблицу, но маршрутизация не зависит от возможного переименования процесса.
+    result = dict(KNOWN_PROCESS_KINDS)
     for entity_id, title in find_smart_process_ids(webhook_base).items():
         if entity_id == "_error":
             continue
@@ -229,8 +238,10 @@ def sync_trip(req, db, settings=None) -> dict:
         return {"error": response["error"], "action": action}
     result = response.get("result", {})
     item_id = result.get("id") or result.get("item", {}).get("id")
-    if item_id and not req.bitrix_element_id:
-        req.bitrix_element_id = int(item_id)
+    if item_id:
+        if not req.bitrix_element_id:
+            req.bitrix_element_id = int(item_id)
+        req.bitrix_entity_type_id = int(entity_id)
         db.add(req)
     print("BITRIX_SYNC_OK", action, entity_id, item_id, req.id, flush=True)
     return {"ok": True, "action": action, "element_id": item_id}
@@ -301,12 +312,22 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     mapping = resolve_field_map(schema) if "_error" not in schema else FIELD_MAP
 
     number = str(_read_logical(item, "number", mapping) or item.get("title") or f"Б24-{item_id}").strip()
-    trip = db.query(models.TripRequest).filter(models.TripRequest.bitrix_element_id == int(item_id)).first()
+    trip = db.query(models.TripRequest).filter(
+        models.TripRequest.bitrix_element_id == int(item_id),
+        models.TripRequest.bitrix_entity_type_id == int(entity_type_id),
+    ).first()
     if not trip:
         trip = db.query(models.TripRequest).filter(models.TripRequest.number == number, models.TripRequest.kind == kind).first()
     created = trip is None
     if created:
-        trip = models.TripRequest(number=number, planned_date=date.today(), kind=kind, status=RequestStatus.NEW, bitrix_element_id=int(item_id))
+        trip = models.TripRequest(
+            number=number,
+            planned_date=date.today(),
+            kind=kind,
+            status=RequestStatus.NEW,
+            bitrix_element_id=int(item_id),
+            bitrix_entity_type_id=int(entity_type_id),
+        )
         db.add(trip)
 
     raw_date = _read_logical(item, "planned_date", mapping)
@@ -329,6 +350,7 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     trip.comment = str(_read_logical(item, "comment", mapping) or "")
     trip.logist_comment = str(_read_logical(item, "logist_comment", mapping) or "")
     trip.bitrix_element_id = int(item_id)
+    trip.bitrix_entity_type_id = int(entity_type_id)
 
     driver = _find_by_name(db, models.User, models.User.full_name, _read_logical(item, "driver_name", mapping))
     if driver and driver.role == models.UserRole.DRIVER:

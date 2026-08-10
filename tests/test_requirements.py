@@ -211,3 +211,34 @@ def test_bitrix_can_upsert_local_trip_from_smart_process(monkeypatch):
     assert trip.vehicle_id == vehicle.id
     assert trip.polygon_id == polygon.id
     db.close()
+
+
+def test_ground_bitrix_process_ids_route_and_same_item_id_does_not_collide(monkeypatch):
+    db, admin, driver, vt = reset_db()
+    settings = models.IntegrationSetting(provider="bitrix24", webhook_url="https://example/rest/1/token/", is_active=True)
+    db.add(settings); db.commit()
+
+    monkeypatch.setattr(app_module.bitrix, "find_smart_process_ids", lambda url: {"_error": "offline"})
+    kinds = app_module.bitrix.resolve_process_kinds(settings.webhook_url)
+    assert kinds["1088"] == models.TripType.PUKHTOVOZ
+    assert kinds["1092"] == models.TripType.SAMOSVAL
+
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: {})
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda url, entity, item: {
+        "id": item,
+        "title": f"{'П' if int(entity) == 1088 else 'С'}-Б24-{item}",
+        "ufReisDate": "2026-08-10",
+        "ufDriver": driver.full_name,
+    })
+    first = app_module.bitrix.sync_from_bitrix(4, 1088, db, settings=settings)
+    second = app_module.bitrix.sync_from_bitrix(4, 1092, db, settings=settings)
+    db.commit()
+
+    trips = db.query(models.TripRequest).filter(models.TripRequest.bitrix_element_id == 4).order_by(models.TripRequest.kind).all()
+    assert first["action"] == "add" and second["action"] == "add"
+    assert len(trips) == 2
+    assert {(t.bitrix_entity_type_id, t.kind) for t in trips} == {
+        (1088, models.TripType.PUKHTOVOZ),
+        (1092, models.TripType.SAMOSVAL),
+    }
+    db.close()
