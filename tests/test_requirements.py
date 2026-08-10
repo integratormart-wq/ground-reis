@@ -81,7 +81,7 @@ def test_manifest_is_installable_and_has_maskable_icon():
     manifest = client.get("/static/manifest.json").json()
     assert manifest["display"] == "standalone"
     assert manifest.get("id")
-    assert any("maskable" in icon.get("purpose", "") for icon in manifest["icons"])
+    assert all(icon.get("purpose") == "any" for icon in manifest["icons"])
     assert client.get("/static/sw.js").status_code == 200
     root_sw = client.get("/sw.js")
     assert root_sw.status_code == 200
