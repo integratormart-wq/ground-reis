@@ -39,26 +39,30 @@
     }
     let installPrompt = null;
     const installButton = document.getElementById('install-app');
-    window.addEventListener('beforeinstallprompt', function (event) {
-      event.preventDefault();
-      installPrompt = event;
-      if (installButton) installButton.hidden = false;
-    });
-    if (installButton) installButton.addEventListener('click', async function () {
-      if (installPrompt) {
-        installPrompt.prompt();
-        await installPrompt.userChoice;
-        installPrompt = null;
-        installButton.hidden = true;
-        return;
-      }
-      alert('Android: откройте меню браузера ⋮ и выберите «Установить приложение». iPhone: нажмите «Поделиться» → «На экран Домой».');
-    });
-    window.addEventListener('appinstalled', function () {
-      if (installButton) installButton.hidden = true;
-    });
-    if (window.matchMedia('(display-mode: standalone)').matches && installButton) {
-      installButton.hidden = true;
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches
+      || navigator.standalone === true
+      || document.referrer.startsWith('android-app://');
+
+    if (isStandalone && installButton) {
+      installButton.remove();
+    } else {
+      window.addEventListener('beforeinstallprompt', function (event) {
+        event.preventDefault();
+        installPrompt = event;
+      });
+      if (installButton) installButton.addEventListener('click', async function () {
+        if (installPrompt) {
+          installPrompt.prompt();
+          await installPrompt.userChoice;
+          installPrompt = null;
+          installButton.remove();
+          return;
+        }
+        alert('Android: откройте меню браузера ⋮ и выберите «Установить приложение». iPhone: нажмите «Поделиться» → «На экран Домой».');
+      });
+      window.addEventListener('appinstalled', function () {
+        if (installButton) installButton.remove();
+      });
     }
   </script>
 </body>

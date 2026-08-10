@@ -90,6 +90,8 @@ def test_manifest_is_installable_and_has_maskable_icon():
     login_html = client.get("/login").text
     assert 'id="install-app"' in login_html
     assert 'id="install-app" class="btn btn-primary btn-sm" type="button" hidden' not in login_html
+    assert "navigator.standalone === true" in login_html
+    assert "installButton.remove()" in login_html
 
 
 def test_bitrix_form_encoder_flattens_nested_fields():
