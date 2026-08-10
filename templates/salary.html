@@ -17,15 +17,15 @@
     <div class="card"><div class="card-title">Пухтовозы</div><div class="card-value">{{ item.pukhtovoz_count }}</div></div>
     <div class="card"><div class="card-title">Самосвалы</div><div class="card-value">{{ item.samosval_count }}</div></div>
     <div class="card"><div class="card-title">Объем</div><div class="card-value">{{ "%.1f"|format(item.volume) }} м3</div></div>
-    <div class="card"><div class="card-title">КБ</div><div class="card-value">{{ item.bins }}</div></div>
+
     <div class="card"><div class="card-title">Сумма</div><div class="card-value">{{ "%.0f"|format(item.total) }} ₽</div></div>
   </div>
 </div>
 <table class="table">
-  <thead><tr><th>Дата</th><th>Номер</th><th>Направление</th><th>Объем</th><th>КБ</th><th>Полигон</th><th>Сумма</th></tr></thead>
+  <thead><tr><th>Дата</th><th>Номер</th><th>Направление</th><th>Объем</th><th>Полигон</th><th>Сумма</th></tr></thead>
   <tbody>
   {% for t in item.trips %}
-  <tr><td>{{ t.planned_date }}</td><td>{{ t.number }}</td><td>{{ t.kind.value }}</td><td>{{ t.actual_volume or t.volume }}</td><td>{{ t.waste_bin_count or 0 }}</td><td>{{ t.polygon.name if t.polygon else '—' }}</td><td>{{ t.sum_driver or 0 }} ₽</td></tr>
+  <tr><td>{{ t.planned_date }}</td><td>{{ t.number }}</td><td>{{ t.kind.value }}</td><td>{{ t.actual_volume if t.actual_volume is not none else t.volume }}</td><td>{{ t.polygon.name if t.polygon else '—' }}</td><td>{{ t.sum_driver or 0 }} ₽</td></tr>
   {% endfor %}
   </tbody>
 </table>

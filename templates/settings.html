@@ -2,7 +2,7 @@
 {% block content %}
 <div class="page-header"><h1>Настройки</h1></div>
 
-<h3>Тарифы</h3>
+<h3 id="tariffs">Тарифы</h3>
 <table class="table">
   <thead><tr><th>Название</th><th>Направление</th><th>Формула</th><th>Ставка за рейс</th><th>Активен</th><th></th></tr></thead>
   <tbody>
@@ -26,21 +26,27 @@
 <form method="post" action="/settings/tariffs" class="filters">
   <input name="title" placeholder="Название" required />
   <select name="kind">
-    <option value="pukhtovoz">Пухтовоз</option>
-    <option value="samosval">Самосвал</option>
+    <option value="пухтовоз">Пухтовоз</option>
+    <option value="самосвал">Самосвал</option>
+  </select>
+  <select name="vehicle_type_id" required>
+    {% for vt in vtypes %}<option value="{{ vt.id }}">{{ vt.name }}</option>{% endfor %}
   </select>
   <select name="formula">
     <option value="trip">За рейс</option>
     <option value="km">За км</option>
     <option value="volume">За объем</option>
   </select>
-  <input name="trip_price" type="number" step="any" placeholder="Ставка" required />
+  <input name="trip_price" type="number" step="any" placeholder="За рейс" value="0" />
+  <input name="km_price" type="number" step="any" placeholder="За км" value="0" />
+  <input name="volume_price" type="number" step="any" placeholder="За м3" value="0" />
+  <input name="fixed_sum" type="number" step="any" placeholder="Фиксировано" value="0" />
   <label><input type="checkbox" name="is_active" checked /> Активен</label>
   <button class="btn" type="submit">Добавить тариф</button>
 </form>
 {% endif %}
 
-<h3>Автомобили</h3>
+<h3 id="vehicles">Автомобили</h3>
 <table class="table">
   <thead><tr><th>Имя</th><th>Госномер</th><th>Тип</th><th>Вместимость</th><th></th></tr></thead>
   <tbody>
@@ -73,7 +79,7 @@
 </form>
 {% endif %}
 
-<h3>Заказчики</h3>
+<h3 id="customers">Заказчики</h3>
 <table class="table">
   <thead><tr><th>Имя</th><th>Адрес</th><th></th></tr></thead>
   <tbody>
@@ -98,7 +104,7 @@
 </form>
 {% endif %}
 
-<h3>Типы грузов</h3>
+<h3 id="cargo">Типы грузов</h3>
 <table class="table">
   <thead><tr><th>Имя</th><th>Единица</th><th></th></tr></thead>
   <tbody>
@@ -123,7 +129,7 @@
 </form>
 {% endif %}
 
-<h3>Полигоны</h3>
+<h3 id="polygons">Полигоны</h3>
 <table class="table">
   <thead><tr><th>Название</th><th>Адрес</th><th></th></tr></thead>
   <tbody>

@@ -20,6 +20,7 @@
       {% endfor %}
     </nav>
     <div class="userbox">
+      <button id="install-app" class="btn btn-primary btn-sm" type="button" hidden>Установить приложение</button>
       <span class="user-name">{{ user.full_name }}</span>
       <a href="/logout" class="btn btn-ghost btn-sm">Выход</a>
     </div>
@@ -34,8 +35,25 @@
   </footer>
   <script>
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/static/sw.js').catch(function () {});
+      navigator.serviceWorker.register('/sw.js').catch(function () {});
     }
+    let installPrompt = null;
+    const installButton = document.getElementById('install-app');
+    window.addEventListener('beforeinstallprompt', function (event) {
+      event.preventDefault();
+      installPrompt = event;
+      if (installButton) installButton.hidden = false;
+    });
+    if (installButton) installButton.addEventListener('click', async function () {
+      if (!installPrompt) return;
+      installPrompt.prompt();
+      await installPrompt.userChoice;
+      installPrompt = null;
+      installButton.hidden = true;
+    });
+    window.addEventListener('appinstalled', function () {
+      if (installButton) installButton.hidden = true;
+    });
   </script>
 </body>
 </html>

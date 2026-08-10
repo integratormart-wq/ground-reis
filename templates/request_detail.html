@@ -21,7 +21,6 @@
   <div><b>Факт. объем:</b> {{ req.actual_volume or '—' }}</div>
   <div><b>Тариф:</b> {{ req.tariff.title if req.tariff else '—' }}</div>
   <div><b>Полигон:</b> {{ req.polygon.name if req.polygon else '—' }}</div>
-  <div><b>КБ мусора:</b> {{ req.waste_bin_count or '—' }}</div>
   <div><b>Комментарий:</b> {{ req.comment or '—' }}</div>
 </div>
 {% if user.role == 'driver' %}
