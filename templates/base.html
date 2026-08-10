@@ -20,7 +20,7 @@
       {% endfor %}
     </nav>
     <div class="userbox">
-      <button id="install-app" class="btn btn-primary btn-sm" type="button" hidden>Установить приложение</button>
+      <button id="install-app" class="btn btn-primary btn-sm" type="button">Установить приложение</button>
       <span class="user-name">{{ user.full_name }}</span>
       <a href="/logout" class="btn btn-ghost btn-sm">Выход</a>
     </div>
@@ -45,15 +45,21 @@
       if (installButton) installButton.hidden = false;
     });
     if (installButton) installButton.addEventListener('click', async function () {
-      if (!installPrompt) return;
-      installPrompt.prompt();
-      await installPrompt.userChoice;
-      installPrompt = null;
-      installButton.hidden = true;
+      if (installPrompt) {
+        installPrompt.prompt();
+        await installPrompt.userChoice;
+        installPrompt = null;
+        installButton.hidden = true;
+        return;
+      }
+      alert('Android: откройте меню браузера ⋮ и выберите «Установить приложение». iPhone: нажмите «Поделиться» → «На экран Домой».');
     });
     window.addEventListener('appinstalled', function () {
       if (installButton) installButton.hidden = true;
     });
+    if (window.matchMedia('(display-mode: standalone)').matches && installButton) {
+      installButton.hidden = true;
+    }
   </script>
 </body>
 </html>

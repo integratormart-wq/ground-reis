@@ -87,6 +87,9 @@ def test_manifest_is_installable_and_has_maskable_icon():
     assert root_sw.status_code == 200
     assert root_sw.headers.get("service-worker-allowed") == "/"
     assert "register('/sw.js')" in client.get("/login").text
+    login_html = client.get("/login").text
+    assert 'id="install-app"' in login_html
+    assert 'id="install-app" class="btn btn-primary btn-sm" type="button" hidden' not in login_html
 
 
 def test_bitrix_form_encoder_flattens_nested_fields():
