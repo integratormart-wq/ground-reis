@@ -1,12 +1,14 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-header"><h1>Вход в ГРАУНД Рейсы</h1></div>
-<div class="form">
+<section class="auth-shell">
+  <img class="auth-logo" src="/static/logo-ground-dark.svg?v=5" alt="ООО ГРАУНД" />
+  <h1>Вход в систему</h1>
+  <p class="auth-lead">Корпоративный сервис учета рейсов</p>
   <form method="post" action="/login">
-    <label>Логин<input name="username" required /></label>
-    <label>Пароль<input type="password" name="password" required /></label>
+    <label>Логин<input name="username" autocomplete="username" required /></label>
+    <label>Пароль<input type="password" name="password" autocomplete="current-password" required /></label>
     <button class="btn btn-primary" type="submit">Войти</button>
     {% if error %}<p class="muted">Неверный логин или пароль</p>{% endif %}
   </form>
-</div>
+</section>
 {% endblock %}

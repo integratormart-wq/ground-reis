@@ -1,23 +1,69 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-header">
-  <h1>{{ app_name }}</h1>
-  <p class="muted">Добро пожаловать в корпоративный сервис учета рейсов.</p>
-</div>
+<section class="dashboard-hero">
+  <div>
+    <div class="hero-kicker">Операционный центр</div>
+    <h1><span>ГРАУНД</span> | Рейсы</h1>
+    <p>Корпоративная система контроля рейсов, техники, полигонов и расчетов с водителями.</p>
+  </div>
+  {% if user.role != 'driver' %}
+  <div class="hero-actions">
+    <a href="/requests/new" class="btn btn-primary">+ Создать заявку</a>
+    <a href="/requests" class="btn btn-ghost">Все заявки</a>
+  </div>
+  {% endif %}
+</section>
+
 <div class="cards">
-  <div class="card"><div class="card-title">Заявки сегодня</div><div class="card-value">{{ stats.today }}</div></div>
-  <div class="card"><div class="card-title">Новые заявки</div><div class="card-value">{{ stats.new }}</div></div>
-  <div class="card"><div class="card-title">В работе</div><div class="card-value">{{ stats.in_work }}</div></div>
-  <div class="card"><div class="card-title">Пухтовозы</div><div class="card-value">{{ stats.pukhtovoz }}</div></div>
-  <div class="card"><div class="card-title">Самосвалы</div><div class="card-value">{{ stats.samosval }}</div></div>
-  <div class="card"><div class="card-title">Сумма водителям сегодня</div><div class="card-value">{{ "%.0f"|format(stats.sum_today) }} ₽</div></div>
+  <article class="card">
+    <div class="card-head">
+      <div class="card-title">Заявки сегодня</div>
+      <div class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M7 3v3m10-3v3M4 9h16M5 5h14a1 1 0 0 1 1 1v14H4V6a1 1 0 0 1 1-1Z" stroke-width="1.8"/></svg></div>
+    </div>
+    <div class="card-value">{{ stats.today }}</div>
+  </article>
+  <article class="card">
+    <div class="card-head">
+      <div class="card-title">Новые заявки</div>
+      <div class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke-width="2" stroke-linecap="round"/></svg></div>
+    </div>
+    <div class="card-value">{{ stats.new }}</div>
+  </article>
+  <article class="card">
+    <div class="card-head">
+      <div class="card-title">В работе</div>
+      <div class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M4 17h16M6 17l2-8h8l2 8M9 9V6h6v3" stroke-width="1.8" stroke-linejoin="round"/></svg></div>
+    </div>
+    <div class="card-value">{{ stats.in_work }}</div>
+  </article>
+  <article class="card">
+    <div class="card-head">
+      <div class="card-title">Пухтовозы</div>
+      <div class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M3 7h12v9H3V7Zm12 3h4l2 3v3h-6v-6ZM7 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm11 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke-width="1.7" stroke-linejoin="round"/></svg></div>
+    </div>
+    <div class="card-value">{{ stats.pukhtovoz }}</div>
+  </article>
+  <article class="card">
+    <div class="card-head">
+      <div class="card-title">Самосвалы</div>
+      <div class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M3 8h11l-2 7H3V8Zm11 3h4l3 3v1h-9l2-4ZM7 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm11 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke-width="1.7" stroke-linejoin="round"/></svg></div>
+    </div>
+    <div class="card-value">{{ stats.samosval }}</div>
+  </article>
+  <article class="card">
+    <div class="card-head">
+      <div class="card-title">Выплаты сегодня</div>
+      <div class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M4 7h16v11H4V7Zm3 4h10M7 14h6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+    </div>
+    <div class="card-value">{{ "%.0f"|format(stats.sum_today) }} <small>₽</small></div>
+  </article>
 </div>
+
 {% if user.role != 'driver' %}
 <div class="actions">
-  <a href="/requests/new" class="btn btn-primary">+ Создать заявку</a>
-  <a href="/requests" class="btn">Все заявки</a>
-  <a href="/reports" class="btn">Отчеты</a>
-  <a href="/salary" class="btn">Зарплата</a>
+  <a href="/reports" class="btn btn-ghost">Отчеты</a>
+  <a href="/salary" class="btn btn-ghost">Зарплата</a>
+  <a href="/polygons" class="btn btn-ghost">Полигоны</a>
 </div>
 {% endif %}
 {% endblock %}

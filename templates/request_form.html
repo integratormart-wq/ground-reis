@@ -1,80 +1,111 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-header"><h1>Создание заявки</h1></div>
-<div class="form">
-  <form method="post" action="/requests/new" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
-    <label>Номер заявки<input name="number" placeholder="{{ next_number_hint or 'П-1' }}" /></label>
-    <label>Дата<input type="date" name="planned_date" required /></label>
-    <label>Время<input type="time" name="planned_time" /></label>
-    <label>Направление
-      <select name="kind" id="kind" required>
-        <option value="пухтовоз" {% if kind=='пухтовоз' %}selected{% endif %}>Пухтовоз</option>
-        <option value="самосвал" {% if kind=='самосвал' %}selected{% endif %}>Самосвал</option>
-      </select>
-    </label>
-    <label>Водитель
-      <select name="driver_id" required>
-        <option value="">— выберите —</option>
-        {% for d in drivers %}
-        <option value="{{ d.id }}">{{ d.full_name }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Автомобиль
-      <select name="vehicle_id">
-        <option value="">—</option>
-        {% for v in vehicles %}
-        <option value="{{ v.id }}">{{ v.name }} {{ v.plate }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Адрес подачи<input name="load_address" /></label>
-    <label>Адрес выгрузки<input name="unload_address" /></label>
-    <label>Маршрут<input name="route_name" /></label>
-    <label>Километраж<input type="number" step="any" name="km" id="km" value="0" /></label>
-    <label>Объем<input type="number" step="any" name="volume" id="volume" value="0" /></label>
-    <label>Количество рейсов<input type="number" name="trips_count" value="1" /></label>
-    <label>Тип груза
-      <select name="cargo_type_id">
-        <option value="">—</option>
-        {% for c in cargo_types %}
-        <option value="{{ c.id }}">{{ c.name }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Заказчик
-      <select id="customer_id" name="customer_id">
-        <option value="">— выберите или введите —</option>
-        {% for c in customers %}
-        <option value="{{ c.id }}">{{ c.name }}</option>
-        {% endfor %}
-      </select>
-      <input id="customer_name_manual" placeholder="Или новый заказчик" />
-    </label>
-    <label>Полигон
-      <select name="polygon_id">
-        <option value="">—</option>
-        {% for p in polygons %}
-        <option value="{{ p.id }}">{{ p.name }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Тариф
-      <select name="tariff_id" id="tariff_id">
-        <option value="">— авто —</option>
-        {% for t in tariffs %}
-        {% if t.kind.value == kind %}<option value="{{ t.id }}">{{ t.title }}</option>{% endif %}
-        {% endfor %}
-      </select>
-    </label>
-    <label>Комментарий<textarea name="comment" rows="3"></textarea></label>
-    <div class="form-row">
-      <div><b>Сумма:</b> <span id="sum_driver">0</span> ₽</div>
-      <button class="btn btn-primary" type="submit">Создать</button>
-      <a class="btn btn-ghost" href="{% if kind=='самосвал' %}/samosval{% else %}/pukhtovoz{% endif %}">Отмена</a>
-    </div>
-  </form>
+<div class="page-header">
+  <div>
+    <h1>Создание заявки</h1>
+    <p class="muted">Заполните данные рейса — сумма водителю рассчитается автоматически.</p>
+  </div>
 </div>
+
+<form class="request-form" method="post" action="/requests/new">
+  <section class="form-section">
+    <div class="form-section-head"><span class="form-section-index">01</span><h2>Основная информация</h2></div>
+    <div class="form-grid">
+      <label>Номер заявки<input name="number" placeholder="{{ next_number_hint or 'П-1' }}" /></label>
+      <label>Дата<input type="date" name="planned_date" required /></label>
+      <label>Время<input type="time" name="planned_time" /></label>
+      <label>Направление
+        <select name="kind" id="kind" required>
+          <option value="пухтовоз" {% if kind=='пухтовоз' %}selected{% endif %}>Пухтовоз</option>
+          <option value="самосвал" {% if kind=='самосвал' %}selected{% endif %}>Самосвал</option>
+        </select>
+      </label>
+    </div>
+  </section>
+
+  <section class="form-section">
+    <div class="form-section-head"><span class="form-section-index">02</span><h2>Клиент и объект</h2></div>
+    <div class="form-grid">
+      <label>Заказчик
+        <select id="customer_id" name="customer_id">
+          <option value="">— выберите —</option>
+          {% for c in customers %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Новый заказчик<input id="customer_name_manual" name="customer_name_manual" placeholder="Введите название" /></label>
+      <label>Адрес подачи<input name="load_address" placeholder="Откуда забрать" /></label>
+      <label>Адрес выгрузки<input name="unload_address" placeholder="Куда доставить" /></label>
+      <label>Полигон
+        <select name="polygon_id">
+          <option value="">— выберите —</option>
+          {% for p in polygons %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Тип груза
+        <select name="cargo_type_id">
+          <option value="">— выберите —</option>
+          {% for c in cargo_types %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+        </select>
+      </label>
+    </div>
+  </section>
+
+  <section class="form-section">
+    <div class="form-section-head"><span class="form-section-index">03</span><h2>Техника и экипаж</h2></div>
+    <div class="form-grid">
+      <label>Водитель
+        <select name="driver_id" required>
+          <option value="">— выберите —</option>
+          {% for d in drivers %}<option value="{{ d.id }}">{{ d.full_name }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Автомобиль
+        <select name="vehicle_id">
+          <option value="">— выберите —</option>
+          {% for v in vehicles %}<option value="{{ v.id }}">{{ v.name }} {{ v.plate }}</option>{% endfor %}
+        </select>
+      </label>
+    </div>
+  </section>
+
+  <section class="form-section">
+    <div class="form-section-head"><span class="form-section-index">04</span><h2>Параметры рейса</h2></div>
+    <div class="form-grid">
+      <label>Маршрут<input name="route_name" placeholder="Название или описание маршрута" /></label>
+      <label>Километраж, км<input type="number" step="any" name="km" id="km" value="0" /></label>
+      <label>Объем, м³<input type="number" step="any" name="volume" id="volume" value="0" /></label>
+      <label>Количество рейсов<input type="number" name="trips_count" value="1" min="1" /></label>
+    </div>
+  </section>
+
+  <section class="form-section">
+    <div class="form-section-head"><span class="form-section-index">05</span><h2>Оплата и тариф</h2></div>
+    <div class="form-grid">
+      <label>Тариф
+        <select name="tariff_id" id="tariff_id">
+          <option value="">— автоматически —</option>
+          {% for t in tariffs %}{% if t.kind.value == kind %}<option value="{{ t.id }}">{{ t.title }}</option>{% endif %}{% endfor %}
+        </select>
+      </label>
+      <div class="payment-summary">
+        <div><span>Сумма водителю</span><strong><span id="sum_driver">0</span> ₽</strong></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="form-section">
+    <div class="form-section-head"><span class="form-section-index">06</span><h2>Комментарий</h2></div>
+    <div class="form-grid">
+      <label class="wide">Комментарий к заявке<textarea name="comment" rows="4" placeholder="Дополнительная информация для логиста или водителя"></textarea></label>
+    </div>
+  </section>
+
+  <div class="form-actions">
+    <a class="btn btn-ghost" href="{% if kind=='самосвал' %}/samosval{% else %}/pukhtovoz{% endif %}">Отмена</a>
+    <button class="btn btn-primary" type="submit">Создать заявку</button>
+  </div>
+</form>
+
 <script>
 const tariffs = [
 {% for t in tariffs %}
@@ -101,13 +132,13 @@ function recalc(){
   const vol = parseFloat(volEl.value || 0);
   const previousId = tariffEl.value;
   const list = tariffs.filter(t => t.kind === kind || t.title.toLowerCase().includes(kind));
-  tariffEl.innerHTML = '<option value="">— авто —</option>' + list.map(t => `<option value="${t.id}">${t.title}</option>`).join('');
+  tariffEl.innerHTML = '<option value="">— автоматически —</option>' + list.map(t => `<option value="${t.id}">${t.title}</option>`).join('');
   if (previousId && list.some(t => String(t.id) === String(previousId))) tariffEl.value = previousId;
   const chosen = list.find(t => String(t.id) === String(tariffEl.value)) || list[0] || {};
   let sum = 0;
   sum += (km || 0) * parseFloat(chosen.km_price || 0);
   sum += (vol || 0) * parseFloat(chosen.volume_price || 0);
-  sum += (parseFloat(document.querySelector('input[name=trips_count]').value || 1)) * parseFloat(chosen.trip_price || 0);
+  sum += parseFloat(document.querySelector('input[name=trips_count]').value || 1) * parseFloat(chosen.trip_price || 0);
   sum += parseFloat(chosen.fixed_sum || 0);
   sumEl.textContent = (sum || 0).toFixed(2);
 }
