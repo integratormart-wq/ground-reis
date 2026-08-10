@@ -267,32 +267,50 @@ def requests_list(request: Request, status_f: Optional[str] = None, kind: Option
     return render_template("requests.html", {"request": request, "user": current_user, "menu": menu, "reqs": rs, "drivers": drivers, "statuses": RequestStatus, "kind_f": kind or "", "status_f": status_f or "", "q": q or "", "app_name": "ГРАУНД | Рейсы"})
 
 @app.get("/pukhtovoz", response_class=HTMLResponse)
-def pukhtovoz_list(request: Request, status_f: Optional[str] = None, q: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+def pukhtovoz_list(request: Request, status_f: Optional[str] = None, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, q: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
     rs = db.query(models.TripRequest).filter(models.TripRequest.kind == TripType.PUKHTOVOZ)
     if current_user.role == UserRole.DRIVER:
         rs = rs.filter(models.TripRequest.driver_id == current_user.id)
+    elif driver_id:
+        rs = rs.filter(models.TripRequest.driver_id == int(driver_id))
     if status_f:
-        rs = rs.filter(models.TripRequest.status == RequestStatus(status_f))
+        try:
+            rs = rs.filter(models.TripRequest.status == RequestStatus(status_f))
+        except ValueError:
+            pass
+    if date_from:
+        rs = rs.filter(models.TripRequest.planned_date >= date.fromisoformat(date_from))
+    if date_to:
+        rs = rs.filter(models.TripRequest.planned_date <= date.fromisoformat(date_to))
     if q:
         rs = rs.filter(models.TripRequest.number.contains(q))
     rs = rs.order_by(models.TripRequest.planned_date.desc()).all()
     drivers = db.query(models.User).filter(models.User.role == UserRole.DRIVER).all()
-    return render_template("trips_kind.html", {"request": request, "user": current_user, "menu": menu, "reqs": rs, "drivers": drivers, "statuses": RequestStatus, "kind_label": "Пухтовозы", "kind": "пухтовоз", "new_url": "/pukhtovoz/new", "app_name": "ГРАУНД | Рейсы"})
+    return render_template("trips_kind.html", {"request": request, "user": current_user, "menu": menu, "reqs": rs, "drivers": drivers, "statuses": RequestStatus, "kind_label": "Пухтовозы", "kind": "пухтовоз", "new_url": "/pukhtovoz/new", "status_f": status_f or "", "driver_id": driver_id or "", "date_from": date_from or "", "date_to": date_to or "", "q": q or "", "app_name": "ГРАУНД | Рейсы"})
 
 @app.get("/samosval", response_class=HTMLResponse)
-def samosval_list(request: Request, status_f: Optional[str] = None, q: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+def samosval_list(request: Request, status_f: Optional[str] = None, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, q: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
     rs = db.query(models.TripRequest).filter(models.TripRequest.kind == TripType.SAMOSVAL)
     if current_user.role == UserRole.DRIVER:
         rs = rs.filter(models.TripRequest.driver_id == current_user.id)
+    elif driver_id:
+        rs = rs.filter(models.TripRequest.driver_id == int(driver_id))
     if status_f:
-        rs = rs.filter(models.TripRequest.status == RequestStatus(status_f))
+        try:
+            rs = rs.filter(models.TripRequest.status == RequestStatus(status_f))
+        except ValueError:
+            pass
+    if date_from:
+        rs = rs.filter(models.TripRequest.planned_date >= date.fromisoformat(date_from))
+    if date_to:
+        rs = rs.filter(models.TripRequest.planned_date <= date.fromisoformat(date_to))
     if q:
         rs = rs.filter(models.TripRequest.number.contains(q))
     rs = rs.order_by(models.TripRequest.planned_date.desc()).all()
     drivers = db.query(models.User).filter(models.User.role == UserRole.DRIVER).all()
-    return render_template("trips_kind.html", {"request": request, "user": current_user, "menu": menu, "reqs": rs, "drivers": drivers, "statuses": RequestStatus, "kind_label": "Самосвалы", "kind": "самосвал", "new_url": "/samosval/new", "app_name": "ГРАУНД | Рейсы"})
+    return render_template("trips_kind.html", {"request": request, "user": current_user, "menu": menu, "reqs": rs, "drivers": drivers, "statuses": RequestStatus, "kind_label": "Самосвалы", "kind": "самосвал", "new_url": "/samosval/new", "status_f": status_f or "", "driver_id": driver_id or "", "date_from": date_from or "", "date_to": date_to or "", "q": q or "", "app_name": "ГРАУНД | Рейсы"})
 
 @app.get("/requests/new", response_class=HTMLResponse)
 def new_request(request: Request, current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db)):
@@ -831,15 +849,30 @@ def logout():
     return resp
 
 @app.get("/export/requests.csv")
-def export_csv(status_f: Optional[str] = None, db: Session = Depends(get_db)):
+def export_csv(status_f: Optional[str] = None, kind: Optional[str] = None, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, db: Session = Depends(get_db)):
     q = db.query(models.TripRequest)
-    if status_f: q = q.filter(models.TripRequest.status == RequestStatus(status_f))
-    rows = q.all()
+    if status_f:
+        try:
+            q = q.filter(models.TripRequest.status == RequestStatus(status_f))
+        except ValueError:
+            pass
+    if kind:
+        try:
+            q = q.filter(models.TripRequest.kind == TripType(kind))
+        except ValueError:
+            pass
+    if driver_id:
+        q = q.filter(models.TripRequest.driver_id == int(driver_id))
+    if date_from:
+        q = q.filter(models.TripRequest.planned_date >= date.fromisoformat(date_from))
+    if date_to:
+        q = q.filter(models.TripRequest.planned_date <= date.fromisoformat(date_to))
+    rows = q.order_by(models.TripRequest.planned_date.desc()).all()
     out = io.StringIO(); writer = csv.writer(out)
     writer.writerow(["Номер", "Дата", "Статус", "Водитель", "Автомобиль", "Сумма водителю"])
     for r in rows:
         writer.writerow([r.number, r.planned_date, r.status.value, r.driver.full_name if r.driver else "", r.vehicle.name if r.vehicle else "", r.sum_driver or 0])
-    return Response(content=out.getvalue(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=requests.csv"})
+    return Response(content="\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=requests.csv"})
 
 @app.get("/export/salary.xlsx")
 def export_xlsx(db: Session = Depends(get_db)):

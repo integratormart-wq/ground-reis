@@ -8,15 +8,27 @@
 </div>
 <div class="filters">
   <form method="get" style="display:flex;flex-wrap:wrap;gap:10px;align-items:end">
-    <input name="q" value="{{ request.query_params.q or '' }}" placeholder="Поиск по номеру" />
-    <select name="status_f">
-      <option value="">Все статусы</option>
-      {% for s in statuses %}
-      <option value="{{ s.value }}" {% if request.query_params.status_f==s.value %}selected{% endif %}>{{ s.value }}</option>
-      {% endfor %}
-    </select>
-    <button class="btn" type="submit">Фильтр</button>
-    <a class="btn btn-ghost" href="/export/requests.csv?status_f={{ request.query_params.status_f or '' }}">CSV</a>
+    <label>С<input type="date" name="date_from" value="{{ date_from or '' }}" /></label>
+    <label>По<input type="date" name="date_to" value="{{ date_to or '' }}" /></label>
+    {% if user.role != 'driver' %}
+    <label>Водитель
+      <select name="driver_id">
+        <option value="">Все водители</option>
+        {% for d in drivers %}<option value="{{ d.id }}" {% if driver_id==d.id|string %}selected{% endif %}>{{ d.full_name }}</option>{% endfor %}
+      </select>
+    </label>
+    {% endif %}
+    <label>Статус
+      <select name="status_f">
+        <option value="">Все статусы</option>
+        {% for s in statuses %}
+        <option value="{{ s.value }}" {% if status_f==s.value %}selected{% endif %}>{{ s.value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Номер заявки<input name="q" value="{{ q or '' }}" placeholder="Введите номер" /></label>
+    <button class="btn btn-primary" type="submit">Поиск</button>
+    <a class="btn btn-ghost" href="/export/requests.csv?kind={{ kind }}&status_f={{ status_f }}&driver_id={{ driver_id }}&date_from={{ date_from }}&date_to={{ date_to }}">CSV</a>
   </form>
 </div>
 <div class="table-wrap">

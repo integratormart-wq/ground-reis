@@ -76,6 +76,60 @@ def test_polygon_page_filters_selected_polygon_and_period_and_export_has_detail_
     db.close()
 
 
+def test_polygon_filter_has_search_and_no_driver_field_and_delete_updates_totals():
+    db, admin, driver, vt = reset_db()
+    polygon = models.Polygon(name="Полигон Удаление")
+    vehicle = models.Vehicle(name="Авто удаление", plate="Т555ТТ78", type_id=vt.id)
+    db.add_all([polygon, vehicle]); db.flush()
+    trip = models.TripRequest(
+        number="П-DEL", planned_date=date(2026, 8, 11), driver_id=driver.id,
+        vehicle_id=vehicle.id, polygon_id=polygon.id, volume=17,
+        kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.ASSIGNED,
+    )
+    db.add(trip); db.commit()
+    client = client_as(admin)
+
+    page = client.get(f"/polygons?polygon_id={polygon.id}&date_from=2026-08-01&date_to=2026-08-31")
+    assert page.status_code == 200
+    assert 'type="submit">Поиск</button>' in page.text
+    assert 'name="driver_id"' not in page.text
+    assert ">1<" in page.text and (">17.0<" in page.text or ">17<" in page.text)
+
+    deleted = client.post(f"/requests/{trip.id}/delete", follow_redirects=False)
+    assert deleted.status_code == 302
+    updated = client.get(f"/polygons?polygon_id={polygon.id}&date_from=2026-08-01&date_to=2026-08-31")
+    assert ">0<" in updated.text
+    assert db.query(models.TripRequest).filter(models.TripRequest.id == trip.id).first() is None
+    db.close()
+
+
+def test_pukhtovoz_and_samosval_filters_by_period_driver_and_status():
+    db, admin, driver, vt = reset_db()
+    vehicle = models.Vehicle(name="Авто фильтр", plate="К777КК78", type_id=vt.id)
+    db.add(vehicle); db.flush()
+    db.add_all([
+        models.TripRequest(number="П-FIND", planned_date=date(2026, 8, 5), driver_id=driver.id, vehicle_id=vehicle.id, kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.IN_WORK),
+        models.TripRequest(number="П-OUT", planned_date=date(2026, 7, 5), driver_id=driver.id, vehicle_id=vehicle.id, kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.IN_WORK),
+        models.TripRequest(number="С-FIND", planned_date=date(2026, 8, 6), driver_id=driver.id, vehicle_id=vehicle.id, kind=models.TripType.SAMOSVAL, status=models.RequestStatus.NEW),
+    ])
+    db.commit()
+    client = client_as(admin)
+
+    page = client.get(f"/pukhtovoz?date_from=2026-08-01&date_to=2026-08-31&driver_id={driver.id}&status_f={models.RequestStatus.IN_WORK.value}")
+    assert page.status_code == 200
+    assert "П-FIND" in page.text and "П-OUT" not in page.text and "С-FIND" not in page.text
+    assert 'name="date_from"' in page.text and 'name="date_to"' in page.text
+    assert 'name="driver_id"' in page.text
+    assert 'type="submit">Поиск</button>' in page.text
+    export = client.get(f"/export/requests.csv?kind=пухтовоз&date_from=2026-08-01&date_to=2026-08-31&driver_id={driver.id}&status_f={models.RequestStatus.IN_WORK.value}")
+    export_text = export.content.decode("utf-8-sig")
+    assert "П-FIND" in export_text and "П-OUT" not in export_text and "С-FIND" not in export_text
+
+    samosval = client.get(f"/samosval?date_from=2026-08-01&date_to=2026-08-31&driver_id={driver.id}&status_f={models.RequestStatus.NEW.value}")
+    assert "С-FIND" in samosval.text and "П-FIND" not in samosval.text
+    db.close()
+
+
 def test_manifest_is_installable_and_has_maskable_icon():
     client = TestClient(app_module.app)
     manifest = client.get("/static/manifest.json").json()
