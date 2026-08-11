@@ -67,7 +67,17 @@ pwd_hash = lambda pw: bcrypt.hashpw(pw[:72].encode(), bcrypt.gensalt()).decode()
 pwd_check = lambda pw, h: bcrypt.checkpw(pw[:72].encode(), h.encode())
 
 _DB_READY = threading.Event()
-_DEFER_DB_INIT = os.getenv("RENDER", "").lower() == "true"
+_DEFER_DB_INIT = (
+    os.getenv("RENDER", "").lower() == "true"
+    or bool(os.getenv("RENDER_SERVICE_ID"))
+    or bool(os.getenv("PORT"))
+    or engine.dialect.name != "sqlite"
+)
+print(
+    f"BOOT deferred_db_init={_DEFER_DB_INIT} dialect={engine.dialect.name} "
+    f"port_set={bool(os.getenv('PORT'))}",
+    flush=True,
+)
 
 
 def _initialize_database():

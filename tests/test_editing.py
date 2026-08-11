@@ -819,11 +819,13 @@ def test_render_binds_health_before_slow_database_initialization(tmp_path):
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
     env = os.environ.copy()
+    env.pop("RENDER", None)
+    env.pop("RENDER_SERVICE_ID", None)
     env.update({
         "DATABASE_URL": f"sqlite:///{db_path.as_posix()}",
         "SECRET_KEY": "render-delayed-start-test",
         "PYTHONPATH": str(Path(app_module.root_dir)),
-        "RENDER": "true",
+        "PORT": str(port),
     })
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", str(port), "--workers", "1"],
