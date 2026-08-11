@@ -3,6 +3,7 @@
 <div class="page-header">
   <h1>Полигоны</h1>
 </div>
+{% if user.role in ['admin','logist'] %}
 <div class="filters">
   <form method="post" style="display:flex;flex-wrap:wrap;gap:8px;align-items:end">
     <input type="text" name="name" placeholder="Новый полигон" required style="min-width:220px" />
@@ -10,6 +11,7 @@
     <button class="btn" type="submit">Добавить</button>
   </form>
 </div>
+{% endif %}
 <div class="filters">
   <form method="get" style="display:flex;flex-wrap:wrap;gap:10px;align-items:end">
     <label>Полигон
@@ -29,7 +31,7 @@
   <thead><tr><th>Полигон</th><th>Заявок</th><th>Объем, м3</th><th>Сумма</th><th></th></tr></thead>
   <tbody>
   {% for it in items %}
-  <tr><td>{{ it.name }}</td><td>{{ it.trips }}</td><td>{{ it.volume }}</td><td>{{ "%.0f"|format(it.sum) }} ₽</td><td><a class="link" href="/export/polygon.csv?polygon_id={{ it.id }}&date_from={{ date_from }}&date_to={{ date_to }}">CSV</a></td></tr>
+  <tr><td>{{ it.name }}</td><td>{{ it.trips }}</td><td>{{ it.volume }}</td><td>{{ "%.0f"|format(it.sum) }} ₽</td><td class="actions-cell">{% if user.role == 'admin' %}<a class="btn btn-ghost btn-sm" href="/settings/polygons/{{ it.id }}/edit">Редактировать</a> {% endif %}<a class="link" href="/export/polygon.csv?polygon_id={{ it.id }}&date_from={{ date_from }}&date_to={{ date_to }}">CSV</a></td></tr>
   {% endfor %}
   </tbody>
 </table></div>

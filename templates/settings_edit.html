@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+  <div><h1>Редактирование: {{ label }}</h1><p class="muted">Измените данные и сохраните.</p></div>
+  <a class="btn btn-ghost" href="/settings#{{ anchor }}">Отмена</a>
+</div>
+<form class="request-form" method="post" action="/settings/{{ section }}/{{ row.id }}/edit">
+  <section class="form-section">
+    <div class="form-section-head"><span class="form-section-index">01</span><h2>Основные данные</h2></div>
+    <div class="form-grid">
+      {% if section == 'vehicle-types' %}
+      <label>Название<input name="name" value="{{ row.name }}" required /></label>
+      <label>Направление<select name="kind"><option value="пухтовоз" {% if row.kind.value == 'пухтовоз' %}selected{% endif %}>Пухтовоз</option><option value="самосвал" {% if row.kind.value == 'самосвал' %}selected{% endif %}>Самосвал</option></select></label>
+      <label class="wide">Описание<textarea name="description">{{ row.description or '' }}</textarea></label>
+      {% elif section == 'routes' %}
+      <label>Название объекта или маршрута<input name="name" value="{{ row.name }}" required /></label>
+      <label>Адрес подачи<input name="load_address" value="{{ row.load_address or '' }}" /></label>
+      <label>Адрес выгрузки<input name="unload_address" value="{{ row.unload_address or '' }}" /></label>
+      <label>Расстояние, км<input name="distance" type="number" step="any" value="{{ row.distance or 0 }}" /></label>
+      <label>Заказчик<select name="customer_id"><option value="">— не выбран —</option>{% for c in customers %}<option value="{{ c.id }}" {% if row.customer_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}</select></label>
+      <label class="wide">Комментарий<textarea name="comment">{{ row.comment or '' }}</textarea></label>
+      {% elif section == 'vehicles' %}
+      <label>Название<input name="name" value="{{ row.name }}" required /></label>
+      <label>Госномер<input name="plate" value="{{ row.plate }}" required /></label>
+      <label>Тип автомобиля<select name="type_id" required>{% for vt in vtypes %}<option value="{{ vt.id }}" {% if row.type_id == vt.id %}selected{% endif %}>{{ vt.name }}</option>{% endfor %}</select></label>
+      <label>Вместимость<input name="capacity" type="number" step="any" value="{{ row.capacity if row.capacity is not none else '' }}" /></label>
+      <label><input type="checkbox" name="is_active" {% if row.is_active %}checked{% endif %} /> Активен</label>
+      {% elif section == 'customers' %}
+      <label>Название<input name="name" value="{{ row.name }}" required /></label>
+      <label>Адрес<input name="address" value="{{ row.address or '' }}" /></label>
+      <label>Контакт<input name="contact" value="{{ row.contact or '' }}" /></label>
+      <label>Телефон<input name="phone" value="{{ row.phone or '' }}" /></label>
+      <label class="wide">Комментарий<textarea name="comment">{{ row.comment or '' }}</textarea></label>
+      {% elif section == 'cargo-types' %}
+      <label>Название<input name="name" value="{{ row.name }}" required /></label>
+      <label>Единица<input name="unit" value="{{ row.unit or 'м3' }}" required /></label>
+      <label class="wide">Комментарий<textarea name="comment">{{ row.comment or '' }}</textarea></label>
+      {% elif section == 'polygons' %}
+      <label>Название<input name="name" value="{{ row.name }}" required /></label>
+      <label>Адрес<input name="address" value="{{ row.address or '' }}" /></label>
+      <label>Контакт<input name="contact" value="{{ row.contact or '' }}" /></label>
+      <label>Телефон<input name="phone" value="{{ row.phone or '' }}" /></label>
+      <label class="wide">Комментарий<textarea name="comment">{{ row.comment or '' }}</textarea></label>
+      {% elif section == 'tariffs' %}
+      <label>Название<input name="title" value="{{ row.title }}" required /></label>
+      <label>Направление<select name="kind"><option value="пухтовоз" {% if row.kind.value == 'пухтовоз' %}selected{% endif %}>Пухтовоз</option><option value="самосвал" {% if row.kind.value == 'самосвал' %}selected{% endif %}>Самосвал</option></select></label>
+      <label>Тип автомобиля<select name="vehicle_type_id" required>{% for vt in vtypes %}<option value="{{ vt.id }}" {% if row.vehicle_type_id == vt.id %}selected{% endif %}>{{ vt.name }}</option>{% endfor %}</select></label>
+      <label>Формула<select name="formula"><option value="trip" {% if row.formula == 'trip' %}selected{% endif %}>За рейс</option><option value="km" {% if row.formula == 'km' %}selected{% endif %}>За км</option><option value="volume" {% if row.formula == 'volume' %}selected{% endif %}>За объем</option><option value="fixed" {% if row.formula == 'fixed' %}selected{% endif %}>Фиксированная сумма</option></select></label>
+      <label>За рейс<input name="trip_price" type="number" step="any" value="{{ row.trip_price or 0 }}" /></label>
+      <label>За км<input name="km_price" type="number" step="any" value="{{ row.km_price or 0 }}" /></label>
+      <label>За м³<input name="volume_price" type="number" step="any" value="{{ row.volume_price or 0 }}" /></label>
+      <label>Фиксированная сумма<input name="fixed_sum" type="number" step="any" value="{{ row.fixed_sum or 0 }}" /></label>
+      <label>Минимум км<input name="min_km" type="number" step="any" value="{{ row.min_km or 0 }}" /></label>
+      <label>Максимум км<input name="max_km" type="number" step="any" value="{{ row.max_km if row.max_km is not none else '' }}" /></label>
+      <label>Минимум м³<input name="min_volume" type="number" step="any" value="{{ row.min_volume or 0 }}" /></label>
+      <label>Максимум м³<input name="max_volume" type="number" step="any" value="{{ row.max_volume if row.max_volume is not none else '' }}" /></label>
+      <label>Доплата<input name="extra_fee" type="number" step="any" value="{{ row.extra_fee or 0 }}" /></label>
+      <label>Коэффициент<input name="coefficient" type="number" step="any" value="{{ row.coefficient if row.coefficient is not none else 1 }}" /></label>
+      <label>Действует с<input name="date_from" type="date" value="{{ row.date_from or '' }}" /></label>
+      <label>Действует по<input name="date_to" type="date" value="{{ row.date_to or '' }}" /></label>
+      <label class="wide">Комментарий<textarea name="comment">{{ row.comment or '' }}</textarea></label>
+      <label><input type="checkbox" name="is_active" {% if row.is_active %}checked{% endif %} /> Активен</label>
+      {% endif %}
+    </div>
+  </section>
+  <div class="form-actions">
+    <a class="btn btn-ghost" href="/settings#{{ anchor }}">Отмена</a>
+    <button class="btn btn-primary" type="submit">Сохранить изменения</button>
+  </div>
+</form>
+{% endblock %}

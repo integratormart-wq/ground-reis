@@ -62,9 +62,10 @@
         <td>
           <a class="link" href="/requests/{{ r.id }}">Открыть</a>
           {% if user.role in ['admin','logist'] %}
-          <form method="post" action="/requests/{{ r.id }}/delete" style="display:inline" onsubmit="return confirm('Удалить заявку?')">
+          <a class="btn btn-ghost btn-sm" href="/requests/{{ r.id }}/edit">Редактировать</a>
+          {% if r.id in deletable_ids %}<form method="post" action="/requests/{{ r.id }}/delete" style="display:inline" onsubmit="return confirm('Удалить заявку?')">
             <button class="btn btn-danger" type="submit">Удалить</button>
-          </form>
+          </form>{% endif %}
           {% endif %}
         </td>
       </tr>

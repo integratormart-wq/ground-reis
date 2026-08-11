@@ -2,18 +2,24 @@
 {% block content %}
 <div class="page-header"><h1>Пользователи</h1></div>
 <div class="form">
-  <form method="post" action="/users/new" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
-    <label>Имя<input name="full_name" required /></label>
-    <label>Логин<input name="login" required /></label>
-    <label>Пароль<input type="password" name="password" required /></label>
+  <h3>{{ 'Редактирование пользователя' if editing else 'Новый пользователь' }}</h3>
+  <form method="post" action="{{ '/users/' ~ editing.id ~ '/edit' if editing else '/users/new' }}" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+    <label>Имя<input name="full_name" value="{{ editing.full_name if editing else '' }}" required /></label>
+    <label>Логин<input name="login" value="{{ editing.login if editing else '' }}" required /></label>
+    <label>{{ 'Новый пароль (необязательно)' if editing else 'Пароль' }}<input type="password" name="password" {% if not editing %}required{% endif %} autocomplete="new-password" /></label>
+    <label>Телефон<input name="phone" value="{{ editing.phone if editing else '' }}" /></label>
     <label>Роль
       <select name="role">
-        <option value="admin">Админ</option>
-        <option value="logist">Логист</option>
-        <option value="driver">Водитель</option>
+        <option value="admin" {% if editing and editing.role.value == 'admin' %}selected{% endif %}>Админ</option>
+        <option value="logist" {% if editing and editing.role.value == 'logist' %}selected{% endif %}>Логист</option>
+        <option value="driver" {% if editing and editing.role.value == 'driver' %}selected{% endif %}>Водитель</option>
       </select>
     </label>
-    <div class="form-row"><button class="btn btn-primary" type="submit">Добавить</button></div>
+    {% if editing %}<label><input type="checkbox" name="is_active" {% if editing.is_active %}checked{% endif %} /> Активен</label>{% endif %}
+    <div class="form-row">
+      {% if editing %}<a class="btn btn-ghost" href="/users">Отмена</a>{% endif %}
+      <button class="btn btn-primary" type="submit">{{ 'Сохранить изменения' if editing else 'Добавить' }}</button>
+    </div>
   </form>
 </div>
 <div class="filters">
@@ -22,24 +28,20 @@
     <button class="btn" type="submit">Поиск</button>
   </form>
 </div>
-<table class="table">
+<div class="table-wrap"><table class="table">
   <thead><tr><th>Имя</th><th>Логин</th><th>Роль</th><th>Активен</th><th></th></tr></thead>
   <tbody>
   {% for u in users %}
   <tr>
-    <td>{{ u.full_name }}</td>
-    <td>{{ u.login }}</td>
-    <td>{{ u.role.value }}</td>
-    <td>{{ 'Да' if u.is_active else 'Нет' }}</td>
-    <td>
+    <td>{{ u.full_name }}</td><td>{{ u.login }}</td><td>{{ u.role.value }}</td><td>{{ 'Да' if u.is_active else 'Нет' }}</td>
+    <td class="actions-cell">
+      <a class="btn btn-ghost btn-sm" href="/users/{{ u.id }}/edit">Редактировать</a>
       {% if u.id != user.id %}
-      <form method="post" action="/users/{{ u.id }}/delete" style="display:inline" onsubmit="return confirm('Удалить пользователя?')">
-        <button class="btn btn-danger" type="submit">Удалить</button>
-      </form>
+      <form method="post" action="/users/{{ u.id }}/delete" style="display:inline" onsubmit="return confirm('Удалить пользователя?')"><button class="btn btn-danger btn-sm" type="submit">Удалить</button></form>
       {% endif %}
     </td>
   </tr>
   {% endfor %}
   </tbody>
-</table>
+</table></div>
 {% endblock %}

@@ -22,7 +22,7 @@ def reset_db():
 
 def client_as(user):
     app_module.app.dependency_overrides[app_module.get_current_user] = lambda: user
-    return TestClient(app_module.app)
+    return TestClient(app_module.app, headers={"Origin": "http://testserver"})
 
 
 def test_settings_additions_appear_in_new_request_form():
@@ -185,6 +185,104 @@ def test_bitrix_outbound_add_then_update_without_duplicate(monkeypatch):
     db.close()
 
 
+def test_bitrix_status_transitions_set_real_stages_for_both_processes(monkeypatch):
+    db, admin, driver, vt = reset_db()
+    settings = models.IntegrationSetting(provider="bitrix24", webhook_url="https://example/rest/1/token/", is_active=True)
+    trips = [
+        models.TripRequest(number="П-STAGE", planned_date=date(2026, 8, 12), kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.ACCEPTED, bitrix_element_id=501),
+        models.TripRequest(number="С-STAGE", planned_date=date(2026, 8, 12), kind=models.TripType.SAMOSVAL, status=models.RequestStatus.ACCEPTED, bitrix_element_id=502),
+    ]
+    db.add(settings); db.add_all(trips); db.commit()
+    entity_by_kind = {models.TripType.PUKHTOVOZ: "1088", models.TripType.SAMOSVAL: "1092"}
+    stage_ids = {
+        "Водитель назначен": "DRIVER_ASSIGNED",
+        "Рейс начат": "TRIP_STARTED",
+        "Рейс завершен": "TRIP_FINISHED",
+        "Успех": "SUCCESS",
+    }
+    calls = []
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_entity", lambda url, kind: entity_by_kind[kind])
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: {"title": {"title": "Название"}})
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda url, entity, item: {"id": item, "categoryId": 7})
+
+    def fake_post(url, method, payload):
+        calls.append((method, payload))
+        if method == "crm.category.list":
+            return {"result": {"categories": [{"id": 9, "isDefault": True}]}}
+        if method == "crm.status.list":
+            _, entity, _, category = payload["filter"]["ENTITY_ID"].split("_")
+            return {"result": [
+                {"NAME": title, "STATUS_ID": f"DT{entity}_{category}:{suffix}"}
+                for title, suffix in stage_ids.items()
+            ]}
+        if method == "crm.item.update":
+            return {"result": {}}
+        if method == "crm.item.add":
+            return {"result": {"item": {"id": 503}}}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(app_module.bitrix, "_http_post", fake_post)
+    transitions = [
+        (models.RequestStatus.ACCEPTED, "DRIVER_ASSIGNED"),
+        (models.RequestStatus.IN_WORK, "TRIP_STARTED"),
+        (models.RequestStatus.DRIVER_COMPLETED, "TRIP_FINISHED"),
+        (models.RequestStatus.LOGIST_CONFIRMED, "SUCCESS"),
+    ]
+    for trip in trips:
+        entity = entity_by_kind[trip.kind]
+        for status, suffix in transitions:
+            trip.status = status
+            result = app_module.bitrix.sync_trip(trip, db, settings=settings)
+            assert result["ok"] is True
+            update = calls[-1]
+            assert update[0] == "crm.item.update"
+            assert update[1]["entityTypeId"] == int(entity)
+            assert update[1]["fields"]["stageId"] == f"DT{entity}_7:{suffix}"
+            status_call = calls[-2]
+            assert status_call[1]["filter"]["ENTITY_ID"] == f"DYNAMIC_{entity}_STAGE_7"
+
+    new_trip = models.TripRequest(
+        number="С-STAGE-ADD", planned_date=date(2026, 8, 12),
+        kind=models.TripType.SAMOSVAL, status=models.RequestStatus.ACCEPTED,
+    )
+    db.add(new_trip); db.commit()
+    result = app_module.bitrix.sync_trip(new_trip, db, settings=settings)
+    assert result["action"] == "add" and new_trip.bitrix_element_id == 503
+    add_call = calls[-1]
+    assert add_call[0] == "crm.item.add"
+    assert add_call[1]["entityTypeId"] == 1092
+    assert add_call[1]["fields"]["categoryId"] == 9
+    assert add_call[1]["fields"]["stageId"] == "DT1092_9:DRIVER_ASSIGNED"
+    db.close()
+
+
+def test_bitrix_stage_without_id_fails_closed_without_item_write(monkeypatch):
+    db, admin, driver, vt = reset_db()
+    settings = models.IntegrationSetting(provider="bitrix24", webhook_url="https://example/rest/1/token/", is_active=True)
+    trip = models.TripRequest(
+        number="П-STAGE-NO-ID", planned_date=date(2026, 8, 12),
+        kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.ACCEPTED,
+        bitrix_element_id=504,
+    )
+    db.add_all([settings, trip]); db.commit()
+    writes = []
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_entity", lambda url, kind: "1088")
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: {"title": {"title": "Название"}})
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda url, entity, item: {"categoryId": 7})
+
+    def fake_post(url, method, payload):
+        if method == "crm.status.list":
+            return {"result": [{"NAME": "Водитель назначен"}]}
+        writes.append((method, payload))
+        return {"result": {}}
+
+    monkeypatch.setattr(app_module.bitrix, "_http_post", fake_post)
+    result = app_module.bitrix.sync_trip(trip, db, settings=settings)
+    assert result == {"error": "bitrix_stage_not_found", "action": "stage"}
+    assert writes == []
+    db.close()
+
+
 def test_bitrix_can_upsert_local_trip_from_smart_process(monkeypatch):
     db, admin, driver, vt = reset_db()
     vehicle = models.Vehicle(name="Авто Б24", plate="С333СС78", type_id=vt.id)
@@ -198,7 +296,7 @@ def test_bitrix_can_upsert_local_trip_from_smart_process(monkeypatch):
     monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda url, entity, item: {
         "id": 900, "title": "П-Б24-900", "ufReisDate": "2026-08-10", "ufReisTime": "09:30",
         "ufDriver": driver.full_name, "ufVehicle": vehicle.name, "ufPolygon": polygon.name,
-        "ufVolumePlan": 14, "ufKmPlan": 25, "ufStatus": "Новая"
+        "ufVolumePlan": 14, "ufKmPlan": 25, "ufVolumeFact": 0, "ufKmFact": 0, "ufStatus": "Новая"
     })
     result = app_module.bitrix.sync_from_bitrix(900, 150, db, settings=settings)
     db.commit()
@@ -207,23 +305,27 @@ def test_bitrix_can_upsert_local_trip_from_smart_process(monkeypatch):
     assert trip.number == "П-Б24-900"
     assert trip.kind == models.TripType.PUKHTOVOZ
     assert trip.volume == 14
+    assert trip.actual_volume == 0
+    assert trip.actual_km == 0
     assert trip.driver_id == driver.id
     assert trip.vehicle_id == vehicle.id
     assert trip.polygon_id == polygon.id
     db.close()
 
 
-def test_bitrix_status_probe_is_public_and_reports_both_directions():
+def test_bitrix_status_probe_requires_admin_and_reports_both_directions():
     app_module.BITRIX_LAST_EVENT = {"received": True, "result": "test-inbound"}
     app_module.BITRIX_LAST_OUTBOUND = {"attempted": True, "result": {"error": "test-outbound"}}
     app_module.app.dependency_overrides.pop(app_module.get_current_user, None)
-    client = TestClient(app_module.app)
-    response = client.get("/settings/bitrix/status")
+    assert TestClient(app_module.app).get("/settings/bitrix/status").status_code == 401
+    db, admin, *_ = reset_db()
+    response = client_as(admin).get("/settings/bitrix/status")
     assert response.status_code == 200
     assert response.json() == {
-        "inbound": {"received": True, "result": "test-inbound"},
-        "outbound": {"attempted": True, "result": {"error": "test-outbound"}},
+        "inbound": {"received": True, "result": {}},
+        "outbound": {"attempted": True, "result": {"error": "bitrix_sync_error"}},
     }
+    db.close()
 
 
 def test_ground_bitrix_process_ids_route_and_same_item_id_does_not_collide(monkeypatch):

@@ -2,6 +2,18 @@
 {% block content %}
 <div class="page-header"><h1>Настройки</h1></div>
 
+<h3 id="vehicle-types">Типы автомобилей</h3>
+<table class="table"><thead><tr><th>Название</th><th>Направление</th><th></th></tr></thead><tbody>
+{% for vt in vtypes %}<tr><td>{{ vt.name }}</td><td>{{ vt.kind.value }}</td><td class="actions-cell"><a class="btn btn-ghost btn-sm" href="/settings/vehicle-types/{{ vt.id }}/edit">Редактировать</a><form method="post" action="/settings/vehicle-types/{{ vt.id }}/delete" onsubmit="return confirm('Удалить?')"><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>{% endfor %}
+</tbody></table>
+<form method="post" action="/settings/vehicle-types" class="filters"><input name="name" placeholder="Название типа" required /><select name="kind"><option value="пухтовоз">Пухтовоз</option><option value="самосвал">Самосвал</option></select><input name="description" placeholder="Описание" /><button class="btn" type="submit">Добавить тип</button></form>
+
+<h3 id="routes">Объекты и маршруты</h3>
+<table class="table"><thead><tr><th>Название</th><th>Подача</th><th>Выгрузка</th><th>Км</th><th></th></tr></thead><tbody>
+{% for r in routes %}<tr><td>{{ r.name }}</td><td>{{ r.load_address or '' }}</td><td>{{ r.unload_address or '' }}</td><td>{{ r.distance or 0 }}</td><td class="actions-cell"><a class="btn btn-ghost btn-sm" href="/settings/routes/{{ r.id }}/edit">Редактировать</a><form method="post" action="/settings/routes/{{ r.id }}/delete" onsubmit="return confirm('Удалить?')"><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>{% endfor %}
+</tbody></table>
+<form method="post" action="/settings/routes" class="filters"><input name="name" placeholder="Название объекта или маршрута" required /><input name="load_address" placeholder="Адрес подачи" /><input name="unload_address" placeholder="Адрес выгрузки" /><input name="distance" type="number" step="any" placeholder="Км" /><select name="customer_id"><option value="">— заказчик —</option>{% for c in customers %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select><input name="comment" placeholder="Комментарий" /><button class="btn" type="submit">Добавить объект</button></form>
+
 <h3 id="tariffs">Тарифы</h3>
 <table class="table">
   <thead><tr><th>Название</th><th>Направление</th><th>Формула</th><th>Ставка за рейс</th><th>Активен</th><th></th></tr></thead>
@@ -14,6 +26,7 @@
     <td>{{ t.trip_price }}</td>
     <td>{{ 'Да' if t.is_active else 'Нет' }}</td>
     <td>
+      <a class="btn btn-ghost btn-sm" href="/settings/tariffs/{{ t.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/tariffs/{{ t.id }}/delete" onsubmit="return confirm('Удалить?')">
         <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
       </form>
@@ -36,11 +49,21 @@
     <option value="trip">За рейс</option>
     <option value="km">За км</option>
     <option value="volume">За объем</option>
+    <option value="fixed">Фиксированная сумма</option>
   </select>
   <input name="trip_price" type="number" step="any" placeholder="За рейс" value="0" />
   <input name="km_price" type="number" step="any" placeholder="За км" value="0" />
   <input name="volume_price" type="number" step="any" placeholder="За м3" value="0" />
-  <input name="fixed_sum" type="number" step="any" placeholder="Фиксировано" value="0" />
+  <input name="fixed_sum" type="number" min="0" step="any" placeholder="Фиксировано" value="0" />
+  <input name="min_km" type="number" min="0" step="any" placeholder="Минимум км" value="0" />
+  <input name="max_km" type="number" min="0" step="any" placeholder="Максимум км" />
+  <input name="min_volume" type="number" min="0" step="any" placeholder="Минимум м³" value="0" />
+  <input name="max_volume" type="number" min="0" step="any" placeholder="Максимум м³" />
+  <input name="extra_fee" type="number" min="0" step="any" placeholder="Доплата" value="0" />
+  <input name="coefficient" type="number" min="0" step="any" placeholder="Коэффициент" value="1" />
+  <input name="date_from" type="date" title="Действует с" />
+  <input name="date_to" type="date" title="Действует по" />
+  <input name="comment" placeholder="Комментарий" />
   <label><input type="checkbox" name="is_active" checked /> Активен</label>
   <button class="btn" type="submit">Добавить тариф</button>
 </form>
@@ -57,6 +80,7 @@
     <td>{{ v.type.name if v.type else '' }}</td>
     <td>{{ v.capacity }}</td>
     <td>
+      <a class="btn btn-ghost btn-sm" href="/settings/vehicles/{{ v.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/vehicles/{{ v.id }}/delete" onsubmit="return confirm('Удалить?')">
         <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
       </form>
@@ -88,6 +112,7 @@
     <td>{{ c.name }}</td>
     <td>{{ c.address }}</td>
     <td>
+      <a class="btn btn-ghost btn-sm" href="/settings/customers/{{ c.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/customers/{{ c.id }}/delete" onsubmit="return confirm('Удалить?')">
         <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
       </form>
@@ -113,6 +138,7 @@
     <td>{{ c.name }}</td>
     <td>{{ c.unit }}</td>
     <td>
+      <a class="btn btn-ghost btn-sm" href="/settings/cargo-types/{{ c.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/cargo-types/{{ c.id }}/delete" onsubmit="return confirm('Удалить?')">
         <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
       </form>
@@ -138,6 +164,7 @@
     <td>{{ p.name }}</td>
     <td>{{ p.address }}</td>
     <td>
+      <a class="btn btn-ghost btn-sm" href="/settings/polygons/{{ p.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/polygons/{{ p.id }}/delete" onsubmit="return confirm('Удалить?')">
         <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
       </form>
@@ -154,14 +181,14 @@
 </form>
 {% endif %}
 
-{% if user.role in ['admin','logist'] %}
+{% if user.role == 'admin' %}
 <form method="post" action="/settings/integrations" class="filters" style="margin-top:18px">
   <h3>Интеграции</h3>
   <label>Битрикс24 вебхук URL
-    <input name="webhook_url" value="{{ integrations.get('bitrix24').webhook_url if integrations.get('bitrix24') else '' }}" placeholder="https://..." />
+    <input type="password" name="webhook_url" value="" autocomplete="new-password" placeholder="{% if integrations.get('bitrix24') and integrations.get('bitrix24').webhook_url %}URL сохранён — оставьте пустым без изменений{% else %}https://...{% endif %}" />
   </label>
   <label>Ключ интеграции
-    <input name="secret" value="{{ integrations.get('bitrix24').secret if integrations.get('bitrix24') else '' }}" placeholder="секрет" />
+    <input type="password" name="secret" value="" autocomplete="new-password" placeholder="{% if integrations.get('bitrix24') and integrations.get('bitrix24').secret %}Ключ сохранён — оставьте пустым без изменений{% else %}секрет{% endif %}" />
   </label>
   <label>Ответственный
     <input name="responsible_id" value="{{ integrations.get('bitrix24').responsible_id if integrations.get('bitrix24') else '' }}" placeholder="ID пользователя" />

@@ -31,7 +31,7 @@
     <div class="userbox">
       <button id="install-app" class="btn btn-primary btn-sm" type="button">Установить приложение</button>
       {% if user.full_name %}<span class="user-name">{{ user.full_name }}</span>{% endif %}
-      {% if user.full_name %}<a href="/logout" class="btn btn-ghost btn-sm">Выход</a>{% endif %}
+      {% if user.full_name %}<form method="post" action="/logout" class="inline-form"><button type="submit" class="btn btn-ghost btn-sm">Выход</button></form>{% endif %}
     </div>
   </header>
 

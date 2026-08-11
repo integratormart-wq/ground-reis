@@ -2,18 +2,18 @@
 {% block content %}
 <div class="page-header">
   <div>
-    <h1>Создание заявки</h1>
+    <h1>{{ "Редактирование заявки" if editing else "Создание заявки" }}</h1>
     <p class="muted">Заполните данные рейса — сумма водителю рассчитается автоматически.</p>
   </div>
 </div>
 
-<form class="request-form" method="post" action="/requests/new">
+<form class="request-form" method="post" action="{{ "/requests/" ~ editing.id ~ "/edit" if editing else "/requests/new" }}">
   <section class="form-section">
     <div class="form-section-head"><span class="form-section-index">01</span><h2>Основная информация</h2></div>
     <div class="form-grid">
-      <label>Номер заявки<input name="number" placeholder="{{ next_number_hint or 'П-1' }}" /></label>
-      <label>Дата<input type="date" name="planned_date" required /></label>
-      <label>Время<input type="time" name="planned_time" /></label>
+      <label>Номер заявки<input name="number" value="{{ editing.number if editing else '' }}" placeholder="{{ next_number_hint or 'П-1' }}" required /></label>
+      <label>Дата<input type="date" id="planned_date" name="planned_date" value="{{ editing.planned_date.isoformat() if editing else '' }}" required /></label>
+      <label>Время<input type="time" name="planned_time" value="{{ editing.planned_time if editing else '' }}" /></label>
       <label>Направление
         <select name="kind" id="kind" required>
           <option value="пухтовоз" {% if kind=='пухтовоз' %}selected{% endif %}>Пухтовоз</option>
@@ -29,22 +29,22 @@
       <label>Заказчик
         <select id="customer_id" name="customer_id">
           <option value="">— выберите —</option>
-          {% for c in customers %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+          {% for c in customers %}<option value="{{ c.id }}" {% if editing and editing.customer_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
         </select>
       </label>
-      <label>Новый заказчик<input id="customer_name_manual" name="customer_name_manual" placeholder="Введите название" /></label>
-      <label>Адрес подачи<input name="load_address" placeholder="Откуда забрать" /></label>
-      <label>Адрес выгрузки<input name="unload_address" placeholder="Куда доставить" /></label>
+      {% if not editing %}<label>Новый заказчик<input id="customer_name_manual" name="customer_name_manual" placeholder="Введите название" /></label>{% endif %}
+      <label>Адрес подачи<input name="load_address" value="{{ editing.load_address if editing else '' }}" placeholder="Откуда забрать" /></label>
+      <label>Адрес выгрузки<input name="unload_address" value="{{ editing.unload_address if editing else '' }}" placeholder="Куда доставить" /></label>
       <label>Полигон
         <select name="polygon_id">
           <option value="">— выберите —</option>
-          {% for p in polygons %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+          {% for p in polygons %}<option value="{{ p.id }}" {% if editing and editing.polygon_id == p.id %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
         </select>
       </label>
       <label>Тип груза
         <select name="cargo_type_id">
           <option value="">— выберите —</option>
-          {% for c in cargo_types %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+          {% for c in cargo_types %}<option value="{{ c.id }}" {% if editing and editing.cargo_type_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
         </select>
       </label>
     </div>
@@ -56,13 +56,13 @@
       <label>Водитель
         <select name="driver_id" required>
           <option value="">— выберите —</option>
-          {% for d in drivers %}<option value="{{ d.id }}">{{ d.full_name }}</option>{% endfor %}
+          {% for d in drivers %}<option value="{{ d.id }}" {% if editing and editing.driver_id == d.id %}selected{% endif %}>{{ d.full_name }}</option>{% endfor %}
         </select>
       </label>
       <label>Автомобиль
-        <select name="vehicle_id">
+        <select name="vehicle_id" id="vehicle_id" required>
           <option value="">— выберите —</option>
-          {% for v in vehicles %}<option value="{{ v.id }}">{{ v.name }} {{ v.plate }}</option>{% endfor %}
+          {% for v in vehicles %}<option value="{{ v.id }}" data-type-id="{{ v.type_id }}" {% if editing and editing.vehicle_id == v.id %}selected{% endif %}>{{ v.name }} {{ v.plate }}</option>{% endfor %}
         </select>
       </label>
     </div>
@@ -71,10 +71,10 @@
   <section class="form-section">
     <div class="form-section-head"><span class="form-section-index">04</span><h2>Параметры рейса</h2></div>
     <div class="form-grid">
-      <label>Маршрут<input name="route_name" placeholder="Название или описание маршрута" /></label>
-      <label>Километраж, км<input type="number" step="any" name="km" id="km" value="0" /></label>
-      <label>Объем, м³<input type="number" step="any" name="volume" id="volume" value="0" /></label>
-      <label>Количество рейсов<input type="number" name="trips_count" value="1" min="1" /></label>
+      <label>Маршрут<input name="route_name" value="{{ editing.route_name if editing else '' }}" placeholder="Название или описание маршрута" /></label>
+      <label>Километраж, км<input type="number" step="any" name="km" id="km" value="{{ editing.km if editing else 0 }}" /></label>
+      <label>Объем, м³<input type="number" step="any" name="volume" id="volume" value="{{ editing.volume if editing else 0 }}" /></label>
+      <label>Количество рейсов<input type="number" name="trips_count" value="{{ editing.trips_count if editing else 1 }}" min="1" /></label>
     </div>
   </section>
 
@@ -84,7 +84,7 @@
       <label>Тариф
         <select name="tariff_id" id="tariff_id">
           <option value="">— автоматически —</option>
-          {% for t in tariffs %}{% if t.kind.value == kind %}<option value="{{ t.id }}">{{ t.title }}</option>{% endif %}{% endfor %}
+          {% for t in tariffs %}{% if t.kind.value == kind %}<option value="{{ t.id }}" {% if editing and editing.tariff_id == t.id %}selected{% endif %}>{{ t.title }}</option>{% endif %}{% endfor %}
         </select>
       </label>
       <div class="payment-summary">
@@ -96,13 +96,13 @@
   <section class="form-section">
     <div class="form-section-head"><span class="form-section-index">06</span><h2>Комментарий</h2></div>
     <div class="form-grid">
-      <label class="wide">Комментарий к заявке<textarea name="comment" rows="4" placeholder="Дополнительная информация для логиста или водителя"></textarea></label>
+      <label class="wide">Комментарий к заявке<textarea name="comment" rows="4" placeholder="Дополнительная информация для логиста или водителя">{{ (editing.comment or '') if editing else '' }}</textarea></label>
     </div>
   </section>
 
   <div class="form-actions">
     <a class="btn btn-ghost" href="{% if kind=='самосвал' %}/samosval{% else %}/pukhtovoz{% endif %}">Отмена</a>
-    <button class="btn btn-primary" type="submit">Создать заявку</button>
+    <button class="btn btn-primary" type="submit">{{ "Сохранить изменения" if editing else "Создать заявку" }}</button>
   </div>
 </form>
 
@@ -117,7 +117,13 @@ const tariffs = [
   'km_price': t.km_price or 0,
   'volume_price': t.volume_price or 0,
   'fixed_sum': t.fixed_sum or 0,
-  'kind': t.kind.value if t.kind else ''
+  'extra_fee': t.extra_fee or 0,
+  'coefficient': t.coefficient if t.coefficient is not none else 1,
+  'kind': t.kind.value if t.kind else '',
+  'active': t.is_active, 'vehicle_type_id': t.vehicle_type_id,
+  'min_km': t.min_km or 0, 'max_km': t.max_km,
+  'min_volume': t.min_volume or 0, 'max_volume': t.max_volume,
+  'date_from': t.date_from.isoformat() if t.date_from else '', 'date_to': t.date_to.isoformat() if t.date_to else ''
 } | tojson }}{% if not loop.last %},{% endif %}
 {% endfor %}
 ];
@@ -125,24 +131,36 @@ const kindEl = document.getElementById('kind');
 const kmEl = document.getElementById('km');
 const volEl = document.getElementById('volume');
 const tariffEl = document.getElementById('tariff_id');
+const vehicleEl = document.getElementById('vehicle_id');
+const dateEl = document.getElementById('planned_date');
 const sumEl = document.getElementById('sum_driver');
 function recalc(){
   const kind = kindEl.value;
   const km = parseFloat(kmEl.value || 0);
   const vol = parseFloat(volEl.value || 0);
   const previousId = tariffEl.value;
-  const list = tariffs.filter(t => t.kind === kind || t.title.toLowerCase().includes(kind));
-  tariffEl.innerHTML = '<option value="">— автоматически —</option>' + list.map(t => `<option value="${t.id}">${t.title}</option>`).join('');
+  const vehicleType = Number(vehicleEl.selectedOptions[0]?.dataset.typeId || 0);
+  const plannedDate = dateEl.value;
+  const list = tariffs.filter(t => t.active && t.kind === kind
+    && Number(t.vehicle_type_id) === vehicleType
+    && Number(t.min_km || 0) <= km && (t.max_km === null || km <= Number(t.max_km))
+    && Number(t.min_volume || 0) <= vol && (t.max_volume === null || vol <= Number(t.max_volume))
+    && (!t.date_from || plannedDate >= t.date_from) && (!t.date_to || plannedDate <= t.date_to)
+  ).sort((a, b) => Number(a.id) - Number(b.id));
+  tariffEl.replaceChildren(new Option('— автоматически —', ''));
+  list.forEach(t => tariffEl.add(new Option(t.title, String(t.id))));
   if (previousId && list.some(t => String(t.id) === String(previousId))) tariffEl.value = previousId;
   const chosen = list.find(t => String(t.id) === String(tariffEl.value)) || list[0] || {};
-  let sum = 0;
-  sum += (km || 0) * parseFloat(chosen.km_price || 0);
-  sum += (vol || 0) * parseFloat(chosen.volume_price || 0);
-  sum += parseFloat(document.querySelector('input[name=trips_count]').value || 1) * parseFloat(chosen.trip_price || 0);
-  sum += parseFloat(chosen.fixed_sum || 0);
+  const trips = parseFloat(document.querySelector('input[name=trips_count]').value || 1);
+  const formula = chosen.formula || 'trip';
+  let base = formula === 'km' ? (km || 0) * parseFloat(chosen.km_price || 0)
+    : formula === 'volume' ? (vol || 0) * parseFloat(chosen.volume_price || 0)
+    : formula === 'fixed' ? parseFloat(chosen.fixed_sum || 0)
+    : trips * parseFloat(chosen.trip_price || 0);
+  const sum = (base + parseFloat(chosen.extra_fee || 0)) * parseFloat(chosen.coefficient ?? 1);
   sumEl.textContent = (sum || 0).toFixed(2);
 }
-[kindEl, kmEl, volEl, tariffEl].forEach(el => el.addEventListener('change', recalc));
+[kindEl, kmEl, volEl, tariffEl, vehicleEl, dateEl].forEach(el => el.addEventListener('change', recalc));
 document.querySelector('input[name=trips_count]').addEventListener('input', recalc);
 recalc();
 </script>

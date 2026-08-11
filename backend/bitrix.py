@@ -1,5 +1,6 @@
 """Двусторонняя синхронизация рейсов со смарт-процессами Bitrix24."""
 import json
+import math
 import os
 import re
 import urllib.error
@@ -19,6 +20,13 @@ SAMOSVAL_ENTITY_TYPE_ID = str(os.getenv("BITRIX_SAMOSVAL_ENTITY_TYPE_ID", "1092"
 KNOWN_PROCESS_KINDS = {
     PUKHTOVOZ_ENTITY_TYPE_ID: TripType.PUKHTOVOZ,
     SAMOSVAL_ENTITY_TYPE_ID: TripType.SAMOSVAL,
+}
+
+STATUS_STAGE_TITLES = {
+    RequestStatus.ACCEPTED: "Водитель назначен",
+    RequestStatus.IN_WORK: "Рейс начат",
+    RequestStatus.DRIVER_COMPLETED: "Рейс завершен",
+    RequestStatus.LOGIST_CONFIRMED: "Успех",
 }
 
 # Это логические имена. При отправке они автоматически сопоставляются с реальными
@@ -152,6 +160,46 @@ def fetch_item(webhook_base: str, entity_id: int, item_id: int) -> dict:
     return response.get("result", {}).get("item", {})
 
 
+def _default_category_id(webhook_base: str, entity_id: str) -> int:
+    response = _http_post(webhook_base, "crm.category.list", {"entityTypeId": int(entity_id)})
+    categories = response.get("result", {}).get("categories", []) if "error" not in response else []
+    for category in categories:
+        if category.get("isDefault") in (True, "Y", "1", 1):
+            return int(category["id"])
+    return int(categories[0]["id"]) if categories else 0
+
+
+def resolve_stage(webhook_base: str, entity_id: str, status, item_id=None):
+    """Resolve a local status to the actual stage ID of this process category."""
+    status_value = status if isinstance(status, RequestStatus) else RequestStatus(status)
+    target_title = STATUS_STAGE_TITLES.get(status_value)
+    if not target_title:
+        return None, None
+    category_id = None
+    if item_id:
+        item = fetch_item(webhook_base, int(entity_id), int(item_id))
+        raw_category = item.get("categoryId") if isinstance(item, dict) else None
+        if raw_category is not None:
+            category_id = int(raw_category)
+    if category_id is None:
+        category_id = _default_category_id(webhook_base, entity_id)
+    response = _http_post(webhook_base, "crm.status.list", {
+        "filter": {"ENTITY_ID": f"DYNAMIC_{entity_id}_STAGE_{category_id}"},
+    })
+    statuses = response.get("result", []) if "error" not in response else []
+    if isinstance(statuses, dict):
+        statuses = statuses.get("statuses") or statuses.get("items") or []
+    normalized_target = _normalize(target_title)
+    for stage in statuses:
+        title = stage.get("NAME") or stage.get("name") or stage.get("title")
+        if _normalize(title) == normalized_target:
+            stage_id = stage.get("STATUS_ID") or stage.get("statusId") or stage.get("id")
+            if isinstance(stage_id, (str, int)) and not isinstance(stage_id, bool) and str(stage_id).strip():
+                return str(stage_id), category_id
+            return None, category_id
+    return None, category_id
+
+
 def _normalize(text) -> str:
     return re.sub(r"[^а-яa-z0-9]+", " ", str(text or "").lower().replace("ё", "е")).strip()
 
@@ -225,6 +273,16 @@ def sync_trip(req, db, settings=None) -> dict:
     if "_error" in schema:
         return {"error": schema["_error"], "action": "fields"}
     fields = build_fields(req, resolve_field_map(schema))
+    target_stage = STATUS_STAGE_TITLES.get(req.status)
+    if target_stage:
+        stage_id, category_id = resolve_stage(
+            settings.webhook_url, entity_id, req.status, req.bitrix_element_id,
+        )
+        if not stage_id:
+            return {"error": "bitrix_stage_not_found", "action": "stage"}
+        fields["stageId"] = stage_id
+        if not req.bitrix_element_id:
+            fields["categoryId"] = category_id
     if req.bitrix_element_id:
         action = "update"
         payload = {"entityTypeId": int(entity_id), "id": int(req.bitrix_element_id), "fields": fields}
@@ -234,7 +292,7 @@ def sync_trip(req, db, settings=None) -> dict:
         payload = {"entityTypeId": int(entity_id), "fields": fields}
         response = _http_post(settings.webhook_url, "crm.item.add", payload)
     if "error" in response:
-        print("BITRIX_SYNC_ERROR", action, response["error"], flush=True)
+        print("BITRIX_SYNC_ERROR", action, flush=True)
         return {"error": response["error"], "action": action}
     result = response.get("result", {})
     item_id = result.get("id") or result.get("item", {}).get("id")
@@ -279,6 +337,19 @@ def _to_float(value):
         return float(str(_scalar(value)).replace(",", "."))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _optional_nonnegative_float(value, field):
+    raw = _scalar(value)
+    if raw in (None, ""):
+        return None
+    try:
+        result = float(str(raw).replace(",", "."))
+    except (TypeError, ValueError):
+        raise ValueError(f"invalid {field}")
+    if not math.isfinite(result) or result < 0:
+        raise ValueError(f"invalid {field}")
+    return result
 
 
 def _status(value):
@@ -341,11 +412,17 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     trip.load_address = str(_read_logical(item, "load_address", mapping) or "")
     trip.unload_address = str(_read_logical(item, "unload_address", mapping) or "")
     trip.route_name = str(_read_logical(item, "route_name", mapping) or "")
-    trip.km = _to_float(_read_logical(item, "km", mapping))
-    trip.volume = _to_float(_read_logical(item, "volume", mapping))
-    trip.actual_km = _to_float(_read_logical(item, "actual_km", mapping)) or None
-    trip.actual_volume = _to_float(_read_logical(item, "actual_volume", mapping)) or None
-    trip.sum_driver = _to_float(_read_logical(item, "sum_driver", mapping)) or None
+    try:
+        km = _optional_nonnegative_float(_read_logical(item, "km", mapping), "km")
+        volume = _optional_nonnegative_float(_read_logical(item, "volume", mapping), "volume")
+        actual_km = _optional_nonnegative_float(_read_logical(item, "actual_km", mapping), "actual_km")
+        actual_volume = _optional_nonnegative_float(_read_logical(item, "actual_volume", mapping), "actual_volume")
+    except ValueError as exc:
+        return {"error": str(exc)}
+    trip.km = 0 if km is None else km
+    trip.volume = 0 if volume is None else volume
+    trip.actual_km = actual_km
+    trip.actual_volume = actual_volume
     trip.status = _status(_read_logical(item, "status", mapping))
     trip.comment = str(_read_logical(item, "comment", mapping) or "")
     trip.logist_comment = str(_read_logical(item, "logist_comment", mapping) or "")

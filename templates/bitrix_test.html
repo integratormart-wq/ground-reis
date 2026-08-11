@@ -6,7 +6,7 @@
   <div class="card" style="padding:14px;color:#b00">Webhook не задан. Задайте его на вкладке «Интеграции» на странице Настройки.</div>
 {% else %}
   <div class="card" style="padding:14px">
-    <b>Webhook:</b> {{ info.webhook }}<br/>
+    <b>Webhook:</b> настроен<br/>
     {% if info.error %}
       <span style="color:#b00">Ошибка: {{ info.error }}</span>
     {% else %}

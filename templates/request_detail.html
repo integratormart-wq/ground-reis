@@ -17,8 +17,8 @@
   <div><b>Километраж:</b> {{ req.km }}</div>
   <div><b>Объем:</b> {{ req.volume }}</div>
   <div><b>Рейсов:</b> {{ req.trips_count }}</div>
-  <div><b>Факт. км:</b> {{ req.actual_km or '—' }}</div>
-  <div><b>Факт. объем:</b> {{ req.actual_volume or '—' }}</div>
+  <div><b>Факт. км:</b> {{ req.actual_km if req.actual_km is not none else '—' }}</div>
+  <div><b>Факт. объем:</b> {{ req.actual_volume if req.actual_volume is not none else '—' }}</div>
   <div><b>Тариф:</b> {{ req.tariff.title if req.tariff else '—' }}</div>
   <div><b>Полигон:</b> {{ req.polygon.name if req.polygon else '—' }}</div>
   <div><b>Комментарий:</b> {{ req.comment or '—' }}</div>
@@ -36,23 +36,26 @@
 {% endif %}
 {% if req.status.value == 'В работе' %}
 <form method="post" action="/requests/{{ req.id }}/complete" class="form-row">
-  <input type="number" step="any" name="actual_km" placeholder="Факт. км" value="{{ req.actual_km or '' }}" />
-  <input type="number" step="any" name="actual_volume" placeholder="Факт. объем" value="{{ req.actual_volume or '' }}" />
+  <input type="number" step="any" name="actual_km" placeholder="Факт. км" value="{{ req.actual_km if req.actual_km is not none else '' }}" />
+  <input type="number" step="any" name="actual_volume" placeholder="Факт. объем" value="{{ req.actual_volume if req.actual_volume is not none else '' }}" />
   <input name="comment" placeholder="Комментарий" />
   <button class="btn btn-primary" type="submit">Завершить рейс</button>
 </form>
 {% endif %}
 {% endif %}
 {% if user.role in ['admin','logist'] %}
-<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap">
+  <a class="btn btn-ghost" href="/requests/{{ req.id }}/edit">Редактировать</a>
   {% if req.status.value == 'Завершена водителем' %}
   <form method="post" action="/requests/{{ req.id }}/confirm">
     <button class="btn btn-primary" type="submit">Подтвердить</button>
   </form>
   {% endif %}
+  {% if can_delete %}
   <form method="post" action="/requests/{{ req.id }}/delete" onsubmit="return confirm('Удалить заявку?')">
     <button class="btn btn-danger" type="submit">Удалить</button>
   </form>
+  {% endif %}
 </div>
 {% endif %}
 <h3>История статусов</h3>

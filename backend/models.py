@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, ForeignKey, Enum, Date
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, ForeignKey, Enum, Date, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from enum import Enum as PyEnum
@@ -12,14 +12,16 @@ def _build_engine(url: str):
     from sqlalchemy import create_engine
     if url.startswith("sqlite"):
         return create_engine(url, connect_args={"check_same_thread": False})
-    # Postgres: подключаем опционально, при сбое откатываемся на SQLite
-    try:
-        return create_engine(url, pool_pre_ping=True)
-    except Exception as e:
-        print("DB_ENGINE_FALLBACK", repr(e), flush=True)
-        return create_engine("sqlite:///ground.db", connect_args={"check_same_thread": False})
+    # Внешняя БД запускается fail-closed: скрытая запись в локальную SQLite недопустима.
+    return create_engine(url, pool_pre_ping=True)
 
 engine = _build_engine(DATABASE_URL)
+if DATABASE_URL.startswith("sqlite"):
+    @event.listens_for(engine, "connect")
+    def _sqlite_foreign_keys(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 Base = declarative_base()
 
@@ -133,7 +135,7 @@ class Tariff(Base):
 class TripRequest(Base):
     __tablename__ = "trip_requests"
     id = Column(Integer, primary_key=True, index=True)
-    number = Column(String(255), nullable=False)
+    number = Column(String(255), nullable=False, unique=True)
     planned_date = Column(Date, nullable=False)
     planned_time = Column(String(50), nullable=True)
     driver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -244,7 +246,7 @@ class SalaryCalcItem(Base):
     __tablename__ = "salary_calc_items"
     id = Column(Integer, primary_key=True, index=True)
     salary_calc_id = Column(Integer, ForeignKey("salary_calcs.id"), nullable=False)
-    trip_request_id = Column(Integer, ForeignKey("trip_requests.id"), nullable=False)
+    trip_request_id = Column(Integer, ForeignKey("trip_requests.id"), nullable=False, unique=True)
     sum = Column(Float, nullable=False)
     salary_calc = relationship("SalaryCalc")
     trip_request = relationship("TripRequest")
@@ -293,5 +295,27 @@ class IntegrationSetting(Base):
     is_active = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+@event.listens_for(User.__table__, "after_create")
+def _sqlite_last_admin_triggers(_target, connection, **_kwargs):
+    if connection.dialect.name != "sqlite":
+        return
+    connection.exec_driver_sql("""
+        CREATE TRIGGER IF NOT EXISTS protect_last_active_admin_update
+        BEFORE UPDATE OF role, is_active ON users
+        WHEN OLD.role = 'ADMIN' AND OLD.is_active = 1
+          AND (NEW.role <> 'ADMIN' OR NEW.is_active <> 1)
+          AND (SELECT COUNT(*) FROM users WHERE role = 'ADMIN' AND is_active = 1 AND id <> OLD.id) = 0
+        BEGIN SELECT RAISE(ABORT, 'last active admin'); END
+    """)
+    connection.exec_driver_sql("""
+        CREATE TRIGGER IF NOT EXISTS protect_last_active_admin_delete
+        BEFORE DELETE ON users
+        WHEN OLD.role = 'ADMIN' AND OLD.is_active = 1
+          AND (SELECT COUNT(*) FROM users WHERE role = 'ADMIN' AND is_active = 1 AND id <> OLD.id) = 0
+        BEGIN SELECT RAISE(ABORT, 'last active admin'); END
+    """)
+
 
 Base.metadata.create_all(engine)

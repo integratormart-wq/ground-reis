@@ -2,7 +2,7 @@
 {% block content %}
 <div class="page-header"><h1>Расчет зарплаты</h1></div>
 <form method="get" class="filters">
-  <select name="driver_id"><option value="">Все водители</option>{% for d in drivers %}<option value="{{ d.id }}" {% if request.query_params.driver_id==d.id|string %}selected{% endif %}>{{ d.full_name }}</option>{% endfor %}</select>
+  {% if user.role in ['admin','logist'] %}<select name="driver_id"><option value="">Все водители</option>{% for d in drivers %}<option value="{{ d.id }}" {% if request.query_params.driver_id==d.id|string %}selected{% endif %}>{{ d.full_name }}</option>{% endfor %}</select>{% endif %}
   <input type="date" name="date_from" value="{{ date_from or '' }}" />
   <input type="date" name="date_to" value="{{ date_to or '' }}" />
   <input name="q" value="{{ request.query_params.q or '' }}" placeholder="Поиск по номеру" />
@@ -22,10 +22,10 @@
   </div>
 </div>
 <table class="table">
-  <thead><tr><th>Дата</th><th>Номер</th><th>Направление</th><th>Объем</th><th>Полигон</th><th>Сумма</th></tr></thead>
+  <thead><tr><th>Дата</th><th>Номер</th><th>Направление</th><th>Объем</th><th>Полигон</th><th>Сумма</th>{% if user.role in ['admin','logist'] %}<th>Действия</th>{% endif %}</tr></thead>
   <tbody>
   {% for t in item.trips %}
-  <tr><td>{{ t.planned_date }}</td><td>{{ t.number }}</td><td>{{ t.kind.value }}</td><td>{{ t.actual_volume if t.actual_volume is not none else t.volume }}</td><td>{{ t.polygon.name if t.polygon else '—' }}</td><td>{{ t.sum_driver or 0 }} ₽</td></tr>
+  <tr><td>{{ t.planned_date }}</td><td>{{ t.number }}</td><td>{{ t.kind.value }}</td><td>{{ t.actual_volume if t.actual_volume is not none else t.volume }}</td><td>{{ t.polygon.name if t.polygon else '—' }}</td><td>{{ t.sum_driver or 0 }} ₽</td>{% if user.role in ['admin','logist'] %}<td><a class="btn btn-ghost btn-sm" href="/requests/{{ t.id }}/edit">Редактировать</a></td>{% endif %}</tr>
   {% endfor %}
   </tbody>
 </table>
