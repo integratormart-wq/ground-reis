@@ -125,6 +125,7 @@ def test_settings_sections_are_collapsible_and_anchor_driven():
     db, client, _, _ = _setup()
     html = client.get("/settings").text
 
+    assert '/static/css/app.css?v=6' in html
     assert 'class="settings-section-nav"' in html
     for anchor, title in (
         ("vehicle-types", "Типы автомобилей"),
