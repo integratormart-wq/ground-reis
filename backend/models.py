@@ -316,6 +316,3 @@ def _sqlite_last_admin_triggers(_target, connection, **_kwargs):
           AND (SELECT COUNT(*) FROM users WHERE role = 'ADMIN' AND is_active = 1 AND id <> OLD.id) = 0
         BEGIN SELECT RAISE(ABORT, 'last active admin'); END
     """)
-
-
-Base.metadata.create_all(engine)

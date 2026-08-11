@@ -1,4 +1,4 @@
-import os, io, csv, traceback, sys, math, json
+import os, io, csv, sys, math, json, threading
 from datetime import datetime, timedelta, date
 from typing import Optional
 from dotenv import load_dotenv
@@ -63,88 +63,118 @@ def render_template(name: str, context: dict) -> HTMLResponse:
     return HTMLResponse(content=html)
 UPLOAD_DIR = os.path.join(root_dir, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-print("BOOT creating tables", flush=True)
-try:
-    models.Base.metadata.create_all(bind=engine)
-    print("BOOT tables_created", flush=True)
-except Exception as e:
-    print("BOOT DB_INIT_ERROR", repr(e), flush=True)
-    traceback.print_exc()
-    sys.exit(1)
-
-# Авто-миграция: create_all не добавляет колонки в существующие таблицы.
-try:
-    with engine.begin() as conn:
-        from sqlalchemy import inspect, text
-        insp = inspect(engine)
-        cols = [c["name"] for c in insp.get_columns("trip_requests")]
-        if "bitrix_element_id" not in cols:
-            conn.execute(text("ALTER TABLE trip_requests ADD COLUMN bitrix_element_id INTEGER"))
-            print("BOOT migrated: added bitrix_element_id", flush=True)
-        else:
-            print("BOOT migration: bitrix_element_id already present", flush=True)
-        if "bitrix_entity_type_id" not in cols:
-            conn.execute(text("ALTER TABLE trip_requests ADD COLUMN bitrix_entity_type_id INTEGER"))
-            print("BOOT migrated: added bitrix_entity_type_id", flush=True)
-        else:
-            print("BOOT migration: bitrix_entity_type_id already present", flush=True)
-        duplicate_numbers = conn.execute(text("SELECT number FROM trip_requests GROUP BY number HAVING COUNT(*) > 1 LIMIT 1")).first()
-        if duplicate_numbers:
-            raise RuntimeError("Найдены дубли номеров заявок; уникальный индекс не создан")
-        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_trip_requests_number ON trip_requests(number)"))
-        duplicate_salary_trip = conn.execute(text("SELECT trip_request_id FROM salary_calc_items GROUP BY trip_request_id HAVING COUNT(*) > 1 LIMIT 1")).first()
-        if duplicate_salary_trip:
-            raise RuntimeError("Одна заявка включена в несколько расчетов зарплаты; уникальный индекс не создан")
-        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_salary_calc_items_trip_request ON salary_calc_items(trip_request_id)"))
-        if engine.dialect.name == "sqlite":
-            conn.execute(text("""
-                CREATE TRIGGER IF NOT EXISTS protect_last_active_admin_update
-                BEFORE UPDATE OF role, is_active ON users
-                WHEN OLD.role = 'ADMIN' AND OLD.is_active = 1
-                  AND (NEW.role <> 'ADMIN' OR NEW.is_active <> 1)
-                  AND (SELECT COUNT(*) FROM users WHERE role = 'ADMIN' AND is_active = 1 AND id <> OLD.id) = 0
-                BEGIN SELECT RAISE(ABORT, 'last active admin'); END
-            """))
-            conn.execute(text("""
-                CREATE TRIGGER IF NOT EXISTS protect_last_active_admin_delete
-                BEFORE DELETE ON users
-                WHEN OLD.role = 'ADMIN' AND OLD.is_active = 1
-                  AND (SELECT COUNT(*) FROM users WHERE role = 'ADMIN' AND is_active = 1 AND id <> OLD.id) = 0
-                BEGIN SELECT RAISE(ABORT, 'last active admin'); END
-            """))
-except Exception as e:
-    print("BOOT MIGRATION_ERROR", repr(e), flush=True)
-    traceback.print_exc()
-    sys.exit(1)
 pwd_hash = lambda pw: bcrypt.hashpw(pw[:72].encode(), bcrypt.gensalt()).decode()
 pwd_check = lambda pw, h: bcrypt.checkpw(pw[:72].encode(), h.encode())
 
-print("BOOT seed_start", flush=True)
-try:
-    with SessionLocal() as _db:
-        if _db.query(models.User).count() == 0:
-            bootstrap_password = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "")
-            if not bootstrap_password:
-                print("BOOT bootstrap_skipped: set BOOTSTRAP_ADMIN_PASSWORD for an empty database", flush=True)
+_DB_READY = threading.Event()
+_DEFER_DB_INIT = os.getenv("RENDER", "").lower() == "true"
+
+
+def _initialize_database():
+    print("BOOT creating tables", flush=True)
+    try:
+        models.Base.metadata.create_all(bind=engine)
+        print("BOOT tables_created", flush=True)
+    except Exception as exc:
+        print("BOOT DB_INIT_ERROR", type(exc).__name__, flush=True)
+        raise
+
+    # create_all не добавляет колонки в существующие таблицы.
+    try:
+        with engine.begin() as conn:
+            from sqlalchemy import inspect, text
+            insp = inspect(engine)
+            cols = [c["name"] for c in insp.get_columns("trip_requests")]
+            if "bitrix_element_id" not in cols:
+                conn.execute(text("ALTER TABLE trip_requests ADD COLUMN bitrix_element_id INTEGER"))
+                print("BOOT migrated: added bitrix_element_id", flush=True)
             else:
-                if len(bootstrap_password) < 12:
-                    raise RuntimeError("BOOTSTRAP_ADMIN_PASSWORD must contain at least 12 characters")
-                admin = models.User(
-                    full_name=os.getenv("BOOTSTRAP_ADMIN_NAME", "Администратор").strip() or "Администратор",
-                    login=os.getenv("BOOTSTRAP_ADMIN_LOGIN", "admin").strip() or "admin",
-                    password_hash=pwd_hash(bootstrap_password),
-                    role=UserRole.ADMIN,
-                    is_active=True,
-                )
-                _db.add(admin)
-                _db.commit()
-                print("BOOT bootstrap_admin_created", flush=True)
-except Exception as e:
-    print("BOOT SEED_ERROR", repr(e), flush=True)
-    traceback.print_exc()
-    sys.exit(1)
+                print("BOOT migration: bitrix_element_id already present", flush=True)
+            if "bitrix_entity_type_id" not in cols:
+                conn.execute(text("ALTER TABLE trip_requests ADD COLUMN bitrix_entity_type_id INTEGER"))
+                print("BOOT migrated: added bitrix_entity_type_id", flush=True)
+            else:
+                print("BOOT migration: bitrix_entity_type_id already present", flush=True)
+            duplicate_numbers = conn.execute(text("SELECT number FROM trip_requests GROUP BY number HAVING COUNT(*) > 1 LIMIT 1")).first()
+            if duplicate_numbers:
+                raise RuntimeError("Найдены дубли номеров заявок; уникальный индекс не создан")
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_trip_requests_number ON trip_requests(number)"))
+            duplicate_salary_trip = conn.execute(text("SELECT trip_request_id FROM salary_calc_items GROUP BY trip_request_id HAVING COUNT(*) > 1 LIMIT 1")).first()
+            if duplicate_salary_trip:
+                raise RuntimeError("Одна заявка включена в несколько расчетов зарплаты; уникальный индекс не создан")
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_salary_calc_items_trip_request ON salary_calc_items(trip_request_id)"))
+            if engine.dialect.name == "sqlite":
+                conn.execute(text("""
+                    CREATE TRIGGER IF NOT EXISTS protect_last_active_admin_update
+                    BEFORE UPDATE OF role, is_active ON users
+                    WHEN OLD.role = 'ADMIN' AND OLD.is_active = 1
+                      AND (NEW.role <> 'ADMIN' OR NEW.is_active <> 1)
+                      AND (SELECT COUNT(*) FROM users WHERE role = 'ADMIN' AND is_active = 1 AND id <> OLD.id) = 0
+                    BEGIN SELECT RAISE(ABORT, 'last active admin'); END
+                """))
+                conn.execute(text("""
+                    CREATE TRIGGER IF NOT EXISTS protect_last_active_admin_delete
+                    BEFORE DELETE ON users
+                    WHEN OLD.role = 'ADMIN' AND OLD.is_active = 1
+                      AND (SELECT COUNT(*) FROM users WHERE role = 'ADMIN' AND is_active = 1 AND id <> OLD.id) = 0
+                    BEGIN SELECT RAISE(ABORT, 'last active admin'); END
+                """))
+    except Exception as exc:
+        print("BOOT MIGRATION_ERROR", type(exc).__name__, flush=True)
+        raise
+
+    print("BOOT seed_start", flush=True)
+    try:
+        with SessionLocal() as _db:
+            if _db.query(models.User).count() == 0:
+                bootstrap_password = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "")
+                if not bootstrap_password:
+                    print("BOOT bootstrap_skipped: set BOOTSTRAP_ADMIN_PASSWORD for an empty database", flush=True)
+                else:
+                    if len(bootstrap_password) < 12:
+                        raise RuntimeError("BOOTSTRAP_ADMIN_PASSWORD must contain at least 12 characters")
+                    admin = models.User(
+                        full_name=os.getenv("BOOTSTRAP_ADMIN_NAME", "Администратор").strip() or "Администратор",
+                        login=os.getenv("BOOTSTRAP_ADMIN_LOGIN", "admin").strip() or "admin",
+                        password_hash=pwd_hash(bootstrap_password),
+                        role=UserRole.ADMIN,
+                        is_active=True,
+                    )
+                    _db.add(admin)
+                    _db.commit()
+                    print("BOOT bootstrap_admin_created", flush=True)
+    except Exception as exc:
+        print("BOOT SEED_ERROR", type(exc).__name__, flush=True)
+        raise
+    _DB_READY.set()
+    print("BOOT database_ready", flush=True)
+
+
+def _initialize_database_or_exit():
+    try:
+        _initialize_database()
+    except BaseException:
+        os._exit(1)
+
+
+if _DEFER_DB_INIT:
+    @app.on_event("startup")
+    def start_render_database_init():
+        threading.Thread(target=_initialize_database_or_exit, name="database-init", daemon=True).start()
+else:
+    try:
+        _initialize_database()
+    except Exception:
+        sys.exit(1)
+
+
+@app.get("/healthz", include_in_schema=False)
+def healthz():
+    return {"status": "ready" if _DB_READY.is_set() else "starting"}
 
 def get_db():
+    if not _DB_READY.is_set():
+        raise HTTPException(status_code=503, detail="База данных запускается")
     db = SessionLocal()
     try: yield db
     finally: db.close()
@@ -196,6 +226,17 @@ def menu_for(role: str):
         base.append({"href": "/archive", "label": "Архив"})
         base.append({"href": "/users", "label": "Пользователи"})
     return base
+
+
+def _driver_reference_scope(db: Session, driver_id: int):
+    rows = db.query(
+        models.TripRequest.polygon_id,
+        models.TripRequest.customer_id,
+    ).filter(models.TripRequest.driver_id == driver_id).distinct().all()
+    return (
+        {polygon_id for polygon_id, _ in rows if polygon_id is not None},
+        {customer_id for _, customer_id in rows if customer_id is not None},
+    )
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
@@ -283,7 +324,7 @@ def requests_list(request: Request, status_f: Optional[str] = None, kind: Option
     if q:
         rs = rs.filter(models.TripRequest.number.contains(q))
     rs = rs.order_by(models.TripRequest.planned_date.desc()).all()
-    drivers = db.query(models.User).filter(models.User.role == UserRole.DRIVER).all()
+    drivers = [current_user] if current_user.role == UserRole.DRIVER else db.query(models.User).filter(models.User.role == UserRole.DRIVER).all()
     menu = menu_for(current_user.role)
     return render_template("requests.html", {"request": request, "user": current_user, "menu": menu, "reqs": rs, "drivers": drivers, "statuses": RequestStatus, "kind_f": kind or "", "status_f": status_f or "", "q": q or "", "deletable_ids": _deletable_request_ids(db, rs), "app_name": "ГРАУНД | Рейсы"})
 
@@ -307,7 +348,7 @@ def pukhtovoz_list(request: Request, status_f: Optional[str] = None, driver_id: 
     if q:
         rs = rs.filter(models.TripRequest.number.contains(q))
     rs = rs.order_by(models.TripRequest.planned_date.desc()).all()
-    drivers = db.query(models.User).filter(models.User.role == UserRole.DRIVER).all()
+    drivers = [current_user] if current_user.role == UserRole.DRIVER else db.query(models.User).filter(models.User.role == UserRole.DRIVER).all()
     return render_template("trips_kind.html", {"request": request, "user": current_user, "menu": menu, "reqs": rs, "drivers": drivers, "statuses": RequestStatus, "kind_label": "Пухтовозы", "kind": "пухтовоз", "new_url": "/pukhtovoz/new", "status_f": status_f or "", "driver_id": driver_id or "", "date_from": date_from or "", "date_to": date_to or "", "q": q or "", "deletable_ids": _deletable_request_ids(db, rs), "app_name": "ГРАУНД | Рейсы"})
 
 @app.get("/samosval", response_class=HTMLResponse)
@@ -330,7 +371,7 @@ def samosval_list(request: Request, status_f: Optional[str] = None, driver_id: O
     if q:
         rs = rs.filter(models.TripRequest.number.contains(q))
     rs = rs.order_by(models.TripRequest.planned_date.desc()).all()
-    drivers = db.query(models.User).filter(models.User.role == UserRole.DRIVER).all()
+    drivers = [current_user] if current_user.role == UserRole.DRIVER else db.query(models.User).filter(models.User.role == UserRole.DRIVER).all()
     return render_template("trips_kind.html", {"request": request, "user": current_user, "menu": menu, "reqs": rs, "drivers": drivers, "statuses": RequestStatus, "kind_label": "Самосвалы", "kind": "самосвал", "new_url": "/samosval/new", "status_f": status_f or "", "driver_id": driver_id or "", "date_from": date_from or "", "date_to": date_to or "", "q": q or "", "deletable_ids": _deletable_request_ids(db, rs), "app_name": "ГРАУНД | Рейсы"})
 
 @app.get("/requests/new", response_class=HTMLResponse)
@@ -904,6 +945,15 @@ def reports(request: Request, status_f: Optional[str] = None, driver_id: Optiona
         like = f"%{q}%"
         q_base = q_base.filter(models.TripRequest.number.ilike(like))
     rows = q_base.order_by(models.TripRequest.planned_date.desc()).all()
+    if current_user.role == UserRole.DRIVER:
+        polygon_ids, customer_ids = _driver_reference_scope(db, current_user.id)
+        drivers = [current_user]
+        polygons = db.query(models.Polygon).filter(models.Polygon.id.in_(polygon_ids)).order_by(models.Polygon.name).all()
+        customers = db.query(models.Customer).filter(models.Customer.id.in_(customer_ids)).order_by(models.Customer.name).all()
+    else:
+        drivers = db.query(models.User).filter(models.User.role == UserRole.DRIVER).all()
+        polygons = db.query(models.Polygon).order_by(models.Polygon.name).all()
+        customers = db.query(models.Customer).order_by(models.Customer.name).all()
     summary = {
         "requests": len(rows),
         "finished": sum(1 for r in rows if r.status == RequestStatus.LOGIST_CONFIRMED),
@@ -912,7 +962,7 @@ def reports(request: Request, status_f: Optional[str] = None, driver_id: Optiona
         "bins": sum((r.waste_bin_count or 0) for r in rows),
         "sum": sum((r.sum_driver or 0) for r in rows),
     }
-    return render_template("reports.html", {"request": request, "user": current_user, "menu": menu, "summary": summary, "rows": rows, "statuses": RequestStatus, "drivers": db.query(models.User).filter(models.User.role == UserRole.DRIVER).all(), "polygons": db.query(models.Polygon).all(), "customers": db.query(models.Customer).all(), "status_f": status_f or "", "driver_id": driver_id or "", "polygon_id": polygon_id or "", "customer_id": customer_id or "", "date_from": date_from or "", "date_to": date_to or "", "q": q or "", "app_name": "ГРАУНД | Рейсы"})
+    return render_template("reports.html", {"request": request, "user": current_user, "menu": menu, "summary": summary, "rows": rows, "statuses": RequestStatus, "drivers": drivers, "polygons": polygons, "customers": customers, "status_f": status_f or "", "driver_id": driver_id or "", "polygon_id": polygon_id or "", "customer_id": customer_id or "", "date_from": date_from or "", "date_to": date_to or "", "q": q or "", "app_name": "ГРАУНД | Рейсы"})
 
 @app.get("/export/report.csv")
 def export_report(status_f: Optional[str] = None, driver_id: Optional[str] = None, polygon_id: Optional[str] = None, customer_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, search: Optional[str] = Query(None, alias="q"), current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -979,7 +1029,11 @@ def _apply_polygon_filters(query, polygon_id=None, driver_id=None, date_from=Non
 @app.get("/polygons", response_class=HTMLResponse)
 def polygons_list(request: Request, polygon_id: Optional[str] = None, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
-    polygons = db.query(models.Polygon).order_by(models.Polygon.name).all()
+    if current_user.role == UserRole.DRIVER:
+        polygon_ids, _ = _driver_reference_scope(db, current_user.id)
+        polygons = db.query(models.Polygon).filter(models.Polygon.id.in_(polygon_ids)).order_by(models.Polygon.name).all()
+    else:
+        polygons = db.query(models.Polygon).order_by(models.Polygon.name).all()
     visible_polygons = [p for p in polygons if not polygon_id or p.id == int(polygon_id)]
     polygon_query = db.query(models.TripRequest)
     if current_user.role == UserRole.DRIVER:
@@ -999,7 +1053,7 @@ def polygons_list(request: Request, polygon_id: Optional[str] = None, driver_id:
             "volume": sum((r.actual_volume if r.actual_volume is not None else r.volume or 0) for r in rows),
             "sum": sum((r.sum_driver or 0) for r in rows),
         })
-    return render_template("polygons.html", {"request": request, "user": current_user, "menu": menu, "items": items, "polygons": polygons, "drivers": db.query(models.User).filter(models.User.role == UserRole.DRIVER).all(), "polygon_id": polygon_id or "", "driver_id": driver_id or "", "date_from": date_from or "", "date_to": date_to or "", "app_name": "ГРАУНД | Рейсы"})
+    return render_template("polygons.html", {"request": request, "user": current_user, "menu": menu, "items": items, "polygons": polygons, "drivers": [current_user] if current_user.role == UserRole.DRIVER else db.query(models.User).filter(models.User.role == UserRole.DRIVER).all(), "polygon_id": polygon_id or "", "driver_id": driver_id or "", "date_from": date_from or "", "date_to": date_to or "", "app_name": "ГРАУНД | Рейсы"})
 
 @app.post("/polygons")
 def create_polygon(name: str = Form(""), address: str = Form(""), current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db)):
@@ -1013,6 +1067,11 @@ def create_polygon(name: str = Form(""), address: str = Form(""), current_user: 
 def export_polygon(polygon_id: str, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     polygon = db.query(models.Polygon).filter(models.Polygon.id == int(polygon_id)).first()
     if not polygon:
+        raise HTTPException(404, "Полигон не найден")
+    if current_user.role == UserRole.DRIVER and not db.query(models.TripRequest.id).filter(
+        models.TripRequest.driver_id == current_user.id,
+        models.TripRequest.polygon_id == polygon.id,
+    ).first():
         raise HTTPException(404, "Полигон не найден")
     polygon_query = db.query(models.TripRequest)
     if current_user.role == UserRole.DRIVER:

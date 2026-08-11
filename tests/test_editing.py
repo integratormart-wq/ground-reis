@@ -465,6 +465,61 @@ def test_current_security_review_exports_idor_webhook_and_delete_history():
     db.close()
 
 
+def test_driver_is_fully_isolated_from_other_driver_html_filters_and_exports():
+    db, admin, _, driver, _, vehicle, customer, cargo, polygon, tariff, own = reset_db()
+    other = models.User(
+        full_name="ВОДИТЕЛЬ-ЧУЖОЙ-МАРКЕР", login="driver-isolation-other",
+        password_hash=app_module.pwd_hash("secret"), role=models.UserRole.DRIVER, is_active=True,
+    )
+    foreign_polygon = models.Polygon(name="ПОЛИГОН-ЧУЖОЙ-МАРКЕР")
+    foreign_customer = models.Customer(name="ЗАКАЗЧИК-ЧУЖОЙ-МАРКЕР")
+    db.add_all([other, foreign_polygon, foreign_customer]); db.flush()
+    own.status = models.RequestStatus.LOGIST_CONFIRMED
+    own.sum_driver = 1234
+    foreign = models.TripRequest(
+        number="РЕЙС-ЧУЖОЙ-МАРКЕР", planned_date=date.today(), driver_id=other.id,
+        vehicle_id=vehicle.id, customer_id=foreign_customer.id, cargo_type_id=cargo.id,
+        polygon_id=foreign_polygon.id, tariff_id=tariff.id, kind=models.TripType.PUKHTOVOZ,
+        status=models.RequestStatus.LOGIST_CONFIRMED, km=8765, volume=7654, sum_driver=987654,
+    )
+    db.add(foreign); db.commit()
+    client = client_as(driver)
+    forbidden = (
+        "РЕЙС-ЧУЖОЙ-МАРКЕР", "ВОДИТЕЛЬ-ЧУЖОЙ-МАРКЕР",
+        "ПОЛИГОН-ЧУЖОЙ-МАРКЕР", "ЗАКАЗЧИК-ЧУЖОЙ-МАРКЕР", "987654",
+    )
+
+    html_paths = (
+        "/driver", "/requests", "/pukhtovoz", "/samosval",
+        "/reports", "/salary", "/polygons",
+        f"/reports?driver_id={other.id}", f"/salary?driver_id={other.id}",
+    )
+    for path in html_paths:
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert all(marker not in response.text for marker in forbidden), path
+    assert client.get(f"/requests/{foreign.id}").status_code == 404
+    assert client.get(f"/export/polygon.csv?polygon_id={foreign_polygon.id}").status_code == 404
+
+    csv_paths = (
+        f"/export/report.csv?driver_id={other.id}",
+        f"/export/requests.csv?driver_id={other.id}",
+        f"/export/polygons.csv?driver_id={other.id}",
+    )
+    for path in csv_paths:
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert all(marker not in response.text for marker in forbidden), path
+
+    for path in (f"/export/report.xlsx?driver_id={other.id}", f"/export/salary.xlsx?driver_id={other.id}"):
+        response = client.get(path)
+        assert response.status_code == 200, path
+        workbook = load_workbook(io.BytesIO(response.content), read_only=True)
+        cells = " ".join("" if value is None else str(value) for row in workbook.active.iter_rows(values_only=True) for value in row)
+        assert all(marker not in cells for marker in forbidden), path
+    db.close()
+
+
 def test_current_security_review_audit_zero_lifecycle_and_salary_unique():
     from sqlalchemy.exc import IntegrityError
     db, admin, _, driver, _, vehicle, customer, cargo, polygon, tariff, trip = reset_db()
@@ -748,6 +803,72 @@ def test_integration_secrets_stay_out_of_dom_blank_update_preserves_and_xlsx_is_
     assert load_workbook(io.BytesIO(report.content), read_only=True).active.max_row >= 1
     assert load_workbook(io.BytesIO(salary.content), read_only=True).active.max_row >= 1
     db.close()
+
+
+def test_render_binds_health_before_slow_database_initialization(tmp_path):
+    import socket
+    import sqlite3
+    import time
+    import urllib.error
+    import urllib.request
+
+    db_path = tmp_path / "render-delayed.db"
+    lock = sqlite3.connect(db_path)
+    lock.execute("BEGIN EXCLUSIVE")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    env = os.environ.copy()
+    env.update({
+        "DATABASE_URL": f"sqlite:///{db_path.as_posix()}",
+        "SECRET_KEY": "render-delayed-start-test",
+        "PYTHONPATH": str(Path(app_module.root_dir)),
+        "RENDER": "true",
+    })
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", str(port), "--workers", "1"],
+        cwd=Path(app_module.root_dir), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        health = None
+        for _ in range(80):
+            if proc.poll() is not None:
+                raise AssertionError(proc.stdout.read())
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=1) as response:
+                    health = response.read().decode()
+                break
+            except Exception:
+                time.sleep(0.1)
+        assert health and '"status":"starting"' in health
+        with pytest.raises(urllib.error.HTTPError) as blocked:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/reports", timeout=2)
+        assert blocked.value.code == 503
+
+        lock.rollback()
+        lock.close()
+        for _ in range(100):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=1) as response:
+                    if '"status":"ready"' in response.read().decode():
+                        break
+            except Exception:
+                pass
+            time.sleep(0.1)
+        else:
+            raise AssertionError("Database initialization did not become ready")
+    finally:
+        try:
+            lock.close()
+        except Exception:
+            pass
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
 
 def test_empty_database_has_no_demo_accounts_and_secure_bootstrap_is_explicit(tmp_path):
