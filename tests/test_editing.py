@@ -175,20 +175,17 @@ def test_route_customer_and_all_tariff_fields_are_editable():
     }, follow_redirects=False)
     assert route_saved.status_code == 302
     tariff_saved = client.post(f"/settings/tariffs/{tariff.id}/edit", data={
-        "title": "Полный тариф", "kind": "пухтовоз", "vehicle_type_id": str(vt.id),
-        "formula": "km", "min_km": "5", "max_km": "80", "min_volume": "2", "max_volume": "20",
-        "trip_price": "100", "km_price": "12", "volume_price": "33", "fixed_sum": "400",
-        "extra_fee": "50", "coefficient": "1.25", "date_from": "2026-08-01", "date_to": "2026-12-31",
-        "comment": "Все поля", "is_active": "on",
+        "title": "Полный тариф", "trip_price": "100", "is_active": "on",
     }, follow_redirects=False)
     assert tariff_saved.status_code == 302
     db.expire_all()
     saved_route = db.query(models.Route).filter_by(id=route.id).one()
     saved_tariff = db.query(models.Tariff).filter_by(id=tariff.id).one()
     assert saved_route.customer_id == customer.id
-    assert (saved_tariff.min_km, saved_tariff.max_km, saved_tariff.extra_fee, saved_tariff.coefficient) == (5, 80, 50, 1.25)
-    assert str(saved_tariff.date_from) == "2026-08-01" and str(saved_tariff.date_to) == "2026-12-31"
-    assert saved_tariff.comment == "Все поля"
+    assert (saved_tariff.min_km, saved_tariff.max_km, saved_tariff.min_volume, saved_tariff.max_volume) == (0, None, 0, None)
+    assert saved_tariff.formula == "trip" and saved_tariff.trip_price == 100
+    assert saved_tariff.extra_fee == 0 and saved_tariff.coefficient == 1
+    assert saved_tariff.date_from is None and saved_tariff.date_to is None and saved_tariff.comment == ""
     db.close()
 
 
@@ -296,15 +293,12 @@ def test_request_edit_rejects_incompatible_tariff_and_nonfinite_numbers():
 def test_tariff_rules_and_formula_are_enforced():
     db, admin, _, driver, vt, vehicle, customer, cargo, polygon, tariff, trip = reset_db()
     client = client_as(admin)
-    common = {
-        "title": "Проверка", "kind": "пухтовоз", "vehicle_type_id": str(vt.id), "formula": "bad",
-        "trip_price": "0", "km_price": "12", "volume_price": "0", "fixed_sum": "0",
-        "min_km": "10", "max_km": "5", "min_volume": "0", "max_volume": "20",
-        "extra_fee": "50", "coefficient": "2", "date_from": "2026-12-31", "date_to": "2026-01-01", "is_active": "on",
-    }
-    assert client.post(f"/settings/tariffs/{tariff.id}/edit", data=common, follow_redirects=False).status_code == 400
-    common.update({"formula": "km", "min_km": "0", "max_km": "20", "date_from": "2026-01-01", "date_to": "2026-12-31"})
-    assert client.post(f"/settings/tariffs/{tariff.id}/edit", data=common, follow_redirects=False).status_code == 302
+    assert client.post(f"/settings/tariffs/{tariff.id}/edit", data={
+        "title": "Проверка", "trip_price": "-1", "is_active": "on",
+    }, follow_redirects=False).status_code == 400
+    assert client.post(f"/settings/tariffs/{tariff.id}/edit", data={
+        "title": "Проверка", "trip_price": "340", "is_active": "on",
+    }, follow_redirects=False).status_code == 302
     request_data = {
         "number": trip.number, "planned_date": "2026-08-11", "planned_time": "08:00", "driver_id": str(driver.id),
         "vehicle_id": str(vehicle.id), "customer_id": str(customer.id), "cargo_type_id": str(cargo.id),
@@ -364,7 +358,8 @@ def test_final_review_tariff_completion_and_salary_guards():
     tariff.min_km, tariff.max_km, tariff.min_volume, tariff.max_volume = 0, 20, 0, 20
     db.commit()
     html = client.get(f"/settings/tariffs/{tariff.id}/edit").text
-    assert 'name="exact_km"' in html and 'name="exact_volume"' in html
+    assert 'name="title"' in html and 'name="trip_price"' in html
+    assert 'name="exact_km"' not in html and 'name="exact_volume"' not in html
     assert 'name="coefficient"' not in html
     tariff.is_active = False
     db.commit()

@@ -42,35 +42,13 @@
       <label>Телефон<input name="phone" value="{{ row.phone or '' }}" /></label>
       <label class="wide">Комментарий<textarea name="comment">{{ row.comment or '' }}</textarea></label>
       {% elif section == 'tariffs' %}
-      {% if row.kind.value == 'пухтовоз' %}
-      <input type="hidden" name="kind" value="пухтовоз" />
-      <label>Название<input name="title" value="{{ row.title }}" required /></label>
-      <label>Тип автомобиля<select name="vehicle_type_id" required>{% for vt in vtypes if vt.kind.value == 'пухтовоз' %}<option value="{{ vt.id }}" {% if row.vehicle_type_id == vt.id %}selected{% endif %}>{{ vt.name }}</option>{% endfor %}</select></label>
-      <label>Расстояние, км<input name="exact_km" type="number" min="0" step="any" value="{{ row.min_km or 0 }}" required /></label>
+      <label>Название тарифа<input name="title" value="{{ row.title }}" required /></label>
+      {% if row.kind.value == 'самосвал' %}
       <label>Объём, м³<input name="exact_volume" type="number" min="0" step="any" value="{{ row.min_volume or 0 }}" required /></label>
-      <label>Стоимость рейса, ₽<input name="trip_price" type="number" min="0" step="any" value="{{ row.trip_price or 0 }}" required /></label>
-      <label class="wide">Комментарий<textarea name="comment">{{ row.comment or '' }}</textarea></label>
-      <label><input type="checkbox" name="is_active" {% if row.is_active %}checked{% endif %} /> Активен</label>
-      {% else %}
-      <label>Название<input name="title" value="{{ row.title }}" required /></label>
-      <input type="hidden" name="kind" value="самосвал" />
-      <label>Тип автомобиля<select name="vehicle_type_id" required>{% for vt in vtypes if vt.kind.value == 'самосвал' %}<option value="{{ vt.id }}" {% if row.vehicle_type_id == vt.id %}selected{% endif %}>{{ vt.name }}</option>{% endfor %}</select></label>
-      <label>Формула<select name="formula"><option value="trip" {% if row.formula == 'trip' %}selected{% endif %}>За рейс</option><option value="km" {% if row.formula == 'km' %}selected{% endif %}>За км</option><option value="volume" {% if row.formula == 'volume' %}selected{% endif %}>За объём</option><option value="fixed" {% if row.formula == 'fixed' %}selected{% endif %}>Фиксированная сумма</option></select></label>
-      <label>За рейс<input name="trip_price" type="number" step="any" value="{{ row.trip_price or 0 }}" /></label>
-      <label>За км<input name="km_price" type="number" step="any" value="{{ row.km_price or 0 }}" /></label>
-      <label>За м³<input name="volume_price" type="number" step="any" value="{{ row.volume_price or 0 }}" /></label>
-      <label>Фиксированная сумма<input name="fixed_sum" type="number" step="any" value="{{ row.fixed_sum or 0 }}" /></label>
-      <label>Минимум км<input name="min_km" type="number" step="any" value="{{ row.min_km or 0 }}" /></label>
-      <label>Максимум км<input name="max_km" type="number" step="any" value="{{ row.max_km if row.max_km is not none else '' }}" /></label>
-      <label>Минимум м³<input name="min_volume" type="number" step="any" value="{{ row.min_volume or 0 }}" /></label>
-      <label>Максимум м³<input name="max_volume" type="number" step="any" value="{{ row.max_volume if row.max_volume is not none else '' }}" /></label>
-      <label>Доплата<input name="extra_fee" type="number" step="any" value="{{ row.extra_fee or 0 }}" /></label>
-      <label>Коэффициент<input name="coefficient" type="number" step="any" value="{{ row.coefficient if row.coefficient is not none else 1 }}" /></label>
-      <label>Действует с<input name="date_from" type="date" value="{{ row.date_from or '' }}" /></label>
-      <label>Действует по<input name="date_to" type="date" value="{{ row.date_to or '' }}" /></label>
-      <label class="wide">Комментарий<textarea name="comment">{{ row.comment or '' }}</textarea></label>
-      <label><input type="checkbox" name="is_active" {% if row.is_active %}checked{% endif %} /> Активен</label>
+      <label>Километры<input name="exact_km" type="number" min="0" step="any" value="{{ row.min_km or 0 }}" required /></label>
       {% endif %}
+      <label>Стоимость рейса, ₽<input name="trip_price" type="number" min="0" step="any" value="{{ row.trip_price or 0 }}" required /></label>
+      <label><input type="checkbox" name="is_active" {% if row.is_active %}checked{% endif %} /> Активен</label>
       {% endif %}
     </div>
   </section>

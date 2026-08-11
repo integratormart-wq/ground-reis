@@ -1,8 +1,8 @@
 import os
 from datetime import date
 
-os.environ.setdefault("DATABASE_URL", "sqlite:///./test_pukhtovoz_tariffs.db")
-os.environ.setdefault("SECRET_KEY", "test-pukhtovoz-tariffs-secret")
+os.environ.setdefault("DATABASE_URL", "sqlite:///./test_tariff_forms.db")
+os.environ.setdefault("SECRET_KEY", "test-tariff-forms-secret")
 
 from fastapi.testclient import TestClient
 
@@ -21,105 +21,101 @@ def _setup():
         role=models.UserRole.ADMIN,
         is_active=True,
     )
-    vehicle_type = models.VehicleType(name="Пухтовоз", kind=models.TripType.PUKHTOVOZ)
-    db.add_all([admin, vehicle_type])
+    pukhtovoz_type = models.VehicleType(name="Пухтовоз", kind=models.TripType.PUKHTOVOZ)
+    samosval_type = models.VehicleType(name="Самосвал", kind=models.TripType.SAMOSVAL)
+    db.add_all([admin, pukhtovoz_type, samosval_type])
     db.commit()
-    db.refresh(admin)
-    db.refresh(vehicle_type)
+    for row in (admin, pukhtovoz_type, samosval_type):
+        db.refresh(row)
     app_module.app.dependency_overrides[app_module.get_current_user] = lambda: admin
     client = TestClient(app_module.app, headers={"Origin": "http://testserver"})
-    return db, client, vehicle_type
+    return db, client, pukhtovoz_type, samosval_type
 
 
-def test_pukhtovoz_tariff_form_is_a_simple_repeatable_grid():
-    db, client, _ = _setup()
+def _form(html, form_id):
+    return html.split(f'id="{form_id}"', 1)[1].split("</form>", 1)[0]
 
+
+def test_tariff_forms_have_only_requested_fields():
+    db, client, _, _ = _setup()
     response = client.get("/settings")
-
     assert response.status_code == 200
-    form = response.text.split('id="pukhtovoz-tariff-form"', 1)[1].split("</form>", 1)[0]
-    assert "Расстояние, км" in form
-    assert "Объём, м³" in form
-    assert "Стоимость рейса, ₽" in form
-    assert "Добавить строку тарифа" in form
-    for removed in ("Формула", "Коэффициент", "Доплата", "Минимум км", "Максимум км"):
-        assert removed not in form
+
+    pukhtovoz = _form(response.text, "pukhtovoz-tariff-form")
+    assert "Название тарифа" in pukhtovoz
+    assert "Стоимость рейса, ₽" in pukhtovoz
+    for removed in ("Расстояние", "Объём", "Тип автомобиля", "Формула", "Коэффициент", "Доплата"):
+        assert removed not in pukhtovoz
+
+    samosval = _form(response.text, "samosval-tariff-form")
+    for required in ("Название тарифа", "Объём, м³", "Километры", "Стоимость рейса, ₽"):
+        assert required in samosval
+    for removed in ("Тип автомобиля", "Формула", "Коэффициент", "Доплата", "Минимум", "Максимум"):
+        assert removed not in samosval
     db.close()
 
 
-def test_grid_creates_distinct_prices_for_same_distance_and_different_volume():
-    db, client, vehicle_type = _setup()
-
+def test_pukhtovoz_grid_saves_title_and_trip_price_only():
+    db, client, pukhtovoz_type, _ = _setup()
     response = client.post(
         "/settings/tariffs/pukhtovoz-grid",
         data={
-            "vehicle_type_id": str(vehicle_type.id),
-            "pukhtovoz_km": ["15", "15"],
-            "pukhtovoz_volume": ["8", "12"],
-            "pukhtovoz_price": ["1200", "1650"],
+            "pukhtovoz_title": ["Обычный", "Срочный"],
+            "pukhtovoz_price": ["3500", "4800"],
             "is_active": "on",
         },
         follow_redirects=False,
     )
+    assert response.status_code == 302
+    rows = db.query(models.Tariff).order_by(models.Tariff.id).all()
+    assert [(row.title, row.trip_price) for row in rows] == [("Обычный", 3500), ("Срочный", 4800)]
+    assert all(row.kind == models.TripType.PUKHTOVOZ for row in rows)
+    assert all(row.vehicle_type_id == pukhtovoz_type.id for row in rows)
+    assert all((row.min_km, row.max_km, row.min_volume, row.max_volume) == (0, None, 0, None) for row in rows)
+    db.close()
 
+
+def test_samosval_grid_distinguishes_same_km_by_volume():
+    db, client, _, samosval_type = _setup()
+    response = client.post(
+        "/settings/tariffs/samosval-grid",
+        data={
+            "samosval_title": ["15 км / 8 м³", "15 км / 12 м³"],
+            "samosval_km": ["15", "15"],
+            "samosval_volume": ["8", "12"],
+            "samosval_price": ["2800", "3400"],
+            "is_active": "on",
+        },
+        follow_redirects=False,
+    )
     assert response.status_code == 302
     rows = db.query(models.Tariff).order_by(models.Tariff.min_volume).all()
-    assert len(rows) == 2
-    assert [(row.min_km, row.max_km, row.min_volume, row.max_volume, row.trip_price) for row in rows] == [
-        (15, 15, 8, 8, 1200),
-        (15, 15, 12, 12, 1650),
+    assert [(r.title, r.min_km, r.max_km, r.min_volume, r.max_volume, r.trip_price) for r in rows] == [
+        ("15 км / 8 м³", 15, 15, 8, 8, 2800),
+        ("15 км / 12 м³", 15, 15, 12, 12, 3400),
     ]
-    assert all(row.formula == "trip" and row.kind == models.TripType.PUKHTOVOZ for row in rows)
-
-    vehicle = models.Vehicle(name="Пухтовоз 1", plate="А001АА78", type_id=vehicle_type.id, is_active=True)
+    vehicle = models.Vehicle(name="Самосвал 1", plate="С001СС78", type_id=samosval_type.id, is_active=True)
     db.add(vehicle)
     db.commit()
-    first = app_module._select_tariff(db, models.TripType.PUKHTOVOZ, vehicle, date(2026, 8, 12), 15, 8)
-    second = app_module._select_tariff(db, models.TripType.PUKHTOVOZ, vehicle, date(2026, 8, 12), 15, 12)
-    assert app_module._tariff_amount(first, 15, 8, 1) == 1200
-    assert app_module._tariff_amount(second, 15, 12, 1) == 1650
-
-    edit_page = client.get(f"/settings/tariffs/{first.id}/edit")
-    assert edit_page.status_code == 200
-    assert 'name="exact_km"' in edit_page.text
-    assert 'name="exact_volume"' in edit_page.text
-    for removed_name in ("km_price", "volume_price", "fixed_sum", "extra_fee", "coefficient"):
-        assert f'name="{removed_name}"' not in edit_page.text
-
-    updated = client.post(
-        f"/settings/tariffs/{first.id}/edit",
-        data={
-            "title": "15 км / 9 м³",
-            "kind": "пухтовоз",
-            "vehicle_type_id": str(vehicle_type.id),
-            "exact_km": "15",
-            "exact_volume": "9",
-            "trip_price": "1350",
-            "is_active": "on",
-        },
-        follow_redirects=False,
-    )
-    assert updated.status_code == 302
-    db.expire_all()
-    saved = db.query(models.Tariff).filter_by(id=first.id).one()
-    assert (saved.min_km, saved.max_km, saved.min_volume, saved.max_volume, saved.trip_price) == (15, 15, 9, 9, 1350)
+    first = app_module._select_tariff(db, models.TripType.SAMOSVAL, vehicle, date(2026, 8, 12), 15, 8)
+    second = app_module._select_tariff(db, models.TripType.SAMOSVAL, vehicle, date(2026, 8, 12), 15, 12)
+    assert app_module._tariff_amount(first, 15, 8, 1) == 2800
+    assert app_module._tariff_amount(second, 15, 12, 1) == 3400
     db.close()
 
 
 def test_grid_rejects_incomplete_rows():
-    db, client, vehicle_type = _setup()
-
+    db, client, _, _ = _setup()
     response = client.post(
-        "/settings/tariffs/pukhtovoz-grid",
+        "/settings/tariffs/samosval-grid",
         data={
-            "vehicle_type_id": str(vehicle_type.id),
-            "pukhtovoz_km": ["15", "20"],
-            "pukhtovoz_volume": ["8"],
-            "pukhtovoz_price": ["1200", "1800"],
+            "samosval_title": ["Первый", "Второй"],
+            "samosval_km": ["15", "20"],
+            "samosval_volume": ["8"],
+            "samosval_price": ["2800", "3600"],
         },
         follow_redirects=False,
     )
-
     assert response.status_code == 400
     assert db.query(models.Tariff).count() == 0
     db.close()

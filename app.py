@@ -646,11 +646,13 @@ TARIFF_FORMULAS = {"trip", "km", "volume", "fixed"}
 
 
 def _tariff_matches(tariff, kind, vehicle, planned_date, km, volume):
+    range_matches = kind == TripType.PUKHTOVOZ or (
+        (tariff.min_km or 0) <= km and (tariff.max_km is None or km <= tariff.max_km)
+        and (tariff.min_volume or 0) <= volume and (tariff.max_volume is None or volume <= tariff.max_volume)
+    )
     return bool(
         tariff and tariff.is_active and tariff.kind == kind
-        and (not vehicle or tariff.vehicle_type_id == vehicle.type_id)
-        and (tariff.min_km or 0) <= km and (tariff.max_km is None or km <= tariff.max_km)
-        and (tariff.min_volume or 0) <= volume and (tariff.max_volume is None or volume <= tariff.max_volume)
+        and range_matches
         and (tariff.date_from is None or planned_date >= tariff.date_from)
         and (tariff.date_to is None or planned_date <= tariff.date_to)
     )
@@ -1224,71 +1226,91 @@ def add_tariff(
     return RedirectResponse("/settings#tariffs", status_code=302)
 
 
+def _first_vehicle_type(db: Session, kind: TripType):
+    vehicle_type = db.query(models.VehicleType).filter(models.VehicleType.kind == kind).order_by(models.VehicleType.id).first()
+    if not vehicle_type:
+        raise HTTPException(400, f"Сначала добавьте тип автомобиля для направления «{kind.value}»")
+    return vehicle_type
+
+
 @app.post("/settings/tariffs/pukhtovoz-grid")
 def add_pukhtovoz_tariff_grid(
-    vehicle_type_id: str = Form(...),
-    pukhtovoz_km: list[str] = Form(...),
-    pukhtovoz_volume: list[str] = Form(...),
+    pukhtovoz_title: list[str] = Form(...),
     pukhtovoz_price: list[str] = Form(...),
-    comment: str = Form(""),
     is_active: Optional[str] = Form(None),
     current_user: models.User = Depends(require_role(UserRole.ADMIN)),
     db: Session = Depends(get_db),
 ):
-    if not pukhtovoz_km or not (len(pukhtovoz_km) == len(pukhtovoz_volume) == len(pukhtovoz_price)):
-        raise HTTPException(400, "Заполните расстояние, объём и стоимость в каждой строке")
-    vehicle_type_value = _form_fk(db, models.VehicleType, vehicle_type_id, "Тип автомобиля", required=True)
-    vehicle_type = db.query(models.VehicleType).filter(models.VehicleType.id == vehicle_type_value).first()
-    if vehicle_type.kind != TripType.PUKHTOVOZ:
-        raise HTTPException(400, "Для тарифов пухтовозов выберите тип пухтовоза")
+    if not pukhtovoz_title or len(pukhtovoz_title) != len(pukhtovoz_price):
+        raise HTTPException(400, "Заполните название и стоимость в каждой строке")
+    titles = [value.strip() for value in pukhtovoz_title]
+    if any(not value for value in titles):
+        raise HTTPException(400, "Укажите название каждого тарифа")
+    try:
+        prices = [_finite_float(value, "Стоимость рейса") for value in pukhtovoz_price]
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Проверьте стоимость рейса")
+    if any(value < 0 for value in prices):
+        raise HTTPException(400, "Стоимость рейса не может быть отрицательной")
+    vehicle_type = _first_vehicle_type(db, TripType.PUKHTOVOZ)
+    active = is_active is not None
+    for title, price in zip(titles, prices):
+        db.add(models.Tariff(
+            title=title, kind=TripType.PUKHTOVOZ, vehicle_type_id=vehicle_type.id,
+            formula="trip", trip_price=price, km_price=0, volume_price=0, fixed_sum=0,
+            min_km=0, max_km=None, min_volume=0, max_volume=None,
+            extra_fee=0, coefficient=1, date_from=None, date_to=None,
+            comment="", is_active=active,
+        ))
+    _commit_or_conflict(db)
+    return RedirectResponse("/settings#tariffs", status_code=302)
+
+
+@app.post("/settings/tariffs/samosval-grid")
+def add_samosval_tariff_grid(
+    samosval_title: list[str] = Form(...),
+    samosval_km: list[str] = Form(...),
+    samosval_volume: list[str] = Form(...),
+    samosval_price: list[str] = Form(...),
+    is_active: Optional[str] = Form(None),
+    current_user: models.User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    lengths = {len(samosval_title), len(samosval_km), len(samosval_volume), len(samosval_price)}
+    if not samosval_title or len(lengths) != 1:
+        raise HTTPException(400, "Заполните название, объём, километры и стоимость в каждой строке")
+    titles = [value.strip() for value in samosval_title]
+    if any(not value for value in titles):
+        raise HTTPException(400, "Укажите название каждого тарифа")
     try:
         rows = [
-            (
-                _finite_float(km, "Расстояние"),
-                _finite_float(volume, "Объём"),
-                _finite_float(price, "Стоимость рейса"),
-            )
-            for km, volume, price in zip(pukhtovoz_km, pukhtovoz_volume, pukhtovoz_price)
+            (_finite_float(km, "Километры"), _finite_float(volume, "Объём"), _finite_float(price, "Стоимость рейса"))
+            for km, volume, price in zip(samosval_km, samosval_volume, samosval_price)
         ]
     except (ValueError, TypeError):
-        raise HTTPException(400, "Проверьте расстояние, объём и стоимость")
+        raise HTTPException(400, "Проверьте объём, километры и стоимость")
     if any(km < 0 or volume < 0 or price < 0 for km, volume, price in rows):
         raise HTTPException(400, "Значения тарифа не могут быть отрицательными")
     if len({(km, volume) for km, volume, _ in rows}) != len(rows):
-        raise HTTPException(409, "Одинаковая комбинация расстояния и объёма указана дважды")
+        raise HTTPException(409, "Одинаковая комбинация километров и объёма указана дважды")
+    vehicle_type = _first_vehicle_type(db, TripType.SAMOSVAL)
     for km, volume, _ in rows:
         duplicate = db.query(models.Tariff).filter(
-            models.Tariff.kind == TripType.PUKHTOVOZ,
+            models.Tariff.kind == TripType.SAMOSVAL,
             models.Tariff.vehicle_type_id == vehicle_type.id,
-            models.Tariff.min_km == km,
-            models.Tariff.max_km == km,
-            models.Tariff.min_volume == volume,
-            models.Tariff.max_volume == volume,
+            models.Tariff.min_km == km, models.Tariff.max_km == km,
+            models.Tariff.min_volume == volume, models.Tariff.max_volume == volume,
         ).first()
         if duplicate:
             raise HTTPException(409, f"Тариф для {km:g} км и {volume:g} м³ уже существует")
     active = is_active is not None
-    common_comment = comment.strip()
-    for km, volume, price in rows:
+    for title, (km, volume, price) in zip(titles, rows):
         db.add(models.Tariff(
-            title=f"{km:g} км / {volume:g} м³",
-            kind=TripType.PUKHTOVOZ,
-            vehicle_type_id=vehicle_type.id,
-            formula="trip",
-            trip_price=price,
-            km_price=0,
-            volume_price=0,
-            fixed_sum=0,
-            min_km=km,
-            max_km=km,
-            min_volume=volume,
-            max_volume=volume,
-            extra_fee=0,
-            coefficient=1,
-            date_from=None,
-            date_to=None,
-            comment=common_comment,
-            is_active=active,
+            title=title, kind=TripType.SAMOSVAL, vehicle_type_id=vehicle_type.id,
+            formula="trip", trip_price=price, km_price=0, volume_price=0, fixed_sum=0,
+            min_km=km, max_km=km, min_volume=volume, max_volume=volume,
+            extra_fee=0, coefficient=1, date_from=None, date_to=None,
+            comment="", is_active=active,
         ))
     _commit_or_conflict(db)
     return RedirectResponse("/settings#tariffs", status_code=302)
@@ -1425,62 +1447,42 @@ def edit_setting_record(
     elif section == "tariffs":
         row.title = (title or "").strip()
         if not row.title:
-            raise HTTPException(400, "Укажите тариф")
+            raise HTTPException(400, "Укажите название тарифа")
         try:
-            row.kind = TripType(kind)
+            price_value = _finite_float(trip_price, "Стоимость рейса")
         except (ValueError, TypeError):
-            raise HTTPException(400, "Некорректное направление тарифа")
-        row.vehicle_type_id = _form_fk(db, models.VehicleType, vehicle_type_id, "Тип автомобиля", required=True)
-        vehicle_type = db.query(models.VehicleType).filter(models.VehicleType.id == row.vehicle_type_id).first()
-        if vehicle_type.kind != row.kind:
-            raise HTTPException(400, "Тип автомобиля не соответствует направлению")
-        if row.kind == TripType.PUKHTOVOZ and exact_km is not None and exact_volume is not None:
+            raise HTTPException(400, "Проверьте стоимость рейса")
+        if price_value < 0:
+            raise HTTPException(400, "Стоимость рейса не может быть отрицательной")
+        if row.kind == TripType.SAMOSVAL:
+            if exact_km is None or exact_volume is None:
+                raise HTTPException(400, "Укажите объём и километры")
             try:
-                km_value = _finite_float(exact_km, "Расстояние")
+                km_value = _finite_float(exact_km, "Километры")
                 volume_value = _finite_float(exact_volume, "Объём")
-                price_value = _finite_float(trip_price, "Стоимость рейса")
             except (ValueError, TypeError):
-                raise HTTPException(400, "Проверьте расстояние, объём и стоимость")
-            if km_value < 0 or volume_value < 0 or price_value < 0:
-                raise HTTPException(400, "Значения тарифа не могут быть отрицательными")
+                raise HTTPException(400, "Проверьте объём и километры")
+            if km_value < 0 or volume_value < 0:
+                raise HTTPException(400, "Объём и километры не могут быть отрицательными")
             duplicate = db.query(models.Tariff).filter(
                 models.Tariff.id != row.id,
-                models.Tariff.kind == TripType.PUKHTOVOZ,
-                models.Tariff.vehicle_type_id == row.vehicle_type_id,
-                models.Tariff.min_km == km_value,
-                models.Tariff.max_km == km_value,
-                models.Tariff.min_volume == volume_value,
-                models.Tariff.max_volume == volume_value,
+                models.Tariff.kind == TripType.SAMOSVAL,
+                models.Tariff.min_km == km_value, models.Tariff.max_km == km_value,
+                models.Tariff.min_volume == volume_value, models.Tariff.max_volume == volume_value,
             ).first()
             if duplicate:
                 raise HTTPException(409, f"Тариф для {km_value:g} км и {volume_value:g} м³ уже существует")
-            row.formula, row.trip_price = "trip", price_value
-            row.km_price = row.volume_price = row.fixed_sum = row.extra_fee = 0
-            row.coefficient = 1
             row.min_km = row.max_km = km_value
             row.min_volume = row.max_volume = volume_value
-            row.date_from = row.date_to = None
         else:
-            try:
-                row.trip_price, row.km_price = _finite_float(trip_price, "Цена за рейс"), _finite_float(km_price, "Цена за км")
-                row.volume_price, row.fixed_sum = _finite_float(volume_price, "Цена за объем"), _finite_float(fixed_sum, "Фиксированная сумма")
-                if min_km is not None: row.min_km = _finite_float(min_km, "Минимум км")
-                if max_km is not None: row.max_km = _finite_float(max_km, "Максимум км", nullable=True)
-                if min_volume is not None: row.min_volume = _finite_float(min_volume, "Минимум объема")
-                if max_volume is not None: row.max_volume = _finite_float(max_volume, "Максимум объема", nullable=True)
-                if extra_fee is not None: row.extra_fee = _finite_float(extra_fee, "Доплата")
-                if coefficient is not None: row.coefficient = _finite_float(coefficient, "Коэффициент", default=1)
-                if tariff_date_from is not None: row.date_from = date.fromisoformat(tariff_date_from) if tariff_date_from else None
-                if tariff_date_to is not None: row.date_to = date.fromisoformat(tariff_date_to) if tariff_date_to else None
-            except (ValueError, TypeError):
-                raise HTTPException(400, "Проверьте числовые поля тарифа")
-            _validate_tariff_rules(
-                formula,
-                [row.trip_price, row.km_price, row.volume_price, row.fixed_sum, row.extra_fee, row.coefficient],
-                row.min_km or 0, row.max_km, row.min_volume or 0, row.max_volume, row.date_from, row.date_to,
-            )
-            row.formula = formula
-        row.is_active, row.comment = is_active is not None, comment.strip()
+            row.min_km, row.max_km = 0, None
+            row.min_volume, row.max_volume = 0, None
+        row.formula, row.trip_price = "trip", price_value
+        row.km_price = row.volume_price = row.fixed_sum = row.extra_fee = 0
+        row.coefficient = 1
+        row.date_from = row.date_to = None
+        row.comment = ""
+        row.is_active = is_active is not None
     _add_audit(db, current_user.id, f"settings:{section}", row.id, old_value, _model_snapshot(row))
     _commit_or_conflict(db)
     return RedirectResponse(f"/settings#{anchor}", status_code=302)

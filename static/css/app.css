@@ -233,7 +233,9 @@ input[type="checkbox"]{width:18px!important;min-height:18px!important;accent-col
 .tariff-grid-form{margin:16px 0 28px}
 .tariff-grid-form > form{grid-template-columns:minmax(220px,320px) 1fr}
 .tariff-grid-rows{grid-column:1/-1;display:grid;gap:10px}
-.tariff-grid-row{display:grid;grid-template-columns:repeat(3,minmax(150px,1fr)) auto;align-items:end;gap:12px;padding:14px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.02)}
+.tariff-grid-row{display:grid;align-items:end;gap:12px;padding:14px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.02)}
+.tariff-grid-row--pukhtovoz{grid-template-columns:repeat(2,minmax(180px,1fr)) auto}
+.tariff-grid-row--samosval{grid-template-columns:repeat(4,minmax(130px,1fr)) auto}
 .tariff-grid-row .btn{margin-bottom:1px}
 .tariff-grid-actions{justify-content:space-between}
 
