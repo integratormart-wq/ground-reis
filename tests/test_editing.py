@@ -832,15 +832,24 @@ def test_render_binds_health_before_slow_database_initialization(tmp_path):
     )
     try:
         health = None
+        health_status = None
         for _ in range(80):
             if proc.poll() is not None:
                 raise AssertionError(proc.stdout.read())
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=1) as response:
+                    health_status = response.status
                     health = response.read().decode()
                 break
+            except urllib.error.HTTPError as exc:
+                if exc.code == 503:
+                    health_status = exc.code
+                    health = exc.read().decode()
+                    break
             except Exception:
-                time.sleep(0.1)
+                pass
+            time.sleep(0.1)
+        assert health_status == 503
         assert health and '"status":"starting"' in health
         with pytest.raises(urllib.error.HTTPError) as blocked:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/reports", timeout=2)

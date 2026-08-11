@@ -170,7 +170,9 @@ else:
 
 @app.get("/healthz", include_in_schema=False)
 def healthz():
-    return {"status": "ready" if _DB_READY.is_set() else "starting"}
+    if not _DB_READY.is_set():
+        return JSONResponse({"status": "starting"}, status_code=503)
+    return {"status": "ready"}
 
 def get_db():
     if not _DB_READY.is_set():
