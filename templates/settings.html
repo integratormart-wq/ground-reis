@@ -153,7 +153,7 @@
   {% for c in cargo_types %}
   <tr>
     <td>{{ c.name }}</td>
-    <td>{{ c.unit }}</td>
+    <td>{{ (c.unit or '')|replace('м3', 'м³') }}</td>
     <td>
       <a class="btn btn-ghost btn-sm" href="/settings/cargo-types/{{ c.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/cargo-types/{{ c.id }}/delete" onsubmit="return confirm('Удалить?')">
