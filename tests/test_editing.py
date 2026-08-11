@@ -364,7 +364,8 @@ def test_final_review_tariff_completion_and_salary_guards():
     tariff.min_km, tariff.max_km, tariff.min_volume, tariff.max_volume = 0, 20, 0, 20
     db.commit()
     html = client.get(f"/settings/tariffs/{tariff.id}/edit").text
-    assert 'name="coefficient"' in html and 'value="0' in html
+    assert 'name="exact_km"' in html and 'name="exact_volume"' in html
+    assert 'name="coefficient"' not in html
     tariff.is_active = False
     db.commit()
     edit_data = {"number": trip.number, "planned_date": str(trip.planned_date), "driver_id": str(driver.id), "vehicle_id": str(vehicle.id), "customer_id": str(customer.id), "cargo_type_id": str(cargo.id), "polygon_id": str(polygon.id), "tariff_id": "", "km": "12", "volume": "5", "trips_count": "1", "kind": "пухтовоз"}

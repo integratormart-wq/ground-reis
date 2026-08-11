@@ -14,46 +14,48 @@
 </tbody></table>
 <form method="post" action="/settings/routes" class="filters"><input name="name" placeholder="Название объекта или маршрута" required /><input name="load_address" placeholder="Адрес подачи" /><input name="unload_address" placeholder="Адрес выгрузки" /><input name="distance" type="number" step="any" placeholder="Км" /><select name="customer_id"><option value="">— заказчик —</option>{% for c in customers %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select><input name="comment" placeholder="Комментарий" /><button class="btn" type="submit">Добавить объект</button></form>
 
-<h3 id="tariffs">Тарифы</h3>
-<table class="table">
-  <thead><tr><th>Название</th><th>Направление</th><th>Формула</th><th>Ставка за рейс</th><th>Активен</th><th></th></tr></thead>
+<h3 id="tariffs">Тарифы пухтовозов</h3>
+<p class="muted">Каждая строка — отдельная стоимость для точного сочетания расстояния и объёма.</p>
+<div class="table-wrap"><table class="table">
+  <thead><tr><th>Тариф</th><th>Тип авто</th><th>Расстояние, км</th><th>Объём, м³</th><th>Стоимость рейса, ₽</th><th>Активен</th><th></th></tr></thead>
   <tbody>
-  {% for t in tariffs %}
-  <tr>
-    <td>{{ t.title }}</td>
-    <td>{{ t.kind.value }}</td>
-    <td>{{ t.formula }}</td>
-    <td>{{ t.trip_price }}</td>
-    <td>{{ 'Да' if t.is_active else 'Нет' }}</td>
-    <td>
-      <a class="btn btn-ghost btn-sm" href="/settings/tariffs/{{ t.id }}/edit">Редактировать</a>
-      <form method="post" action="/settings/tariffs/{{ t.id }}/delete" onsubmit="return confirm('Удалить?')">
-        <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
-      </form>
-    </td>
-  </tr>
-  {% endfor %}
+  {% for t in tariffs if t.kind.value == 'пухтовоз' %}
+  <tr><td>{{ t.title }}</td><td>{{ t.vehicle_type.name if t.vehicle_type else '—' }}</td><td>{{ t.min_km or 0 }}</td><td>{{ t.min_volume or 0 }}</td><td>{{ t.trip_price or 0 }}</td><td>{{ 'Да' if t.is_active else 'Нет' }}</td><td class="actions-cell"><a class="btn btn-ghost btn-sm" href="/settings/tariffs/{{ t.id }}/edit">Редактировать</a><form method="post" action="/settings/tariffs/{{ t.id }}/delete" onsubmit="return confirm('Удалить?')"><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>
+  {% else %}<tr><td colspan="7">Тарифов пухтовозов нет</td></tr>{% endfor %}
   </tbody>
-</table>
+</table></div>
+{% if user.role in ['admin','logist'] %}
+<div class="form tariff-grid-form"><form id="pukhtovoz-tariff-form" method="post" action="/settings/tariffs/pukhtovoz-grid">
+  <label>Тип автомобиля<select name="vehicle_type_id" required><option value="">— выберите —</option>{% for vt in vtypes if vt.kind.value == 'пухтовоз' %}<option value="{{ vt.id }}">{{ vt.name }}</option>{% endfor %}</select></label>
+  <div id="pukhtovoz-tariff-rows" class="tariff-grid-rows">
+    <div class="tariff-grid-row">
+      <label>Расстояние, км<input type="number" min="0" step="any" name="pukhtovoz_km" required /></label>
+      <label>Объём, м³<input type="number" min="0" step="any" name="pukhtovoz_volume" required /></label>
+      <label>Стоимость рейса, ₽<input type="number" min="0" step="any" name="pukhtovoz_price" required /></label>
+      <button class="btn btn-ghost btn-sm tariff-row-remove" type="button">Убрать строку</button>
+    </div>
+  </div>
+  <template id="pukhtovoz-tariff-row-template"><div class="tariff-grid-row"><label>Расстояние, км<input type="number" min="0" step="any" name="pukhtovoz_km" required /></label><label>Объём, м³<input type="number" min="0" step="any" name="pukhtovoz_volume" required /></label><label>Стоимость рейса, ₽<input type="number" min="0" step="any" name="pukhtovoz_price" required /></label><button class="btn btn-ghost btn-sm tariff-row-remove" type="button">Убрать строку</button></div></template>
+  <label class="wide">Комментарий ко всем строкам<textarea name="comment"></textarea></label>
+  <label><input type="checkbox" name="is_active" checked /> Активны</label>
+  <div class="form-row tariff-grid-actions"><button id="add-pukhtovoz-tariff-row" class="btn btn-ghost" type="button">Добавить строку тарифа</button><button class="btn btn-primary" type="submit">Сохранить тарифы</button></div>
+</form></div>
+{% endif %}
+
+<h3>Тарифы самосвалов</h3>
+<div class="table-wrap"><table class="table">
+  <thead><tr><th>Название</th><th>Тип авто</th><th>Формула</th><th>Ставка за рейс</th><th>Активен</th><th></th></tr></thead>
+  <tbody>{% for t in tariffs if t.kind.value == 'самосвал' %}<tr><td>{{ t.title }}</td><td>{{ t.vehicle_type.name if t.vehicle_type else '—' }}</td><td>{{ t.formula }}</td><td>{{ t.trip_price }}</td><td>{{ 'Да' if t.is_active else 'Нет' }}</td><td class="actions-cell"><a class="btn btn-ghost btn-sm" href="/settings/tariffs/{{ t.id }}/edit">Редактировать</a><form method="post" action="/settings/tariffs/{{ t.id }}/delete" onsubmit="return confirm('Удалить?')"><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>{% else %}<tr><td colspan="6">Тарифов самосвалов нет</td></tr>{% endfor %}</tbody>
+</table></div>
 {% if user.role in ['admin','logist'] %}
 <form method="post" action="/settings/tariffs" class="filters">
+  <input type="hidden" name="kind" value="самосвал" />
   <input name="title" placeholder="Название" required />
-  <select name="kind">
-    <option value="пухтовоз">Пухтовоз</option>
-    <option value="самосвал">Самосвал</option>
-  </select>
-  <select name="vehicle_type_id" required>
-    {% for vt in vtypes %}<option value="{{ vt.id }}">{{ vt.name }}</option>{% endfor %}
-  </select>
-  <select name="formula">
-    <option value="trip">За рейс</option>
-    <option value="km">За км</option>
-    <option value="volume">За объем</option>
-    <option value="fixed">Фиксированная сумма</option>
-  </select>
+  <select name="vehicle_type_id" required>{% for vt in vtypes if vt.kind.value == 'самосвал' %}<option value="{{ vt.id }}">{{ vt.name }}</option>{% endfor %}</select>
+  <select name="formula"><option value="trip">За рейс</option><option value="km">За км</option><option value="volume">За объём</option><option value="fixed">Фиксированная сумма</option></select>
   <input name="trip_price" type="number" step="any" placeholder="За рейс" value="0" />
   <input name="km_price" type="number" step="any" placeholder="За км" value="0" />
-  <input name="volume_price" type="number" step="any" placeholder="За м3" value="0" />
+  <input name="volume_price" type="number" step="any" placeholder="За м³" value="0" />
   <input name="fixed_sum" type="number" min="0" step="any" placeholder="Фиксировано" value="0" />
   <input name="min_km" type="number" min="0" step="any" placeholder="Минимум км" value="0" />
   <input name="max_km" type="number" min="0" step="any" placeholder="Максимум км" />
@@ -61,13 +63,34 @@
   <input name="max_volume" type="number" min="0" step="any" placeholder="Максимум м³" />
   <input name="extra_fee" type="number" min="0" step="any" placeholder="Доплата" value="0" />
   <input name="coefficient" type="number" min="0" step="any" placeholder="Коэффициент" value="1" />
-  <input name="date_from" type="date" title="Действует с" />
-  <input name="date_to" type="date" title="Действует по" />
-  <input name="comment" placeholder="Комментарий" />
-  <label><input type="checkbox" name="is_active" checked /> Активен</label>
-  <button class="btn" type="submit">Добавить тариф</button>
+  <input name="date_from" type="date" title="Действует с" /><input name="date_to" type="date" title="Действует по" /><input name="comment" placeholder="Комментарий" />
+  <label><input type="checkbox" name="is_active" checked /> Активен</label><button class="btn" type="submit">Добавить тариф</button>
 </form>
 {% endif %}
+
+<script>
+(() => {
+  const rows = document.getElementById('pukhtovoz-tariff-rows');
+  const template = document.getElementById('pukhtovoz-tariff-row-template');
+  const addButton = document.getElementById('add-pukhtovoz-tariff-row');
+  if (!rows || !template || !addButton) return;
+  const updateRemoveButtons = () => {
+    const buttons = rows.querySelectorAll('.tariff-row-remove');
+    buttons.forEach(button => { button.disabled = buttons.length === 1; });
+  };
+  rows.addEventListener('click', event => {
+    const button = event.target.closest('.tariff-row-remove');
+    if (!button || rows.children.length === 1) return;
+    button.closest('.tariff-grid-row').remove();
+    updateRemoveButtons();
+  });
+  addButton.addEventListener('click', () => {
+    rows.appendChild(template.content.cloneNode(true));
+    updateRemoveButtons();
+  });
+  updateRemoveButtons();
+})();
+</script>
 
 <h3 id="vehicles">Автомобили</h3>
 <table class="table">
