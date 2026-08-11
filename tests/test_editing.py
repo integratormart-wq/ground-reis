@@ -600,7 +600,7 @@ def test_final_security_polygon_webhook_admin_trigger_and_inactive_vehicle():
     db.commit()
     detail_page = admin_client.get(f"/requests/{own.id}")
     assert "<b>Факт. км:</b> 0" in detail_page.text
-    assert "<b>Факт. объем:</b> 0" in detail_page.text
+    assert "<b>Фактический объём:</b> 0" in detail_page.text
 
     app_module.app.dependency_overrides.clear()
     app_module.BITRIX_LAST_EVENT = {"received": False}

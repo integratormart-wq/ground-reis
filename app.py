@@ -219,12 +219,12 @@ def menu_for(role: str):
     if role == UserRole.DRIVER:
         return [
             {"href": "/driver", "label": "Главная"},
-            {"href": "/reports", "label": "Отчеты"},
+            {"href": "/reports", "label": "Отчёты"},
             {"href": "/salary", "label": "Зарплата"},
         ]
     base = [
         {"href": "/dashboard", "label": "Главная"},
-        {"href": "/reports", "label": "Отчеты"},
+        {"href": "/reports", "label": "Отчёты"},
         {"href": "/salary", "label": "Зарплата"},
     ]
     extra = [
@@ -430,12 +430,12 @@ def create_request(
         kind_value = TripType(kind)
         planned_value = date.fromisoformat(planned_date)
         km_value = _finite_float(km, "Километраж")
-        volume_value = _finite_float(volume, "Объем")
+        volume_value = _finite_float(volume, "Объём")
         trips_value = int(trips_count or 1)
     except (ValueError, TypeError):
         raise HTTPException(400, "Проверьте дату и числовые поля")
     if km_value < 0 or volume_value < 0 or trips_value <= 0:
-        raise HTTPException(400, "Километраж и объем не могут быть отрицательными, число рейсов должно быть больше нуля")
+        raise HTTPException(400, "Километраж и объём не могут быть отрицательными, число рейсов должно быть больше нуля")
     driver_value = _form_fk(db, models.User, driver_id, "Водитель", required=True)
     driver = db.query(models.User).filter(models.User.id == driver_value).first()
     if driver.role != UserRole.DRIVER or not driver.is_active:
@@ -666,7 +666,13 @@ def _select_tariff(db, kind, vehicle, planned_date, km, volume, preferred_id=Non
     candidates = db.query(models.Tariff).filter(
         models.Tariff.kind == kind, models.Tariff.is_active == True
     ).order_by(models.Tariff.id.asc()).all()
-    return next((item for item in candidates if _tariff_matches(item, kind, vehicle, planned_date, km, volume)), None)
+    matches = [item for item in candidates if _tariff_matches(item, kind, vehicle, planned_date, km, volume)]
+    if kind == TripType.SAMOSVAL:
+        matches.sort(key=lambda item: (
+            -sum(((item.min_km or 0) > 0, item.max_km is not None, (item.min_volume or 0) > 0, item.max_volume is not None)),
+            item.id,
+        ))
+    return matches[0] if matches else None
 
 
 def _tariff_amount(tariff, km, volume, trips_count):
@@ -690,7 +696,7 @@ def _validate_tariff_rules(formula, values, min_km, max_km, min_volume, max_volu
     if max_km is not None and min_km > max_km:
         raise HTTPException(400, "Минимальный километраж больше максимального")
     if max_volume is not None and min_volume > max_volume:
-        raise HTTPException(400, "Минимальный объем больше максимального")
+        raise HTTPException(400, "Минимальный объём больше максимального")
     if date_from and date_to and date_from > date_to:
         raise HTTPException(400, "Дата начала действия позже даты окончания")
 
@@ -737,12 +743,12 @@ def edit_request(
         kind_value = TripType(kind)
         planned_value = date.fromisoformat(planned_date)
         km_value = _finite_float(km, "Километраж")
-        volume_value = _finite_float(volume, "Объем")
+        volume_value = _finite_float(volume, "Объём")
         trips_value = int(trips_count or 1)
     except (ValueError, TypeError):
         raise HTTPException(400, "Проверьте дату и числовые поля")
     if km_value < 0 or volume_value < 0 or trips_value <= 0:
-        raise HTTPException(400, "Километраж и объем не могут быть отрицательными, число рейсов должно быть больше нуля")
+        raise HTTPException(400, "Километраж и объём не могут быть отрицательными, число рейсов должно быть больше нуля")
     clean_number = number.strip()
     if not clean_number:
         raise HTTPException(400, "Укажите номер заявки")
@@ -825,14 +831,16 @@ def accept_trip(req_id: int, current_user: models.User = Depends(get_current_use
     return RedirectResponse(f"/requests/{req_id}", status_code=302)
 
 @app.post("/requests/{req_id}/start")
-def start_trip(req_id: int, actual_km: Optional[str] = Form("0"), actual_volume: Optional[str] = Form("0"), current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+def start_trip(req_id: int, actual_km: Optional[str] = Form(None), actual_volume: Optional[str] = Form(None), current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     req = db.query(models.TripRequest).filter(models.TripRequest.id == req_id).first()
     if not req or req.driver_id != current_user.id:
         raise HTTPException(403)
     if req.status != RequestStatus.ACCEPTED:
         raise HTTPException(409, "Начать можно только принятую заявку")
-    km_value = _finite_float(actual_km, "Фактический километраж")
-    volume_value = _finite_float(actual_volume, "Фактический объем")
+    km_value = _finite_float(actual_km, "Фактический километраж", nullable=True)
+    volume_value = _finite_float(actual_volume, "Фактический объём", nullable=True)
+    km_value = (req.km or 0) if km_value is None else km_value
+    volume_value = (req.volume or 0) if volume_value is None else volume_value
     if km_value < 0 or volume_value < 0:
         raise HTTPException(400, "Фактические значения не могут быть отрицательными")
     req.status = RequestStatus.IN_WORK
@@ -847,14 +855,16 @@ def start_trip(req_id: int, actual_km: Optional[str] = Form("0"), actual_volume:
     return RedirectResponse(f"/requests/{req_id}", status_code=302)
 
 @app.post("/requests/{req_id}/complete")
-def complete_trip(req_id: int, actual_km: Optional[str] = Form("0"), actual_volume: Optional[str] = Form("0"), comment: str = Form(""), current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+def complete_trip(req_id: int, actual_km: Optional[str] = Form(None), actual_volume: Optional[str] = Form(None), comment: str = Form(""), current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     req = db.query(models.TripRequest).filter(models.TripRequest.id == req_id).first()
     if not req or req.driver_id != current_user.id:
         raise HTTPException(403)
     if req.status != RequestStatus.IN_WORK:
         raise HTTPException(409, "Завершить можно только заявку в работе")
-    km_value = _finite_float(actual_km, "Фактический километраж")
-    volume_value = _finite_float(actual_volume, "Фактический объем")
+    km_value = _finite_float(actual_km, "Фактический километраж", nullable=True)
+    volume_value = _finite_float(actual_volume, "Фактический объём", nullable=True)
+    km_value = (req.actual_km if req.actual_km is not None else (req.km or 0)) if km_value is None else km_value
+    volume_value = (req.actual_volume if req.actual_volume is not None else (req.volume or 0)) if volume_value is None else volume_value
     if km_value < 0 or volume_value < 0:
         raise HTTPException(400, "Фактические значения не могут быть отрицательными")
     vehicle = db.query(models.Vehicle).filter(models.Vehicle.id == req.vehicle_id).first() if req.vehicle_id else None
@@ -998,7 +1008,7 @@ def export_report(status_f: Optional[str] = None, driver_id: Optional[str] = Non
     if search: q = q.filter(models.TripRequest.number.ilike(f"%{search}%"))
     rows = q.order_by(models.TripRequest.planned_date.desc()).all()
     out = io.StringIO(); writer = csv.writer(out)
-    writer.writerow(["Номер", "Дата", "Статус", "Водитель", "Полигон", "Компания", "Объем, м3", "Сумма"])
+    writer.writerow(["Номер", "Дата", "Статус", "Водитель", "Полигон", "Компания", "Объём, м³", "Сумма"])
     for r in rows:
         writer.writerow(_export_row([r.number, r.planned_date, r.status.value, r.driver.full_name if r.driver else "", r.polygon.name if r.polygon else "", r.customer.name if r.customer else "", r.actual_volume if r.actual_volume is not None else (r.volume or 0), r.sum_driver or 0]))
     return Response(content="\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=report.csv"})
@@ -1019,7 +1029,7 @@ def export_report_xlsx(status_f: Optional[str] = None, driver_id: Optional[str] 
     if date_to: q = q.filter(models.TripRequest.planned_date <= date.fromisoformat(date_to))
     if search: q = q.filter(models.TripRequest.number.ilike(f"%{search}%"))
     rows = q.order_by(models.TripRequest.planned_date.desc()).all()
-    wb = Workbook(); ws = wb.active; ws.append(["Номер", "Дата", "Статус", "Водитель", "Полигон", "Компания", "Объем, м3", "Сумма"])
+    wb = Workbook(); ws = wb.active; ws.append(["Номер", "Дата", "Статус", "Водитель", "Полигон", "Компания", "Объём, м³", "Сумма"])
     for r in rows:
         ws.append(_export_row([r.number, r.planned_date, r.status.value, r.driver.full_name if r.driver else "", r.polygon.name if r.polygon else "", r.customer.name if r.customer else "", r.actual_volume if r.actual_volume is not None else (r.volume or 0), r.sum_driver or 0]))
     output = io.BytesIO(); wb.save(output)
@@ -1093,7 +1103,7 @@ def export_polygon(polygon_id: str, driver_id: Optional[str] = None, date_from: 
         driver_id = str(current_user.id)
     rows = _apply_polygon_filters(polygon_query, polygon_id, driver_id, date_from, date_to).order_by(models.TripRequest.planned_date, models.TripRequest.id).all()
     out = io.StringIO(); writer = csv.writer(out)
-    writer.writerow(["Полигон", "Номер", "Дата", "Статус", "Водитель", "Автомобиль", "Объем, м3", "Сумма"])
+    writer.writerow(["Полигон", "Номер", "Дата", "Статус", "Водитель", "Автомобиль", "Объём, м³", "Сумма"])
     for r in rows:
         writer.writerow(_export_row([polygon.name, r.number, r.planned_date, r.status.value, r.driver.full_name if r.driver else "", r.vehicle.name if r.vehicle else "", r.actual_volume if r.actual_volume is not None else r.volume or 0, r.sum_driver or 0]))
     return Response(content="\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f"attachment; filename=polygon-{polygon.id}.csv"})
@@ -1106,7 +1116,7 @@ def export_polygons(polygon_id: Optional[str] = None, driver_id: Optional[str] =
         driver_id = str(current_user.id)
     rows = _apply_polygon_filters(polygon_query, polygon_id, driver_id, date_from, date_to).order_by(models.TripRequest.polygon_id).all()
     out = io.StringIO(); writer = csv.writer(out)
-    writer.writerow(["Полигон", "Заявок", "Объем, м3", "Сумма"])
+    writer.writerow(["Полигон", "Заявок", "Объём, м³", "Сумма"])
     groups = {}
     for r in rows:
         key = r.polygon.name if r.polygon else "Без полигона"
@@ -1185,10 +1195,10 @@ def add_customer(name: str = Form(...), address: str = Form(""), current_user: m
     return RedirectResponse("/settings#customers", status_code=302)
 
 @app.post("/settings/cargo-types")
-def add_cargo_type(name: str = Form(...), unit: str = Form("м3"), current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
+def add_cargo_type(name: str = Form(...), unit: str = Form("м³"), current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
     clean_name = name.strip()
     if clean_name and not db.query(models.CargoType).filter(models.CargoType.name == clean_name).first():
-        db.add(models.CargoType(name=clean_name, unit=unit.strip() or "м3"))
+        db.add(models.CargoType(name=clean_name, unit=unit.strip() or "м³"))
         db.commit()
     return RedirectResponse("/settings#cargo", status_code=302)
 
@@ -1206,9 +1216,9 @@ def add_tariff(
         raise HTTPException(400, "Укажите название тарифа")
     try:
         kind_enum = TripType(kind)
-        prices = [_finite_float(trip_price, "Цена за рейс"), _finite_float(km_price, "Цена за км"), _finite_float(volume_price, "Цена за объем"), _finite_float(fixed_sum, "Фиксированная сумма"), _finite_float(extra_fee, "Доплата"), _finite_float(coefficient, "Коэффициент", default=1)]
+        prices = [_finite_float(trip_price, "Цена за рейс"), _finite_float(km_price, "Цена за км"), _finite_float(volume_price, "Цена за объём"), _finite_float(fixed_sum, "Фиксированная сумма"), _finite_float(extra_fee, "Доплата"), _finite_float(coefficient, "Коэффициент", default=1)]
         min_km_value, max_km_value = _finite_float(min_km, "Минимум км"), _finite_float(max_km, "Максимум км", nullable=True)
-        min_volume_value, max_volume_value = _finite_float(min_volume, "Минимум объема"), _finite_float(max_volume, "Максимум объема", nullable=True)
+        min_volume_value, max_volume_value = _finite_float(min_volume, "Минимум объёма"), _finite_float(max_volume, "Максимум объёма", nullable=True)
         from_value = date.fromisoformat(date_from_value) if date_from_value else None
         to_value = date.fromisoformat(date_to_value) if date_to_value else None
     except (ValueError, TypeError):
@@ -1349,7 +1359,7 @@ def edit_setting_record(
     plate: Optional[str] = Form(None), type_id: Optional[str] = Form(None), capacity: Optional[str] = Form(None),
     address: str = Form(""), contact: str = Form(""), phone: str = Form(""), comment: str = Form(""),
     description: str = Form(""), load_address: str = Form(""), unload_address: str = Form(""), distance: str = Form("0"),
-    customer_id: Optional[str] = Form(None), unit: str = Form("м3"), kind: Optional[str] = Form(None), vehicle_type_id: Optional[str] = Form(None),
+    customer_id: Optional[str] = Form(None), unit: str = Form("м³"), kind: Optional[str] = Form(None), vehicle_type_id: Optional[str] = Form(None),
     formula: str = Form("trip"), trip_price: str = Form("0"), km_price: str = Form("0"),
     volume_price: str = Form("0"), fixed_sum: str = Form("0"), min_km: Optional[str] = Form(None),
     max_km: Optional[str] = Form(None), min_volume: Optional[str] = Form(None), max_volume: Optional[str] = Form(None),
@@ -1435,7 +1445,7 @@ def edit_setting_record(
             raise HTTPException(400, "Укажите тип груза")
         if db.query(models.CargoType).filter(models.CargoType.name == clean_name, models.CargoType.id != record_id).first():
             raise HTTPException(400, "Такой тип груза уже существует")
-        row.name, row.unit, row.comment = clean_name, unit.strip() or "м3", comment.strip()
+        row.name, row.unit, row.comment = clean_name, unit.strip() or "м³", comment.strip()
     elif section == "polygons":
         clean_name = (name or "").strip()
         if not clean_name:
@@ -1808,7 +1818,7 @@ def delete_user(user_id: int, current_user: models.User = Depends(require_role(U
     if not user:
         raise HTTPException(404)
     if user.id == current_user.id:
-        raise HTTPException(400, "Нельзя удалить собственную учетную запись")
+        raise HTTPException(400, "Нельзя удалить собственную учётную запись")
     if user.role == UserRole.ADMIN and user.is_active:
         active_admins = db.query(models.User).filter(models.User.role == UserRole.ADMIN, models.User.is_active == True).with_for_update().all()
         if len(active_admins) <= 1:
@@ -1875,7 +1885,7 @@ def export_xlsx(driver_id: Optional[str] = None, date_from: Optional[str] = None
     grouped = {}
     for trip in trips:
         grouped.setdefault(trip.driver_id, []).append(trip)
-    wb = Workbook(); ws = wb.active; ws.append(["Водитель", "Кол-во заявок", "Километраж", "Объем", "Сумма"])
+    wb = Workbook(); ws = wb.active; ws.append(["Водитель", "Кол-во заявок", "Километраж", "Объём", "Сумма"])
     for driver_trips in grouped.values():
         d = driver_trips[0].driver
         ws.append(_export_row([d.full_name if d else "", len(driver_trips), sum(t.actual_km if t.actual_km is not None else (t.km or 0) for t in driver_trips), sum(t.actual_volume if t.actual_volume is not None else (t.volume or 0) for t in driver_trips), sum(t.sum_driver or 0 for t in driver_trips)]))

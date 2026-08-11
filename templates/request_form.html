@@ -73,7 +73,7 @@
     <div class="form-grid">
       <label>Маршрут<input name="route_name" value="{{ editing.route_name if editing else '' }}" placeholder="Название или описание маршрута" /></label>
       <label>Километраж, км<input type="number" step="any" name="km" id="km" value="{{ editing.km if editing else 0 }}" /></label>
-      <label>Объем, м³<input type="number" step="any" name="volume" id="volume" value="{{ editing.volume if editing else 0 }}" /></label>
+      <label>Объём, м³<input type="number" step="any" name="volume" id="volume" value="{{ editing.volume if editing else 0 }}" /></label>
       <label>Количество рейсов<input type="number" name="trips_count" value="{{ editing.trips_count if editing else 1 }}" min="1" /></label>
     </div>
   </section>
@@ -134,22 +134,29 @@ const tariffEl = document.getElementById('tariff_id');
 const vehicleEl = document.getElementById('vehicle_id');
 const dateEl = document.getElementById('planned_date');
 const sumEl = document.getElementById('sum_driver');
+let tariffManuallySelected = Boolean(tariffEl.value);
 function recalc(){
   const kind = kindEl.value;
   const km = parseFloat(kmEl.value || 0);
   const vol = parseFloat(volEl.value || 0);
   const previousId = tariffEl.value;
-  const vehicleType = Number(vehicleEl.selectedOptions[0]?.dataset.typeId || 0);
   const plannedDate = dateEl.value;
   const list = tariffs.filter(t => t.active && t.kind === kind
-    && Number(t.vehicle_type_id) === vehicleType
-    && Number(t.min_km || 0) <= km && (t.max_km === null || km <= Number(t.max_km))
-    && Number(t.min_volume || 0) <= vol && (t.max_volume === null || vol <= Number(t.max_volume))
+    && (t.kind === 'пухтовоз' || (
+      Number(t.min_km || 0) <= km && (t.max_km === null || km <= Number(t.max_km))
+      && Number(t.min_volume || 0) <= vol && (t.max_volume === null || vol <= Number(t.max_volume))
+    ))
     && (!t.date_from || plannedDate >= t.date_from) && (!t.date_to || plannedDate <= t.date_to)
-  ).sort((a, b) => Number(a.id) - Number(b.id));
+  ).sort((a, b) => {
+    if (kind !== 'самосвал') return Number(a.id) - Number(b.id);
+    const score = t => Number(Number(t.min_km || 0) > 0) + Number(t.max_km !== null)
+      + Number(Number(t.min_volume || 0) > 0) + Number(t.max_volume !== null);
+    return score(b) - score(a) || Number(a.id) - Number(b.id);
+  });
   tariffEl.replaceChildren(new Option('— автоматически —', ''));
   list.forEach(t => tariffEl.add(new Option(t.title, String(t.id))));
-  if (previousId && list.some(t => String(t.id) === String(previousId))) tariffEl.value = previousId;
+  if (tariffManuallySelected && previousId && list.some(t => String(t.id) === String(previousId))) tariffEl.value = previousId;
+  else if (list[0]) tariffEl.value = String(list[0].id);
   const chosen = list.find(t => String(t.id) === String(tariffEl.value)) || list[0] || {};
   const trips = parseFloat(document.querySelector('input[name=trips_count]').value || 1);
   const formula = chosen.formula || 'trip';
@@ -160,7 +167,16 @@ function recalc(){
   const sum = (base + parseFloat(chosen.extra_fee || 0)) * parseFloat(chosen.coefficient ?? 1);
   sumEl.textContent = (sum || 0).toFixed(2);
 }
-[kindEl, kmEl, volEl, tariffEl, vehicleEl, dateEl].forEach(el => el.addEventListener('change', recalc));
+const autoRecalc = () => {
+  tariffManuallySelected = false;
+  recalc();
+};
+[kindEl, vehicleEl, dateEl].forEach(el => el.addEventListener('change', autoRecalc));
+[kmEl, volEl].forEach(el => el.addEventListener('input', autoRecalc));
+tariffEl.addEventListener('change', () => {
+  tariffManuallySelected = Boolean(tariffEl.value);
+  recalc();
+});
 document.querySelector('input[name=trips_count]').addEventListener('input', recalc);
 recalc();
 </script>

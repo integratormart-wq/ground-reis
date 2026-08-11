@@ -33,7 +33,7 @@
       <label class="wide">Комментарий<textarea name="comment">{{ row.comment or '' }}</textarea></label>
       {% elif section == 'cargo-types' %}
       <label>Название<input name="name" value="{{ row.name }}" required /></label>
-      <label>Единица<input name="unit" value="{{ row.unit or 'м3' }}" required /></label>
+      <label>Единица<input name="unit" value="{{ row.unit or 'м³' }}" required /></label>
       <label class="wide">Комментарий<textarea name="comment">{{ row.comment or '' }}</textarea></label>
       {% elif section == 'polygons' %}
       <label>Название<input name="name" value="{{ row.name }}" required /></label>
