@@ -92,8 +92,15 @@ def _encode_params(params: dict) -> dict:
     return out
 
 
+def _normalize_webhook_base(webhook_url: str) -> str:
+    """Accept both a base webhook URL and a full Bitrix request-generator URL."""
+    value = str(webhook_url or "").strip()
+    match = re.match(r"^(https://[^/]+/rest/\d+/[^/]+)(?:/.*)?$", value, re.IGNORECASE)
+    return (match.group(1) if match else value.rstrip("/")) + "/"
+
+
 def _http_post(webhook_base: str, method: str, params: dict) -> dict:
-    url = webhook_base.rstrip("/") + "/" + method
+    url = _normalize_webhook_base(webhook_base) + method
     data = urllib.parse.urlencode(_encode_params(params)).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
     try:
