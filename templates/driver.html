@@ -1,14 +1,16 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-header"><h1>Мои рейсы</h1></div>
+<div class="page-header"><h1>Мои рейсы</h1><a class="btn btn-primary" href="/driver/day-report">Отчёт дня</a></div>
 
 <h2>Заявки на сегодня</h2>
 <div class="cards">
   {% for r in rows %}
   <a href="/requests/{{ r.id }}" class="card">
     <div><strong>{{ r.number }}</strong></div>
-    <div class="muted">{{ r.planned_date }} · {{ r.kind.value }}</div>
-    <div class="status">{{ r.status.value }}</div>
+    <div>{{ r.customer.name if r.customer else (r.route_name or 'Без клиента') }}</div>
+    <div class="muted">{{ r.load_address or 'Адрес не указан' }}</div>
+    <div class="muted">{{ r.planned_date.strftime('%d.%m.%Y') }}{% if r.planned_time %}, {{ r.planned_time[:5] }}{% endif %} · {{ r.kind.value }}</div>
+    <div class="status status-{{ status_slug(r.status) }}">{{ r.status.value }}</div>
     {% if r.status.value == 'Новая' %}
     <form method="post" action="/requests/{{ r.id }}/accept" style="margin-top:10px">
       <button class="btn btn-primary" type="submit" style="width:100%">Принять заявку</button>
@@ -35,8 +37,10 @@
   {% for r in new_reqs %}
   <a href="/requests/{{ r.id }}" class="card">
     <div><strong>{{ r.number }}</strong></div>
-    <div class="muted">{{ r.planned_date }} · {{ r.kind.value }}</div>
-    <div class="status">{{ r.status.value }}</div>
+    <div>{{ r.customer.name if r.customer else (r.route_name or 'Без клиента') }}</div>
+    <div class="muted">{{ r.load_address or 'Адрес не указан' }}</div>
+    <div class="muted">{{ r.planned_date.strftime('%d.%m.%Y') }}{% if r.planned_time %}, {{ r.planned_time[:5] }}{% endif %} · {{ r.kind.value }}</div>
+    <div class="status status-{{ status_slug(r.status) }}">{{ r.status.value }}</div>
     {% if r.status.value == 'Новая' %}
     <form method="post" action="/requests/{{ r.id }}/accept" style="margin-top:10px">
       <button class="btn btn-primary" type="submit" style="width:100%">Принять заявку</button>
@@ -63,8 +67,10 @@
   {% for r in work_reqs %}
   <a href="/requests/{{ r.id }}" class="card">
     <div><strong>{{ r.number }}</strong></div>
-    <div class="muted">{{ r.planned_date }} · {{ r.kind.value }}</div>
-    <div class="status">{{ r.status.value }}</div>
+    <div>{{ r.customer.name if r.customer else (r.route_name or 'Без клиента') }}</div>
+    <div class="muted">{{ r.load_address or 'Адрес не указан' }}</div>
+    <div class="muted">{{ r.planned_date.strftime('%d.%m.%Y') }}{% if r.planned_time %}, {{ r.planned_time[:5] }}{% endif %} · {{ r.kind.value }}</div>
+    <div class="status status-{{ status_slug(r.status) }}">{{ r.status.value }}</div>
     {% if r.status.value == 'Новая' %}
     <form method="post" action="/requests/{{ r.id }}/accept" style="margin-top:10px">
       <button class="btn btn-primary" type="submit" style="width:100%">Принять заявку</button>

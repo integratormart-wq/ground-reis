@@ -17,10 +17,10 @@
   </form>
 </div>
 <div class="table-wrap"><table class="table">
-  <thead><tr><th>Номер</th><th>Дата</th><th>Направление</th><th>Водитель</th><th>Автомобиль</th><th>Статус</th><th></th></tr></thead>
+  <thead><tr><th>Номер</th><th>Клиент / объект</th><th>Адрес</th><th>Дата и время</th><th>Направление</th><th>Водитель</th><th>Статус</th><th></th></tr></thead>
   <tbody>
   {% for r in reqs %}
-  <tr><td>{{ r.number }}</td><td>{{ r.planned_date }}</td><td>{{ r.kind.value }}</td><td>{{ r.driver.full_name if r.driver else '—' }}</td><td>{{ r.vehicle.name if r.vehicle else '—' }}</td><td><span class="status">{{ r.status.value }}</span></td><td class="actions-cell"><a class="link" href="/requests/{{ r.id }}">Открыть</a>{% if user.role in ['admin','logist'] %} <a class="btn btn-ghost btn-sm" href="/requests/{{ r.id }}/edit">Редактировать</a>{% if r.id in deletable_ids %}<form method="post" action="/requests/{{ r.id }}/delete" class="inline-form" onsubmit="return confirm('Удалить заявку?')"><button class="btn btn-danger btn-sm" type="submit">Удалить</button></form>{% endif %}{% endif %}</td></tr>
+  <tr><td>{{ r.number }}</td><td>{{ r.customer.name if r.customer else (r.route_name or '—') }}<br><span class="muted">{{ r.route_name or '' }}</span></td><td>{{ r.load_address or '—' }}</td><td>{{ r.planned_date.strftime('%d.%m.%Y') }}{% if r.planned_time %}, {{ r.planned_time[:5] }}{% endif %}</td><td>{{ r.kind.value }}</td><td>{{ r.driver.full_name if r.driver else '—' }}</td><td><span class="status status-{{ status_slug(r.status) }}">{{ r.status.value }}</span></td><td class="actions-cell"><a class="link" href="/requests/{{ r.id }}">Открыть</a>{% if user.role in ['admin','logist'] %} <a class="btn btn-ghost btn-sm" href="/requests/{{ r.id }}/edit">Редактировать</a>{% if r.id in deletable_ids %}<form method="post" action="/requests/{{ r.id }}/delete" class="inline-form" onsubmit="return confirm('Удалить заявку?')"><button class="btn btn-danger btn-sm" type="submit">Удалить</button></form>{% endif %}{% endif %}</td></tr>
   {% endfor %}
   </tbody>
 </table></div>

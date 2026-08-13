@@ -36,7 +36,9 @@
     <thead>
       <tr>
         <th>Номер</th>
-        <th>Дата</th>
+        <th>Клиент / объект</th>
+        <th>Адрес</th>
+        <th>Дата и время</th>
         <th>Водитель</th>
         <th>Автомобиль</th>
         <th>Маршрут</th>
@@ -51,14 +53,16 @@
       {% for r in reqs %}
       <tr>
         <td>{{ r.number }}</td>
-        <td>{{ r.planned_date }}</td>
+        <td>{{ r.customer.name if r.customer else (r.route_name or '—') }}</td>
+        <td>{{ r.load_address or '—' }}</td>
+        <td>{{ r.planned_date.strftime('%d.%m.%Y') }}{% if r.planned_time %}, {{ r.planned_time[:5] }}{% endif %}</td>
         <td>{{ r.driver.full_name if r.driver else '—' }}</td>
         <td>{{ r.vehicle.name if r.vehicle else '—' }}</td>
         <td>{{ r.route_name or '—' }}</td>
         <td>{{ r.actual_volume if r.actual_volume is not none else r.volume or '—' }}</td>
         <td>{{ r.actual_km if r.actual_km is not none else r.km or '—' }}</td>
         <td>{{ r.sum_driver if r.sum_driver is not none else '—' }}</td>
-        <td><span class="status">{{ r.status.value }}</span></td>
+        <td><span class="status status-{{ status_slug(r.status) }}">{{ r.status.value }}</span></td>
         <td>
           <a class="link" href="/requests/{{ r.id }}">Открыть</a>
           {% if user.role in ['admin','logist'] %}

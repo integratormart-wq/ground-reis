@@ -275,10 +275,15 @@ input[type="checkbox"]{width:18px!important;min-height:18px!important;accent-col
 .actions-cell form{display:inline-flex;margin:0}
 .status,.badge{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;font-size:11px;font-weight:800;white-space:nowrap}
 .status{color:#ffd861;background:rgba(255,199,44,.13);border:1px solid rgba(255,199,44,.22)}
-.status-Новая{color:#ffd45a;background:rgba(255,199,44,.13);border-color:rgba(255,199,44,.25)}
-.status-В{color:#82b7ff;background:rgba(77,156,255,.14);border-color:rgba(77,156,255,.25)}
-.status-Подтверждена,.status-Выполнена{color:#a7df7f;background:rgba(122,201,67,.13);border-color:rgba(122,201,67,.25)}
-.status-Отменена{color:#ff8f8d;background:rgba(239,83,80,.13);border-color:rgba(239,83,80,.25)}
+.status-new{color:#ffe071;background:rgba(255,199,44,.13);border-color:rgba(255,199,44,.28)}
+.status-assigned{color:#ffc46b;background:rgba(255,152,45,.14);border-color:rgba(255,152,45,.30)}
+.status-accepted{color:#71d4ff;background:rgba(39,177,235,.14);border-color:rgba(39,177,235,.30)}
+.status-in-work{color:#87adff;background:rgba(67,120,255,.16);border-color:rgba(67,120,255,.32)}
+.status-driver-completed{color:#c59aff;background:rgba(155,93,229,.16);border-color:rgba(155,93,229,.32)}
+.status-review{color:#ffb870;background:rgba(245,132,31,.16);border-color:rgba(245,132,31,.32)}
+.status-confirmed{color:#a7e580;background:rgba(102,187,54,.15);border-color:rgba(102,187,54,.32)}
+.status-correction{color:#ff8d72;background:rgba(235,83,52,.16);border-color:rgba(235,83,52,.32)}
+.status-cancelled{color:#ff8585;background:rgba(220,48,48,.16);border-color:rgba(220,48,48,.32)}
 .badge{color:#15171b;background:var(--accent)}
 
 .bottom{padding:22px;color:#747b86;font-size:11px;text-align:center;background:#0c0e12;border-top:1px solid var(--border);letter-spacing:.06em;text-transform:uppercase}

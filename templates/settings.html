@@ -122,12 +122,12 @@
 
 <h3 id="customers" data-settings-section>Заказчики</h3>
 <table class="table">
-  <thead><tr><th>Имя</th><th>Адрес</th><th></th></tr></thead>
+  <thead><tr><th>Имя</th><th>ИНН</th><th>Bitrix ID</th><th>Адрес</th><th></th></tr></thead>
   <tbody>
   {% for c in customers %}
   <tr>
     <td>{{ c.name }}</td>
-    <td>{{ c.address }}</td>
+    <td>{{ c.inn or '—' }}</td><td>{{ c.bitrix_company_id or '—' }}</td><td>{{ c.address }}</td>
     <td>
       <a class="btn btn-ghost btn-sm" href="/settings/customers/{{ c.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/customers/{{ c.id }}/delete" onsubmit="return confirm('Удалить?')">
@@ -141,6 +141,8 @@
 {% if user.role in ['admin','logist'] %}
 <form method="post" action="/settings/customers" class="filters">
   <input name="name" placeholder="Имя" required />
+  <input name="inn" inputmode="numeric" placeholder="ИНН" />
+  <input name="bitrix_company_id" type="number" min="1" placeholder="Bitrix ID компании" />
   <input name="address" placeholder="Адрес" />
   <button class="btn" type="submit">Добавить</button>
 </form>

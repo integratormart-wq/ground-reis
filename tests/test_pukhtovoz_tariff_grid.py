@@ -127,7 +127,7 @@ def test_settings_sections_are_collapsible_and_anchor_driven():
     db.commit()
     html = client.get("/settings").text
 
-    assert '/static/css/app.css?v=6' in html
+    assert '/static/css/app.css?v=7' in html
     assert '>м³<' in html
     assert '>м3<' not in html
     assert 'class="settings-section-nav"' in html

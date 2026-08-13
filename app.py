@@ -1,8 +1,8 @@
-import os, io, csv, sys, math, json, threading
+import os, io, csv, sys, math, json, threading, uuid
 from datetime import datetime, timedelta, date
-from typing import Optional
+from typing import Optional, List
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, HTTPException, status, Form, Request, Query
+from fastapi import FastAPI, Depends, HTTPException, status, Form, Request, Query, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -14,22 +14,9 @@ from jose import jwt
 import bcrypt
 from openpyxl import Workbook
 
-from backend import models, auth
+from backend import models, auth, bitrix
 from backend.auth import create_access_token
 from backend.database import SessionLocal, engine
-try:
-    import backend.bitrix as bitrix
-except Exception:
-    # заглушка, если модуль bitrix.py ещё не залит — сайт не падает, интеграция спит
-    class _BitrixStub:
-        @staticmethod
-        def sync_trip(*a, **k): return {"skipped": True, "reason": "bitrix_module_missing"}
-        @staticmethod
-        def delete_trip(*a, **k): return {"skipped": True}
-        @staticmethod
-        def find_smart_process_ids(*a, **k): return {"_error": "bitrix_module_missing"}
-    bitrix = _BitrixStub()
-    print("BOOT bitrix module not found — integration disabled until backend/bitrix.py is deployed", flush=True)
 from backend.models import UserRole, RequestStatus, TripType, CalcStatus, Polygon, IntegrationSetting, TripArchive
 
 load_dotenv()
@@ -58,6 +45,22 @@ async def reject_cross_origin_writes(request: Request, call_next):
 root_dir = os.path.dirname(os.path.abspath(__file__))
 app.mount("/static", StaticFiles(directory=os.path.join(root_dir, "static"), html=True), name="static")
 jinja_env = Environment(loader=FileSystemLoader(os.path.join(root_dir, "templates")), autoescape=select_autoescape(["html", "xml"]))
+STATUS_SLUGS = {
+    RequestStatus.NEW: "new", RequestStatus.ASSIGNED: "assigned", RequestStatus.ACCEPTED: "accepted",
+    RequestStatus.IN_WORK: "in-work", RequestStatus.DRIVER_COMPLETED: "driver-completed",
+    RequestStatus.ON_REVIEW: "review", RequestStatus.LOGIST_CONFIRMED: "confirmed",
+    RequestStatus.NEEDS_CORRECTION: "correction", RequestStatus.CANCELLED: "cancelled",
+}
+
+
+def status_slug(value):
+    try:
+        return STATUS_SLUGS[RequestStatus(value)]
+    except (ValueError, KeyError, TypeError):
+        return "unknown"
+
+
+jinja_env.globals["status_slug"] = status_slug
 def render_template(name: str, context: dict) -> HTMLResponse:
     html = jinja_env.get_template(name).render(**context)
     return HTMLResponse(content=html)
@@ -105,6 +108,57 @@ def _initialize_database():
                 print("BOOT migrated: added bitrix_entity_type_id", flush=True)
             else:
                 print("BOOT migration: bitrix_entity_type_id already present", flush=True)
+            trip_column_migrations = {
+                "tonnage": "FLOAT",
+                "actual_tonnage": "FLOAT",
+                "site_contact_name": "VARCHAR(255)",
+                "site_contact_phone": "VARCHAR(50)",
+                "site_contact_comment": "TEXT",
+                "is_empty_run": "BOOLEAN DEFAULT FALSE",
+                "empty_run_comment": "TEXT",
+                "has_downtime": "BOOLEAN DEFAULT FALSE",
+                "downtime_minutes": "INTEGER",
+                "downtime_comment": "TEXT",
+                "polygon_cost_manual": "FLOAT",
+            }
+            for column_name, column_type in trip_column_migrations.items():
+                if column_name not in cols:
+                    conn.execute(text(f"ALTER TABLE trip_requests ADD COLUMN {column_name} {column_type}"))
+                    print(f"BOOT migrated: added {column_name}", flush=True)
+            attachment_cols = [c["name"] for c in insp.get_columns("attachments")]
+            if "content" not in attachment_cols:
+                binary_type = "BYTEA" if engine.dialect.name == "postgresql" else "BLOB"
+                conn.execute(text(f"ALTER TABLE attachments ADD COLUMN content {binary_type}"))
+                print("BOOT migrated: added attachments.content", flush=True)
+            polygon_cols = [c["name"] for c in insp.get_columns("polygons")]
+            polygon_column_migrations = {
+                "entry_notes": "TEXT", "navigator_url": "VARCHAR(1024)",
+                "calculation_method": "VARCHAR(20) DEFAULT 'volume'",
+                "volume_rate": "FLOAT DEFAULT 0", "tonnage_rate": "FLOAT DEFAULT 0",
+                "waste_types": "TEXT",
+            }
+            for column_name, column_type in polygon_column_migrations.items():
+                if column_name not in polygon_cols:
+                    conn.execute(text(f"ALTER TABLE polygons ADD COLUMN {column_name} {column_type}"))
+                    print(f"BOOT migrated polygons: added {column_name}", flush=True)
+            customer_cols = [c["name"] for c in insp.get_columns("customers")]
+            for column_name, column_type in {"inn": "VARCHAR(12)", "bitrix_company_id": "INTEGER"}.items():
+                if column_name not in customer_cols:
+                    conn.execute(text(f"ALTER TABLE customers ADD COLUMN {column_name} {column_type}"))
+                    print(f"BOOT migrated customers: added {column_name}", flush=True)
+            duplicate_customer_inn = conn.execute(text(
+                "SELECT inn FROM customers WHERE inn IS NOT NULL GROUP BY inn HAVING COUNT(*) > 1 LIMIT 1"
+            )).first()
+            duplicate_customer_bitrix = conn.execute(text(
+                "SELECT bitrix_company_id FROM customers WHERE bitrix_company_id IS NOT NULL "
+                "GROUP BY bitrix_company_id HAVING COUNT(*) > 1 LIMIT 1"
+            )).first()
+            if duplicate_customer_inn or duplicate_customer_bitrix:
+                raise RuntimeError("Найдены дубли ИНН или Bitrix ID заказчиков; уникальные индексы не созданы")
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_customers_inn ON customers(inn)"))
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_customers_bitrix_company_id ON customers(bitrix_company_id)"
+            ))
             duplicate_numbers = conn.execute(text("SELECT number FROM trip_requests GROUP BY number HAVING COUNT(*) > 1 LIMIT 1")).first()
             if duplicate_numbers:
                 raise RuntimeError("Найдены дубли номеров заявок; уникальный индекс не создан")
@@ -274,7 +328,10 @@ def driver_panel(request: Request, current_user: models.User = Depends(get_curre
     menu = menu_for(current_user.role)
     today = date.today()
     rows = db.query(models.TripRequest).filter(models.TripRequest.driver_id == current_user.id, models.TripRequest.planned_date == today).all()
-    new_reqs = db.query(models.TripRequest).filter(models.TripRequest.driver_id == current_user.id, models.TripRequest.status == RequestStatus.NEW).all()
+    new_reqs = db.query(models.TripRequest).filter(
+        models.TripRequest.driver_id == current_user.id,
+        models.TripRequest.status.in_([RequestStatus.NEW, RequestStatus.ASSIGNED, RequestStatus.ACCEPTED]),
+    ).all()
     work_reqs = db.query(models.TripRequest).filter(models.TripRequest.driver_id == current_user.id, models.TripRequest.status == RequestStatus.IN_WORK).all()
     stats = {"today": len(rows), "pukhtovoz": sum(1 for x in rows if x.kind == TripType.PUKHTOVOZ), "samosval": sum(1 for x in rows if x.kind == TripType.SAMOSVAL), "sum_today": sum(x.sum_driver or 0 for x in rows)}
     return render_template("driver.html", {"request": request, "user": current_user, "menu": menu, "stats": stats, "rows": rows, "new_reqs": new_reqs, "work_reqs": work_reqs, "app_name": "ГРАУНД | Рейсы"})
@@ -421,9 +478,11 @@ def create_request(
     request: Request, number: Optional[str] = Form(None), planned_date: str = Form(...), planned_time: str = Form(""),
     driver_id: Optional[str] = Form(None), vehicle_id: Optional[str] = Form(None), load_address: str = Form(""),
     unload_address: str = Form(""), route_name: str = Form(""), km: str = Form("0"), volume: str = Form("0"),
-    trips_count: str = Form("1"), cargo_type_id: Optional[str] = Form(None), customer_id: Optional[str] = Form(None),
-    customer_name_manual: Optional[str] = Form(None), polygon_id: Optional[str] = Form(None), kind: str = Form(...),
-    comment: str = Form(""), tariff_id: Optional[str] = Form(None),
+    tonnage: Optional[str] = Form(None), trips_count: str = Form("1"), cargo_type_id: Optional[str] = Form(None),
+    customer_id: Optional[str] = Form(None), customer_name_manual: Optional[str] = Form(None),
+    polygon_id: Optional[str] = Form(None), kind: str = Form(...), comment: str = Form(""),
+    tariff_id: Optional[str] = Form(None), site_contact_name: str = Form(""),
+    site_contact_phone: str = Form(""), site_contact_comment: str = Form(""),
     current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db),
 ):
     try:
@@ -431,11 +490,12 @@ def create_request(
         planned_value = date.fromisoformat(planned_date)
         km_value = _finite_float(km, "Километраж")
         volume_value = _finite_float(volume, "Объём")
+        tonnage_value = _finite_float(tonnage, "Тоннаж", nullable=True)
         trips_value = int(trips_count or 1)
     except (ValueError, TypeError):
         raise HTTPException(400, "Проверьте дату и числовые поля")
-    if km_value < 0 or volume_value < 0 or trips_value <= 0:
-        raise HTTPException(400, "Километраж и объём не могут быть отрицательными, число рейсов должно быть больше нуля")
+    if km_value < 0 or volume_value < 0 or (tonnage_value is not None and tonnage_value < 0) or trips_value <= 0:
+        raise HTTPException(400, "Километраж, объём и тоннаж не могут быть отрицательными, число рейсов должно быть больше нуля")
     driver_value = _form_fk(db, models.User, driver_id, "Водитель", required=True)
     driver = db.query(models.User).filter(models.User.id == driver_value).first()
     if driver.role != UserRole.DRIVER or not driver.is_active:
@@ -448,7 +508,11 @@ def create_request(
     customer_value = _form_fk(db, models.Customer, customer_id, "Заказчик")
     if not customer_value and customer_name_manual and customer_name_manual.strip():
         clean_customer = customer_name_manual.strip()
-        customer = db.query(models.Customer).filter(models.Customer.name == clean_customer).first()
+        normalized_customer = bitrix._normalize(clean_customer)
+        customer = next(
+            (row for row in db.query(models.Customer).all() if bitrix._normalize(row.name) == normalized_customer),
+            None,
+        )
         if not customer:
             customer = models.Customer(name=clean_customer, address="")
             db.add(customer)
@@ -482,9 +546,12 @@ def create_request(
     req = models.TripRequest(
         number=clean_number, planned_date=planned_value, planned_time=planned_time.strip(), driver_id=driver_value,
         vehicle_id=vehicle_value, load_address=load_address.strip(), unload_address=unload_address.strip(),
-        route_name=route_name.strip(), km=km_value, volume=volume_value, trips_count=trips_value,
-        cargo_type_id=cargo_value, customer_id=customer_value, polygon_id=polygon_value, kind=kind_value,
-        status=RequestStatus.ASSIGNED, comment=comment.strip(), tariff_id=tariff.id,
+        route_name=route_name.strip(), km=km_value, volume=volume_value, tonnage=tonnage_value,
+        trips_count=trips_value, cargo_type_id=cargo_value, customer_id=customer_value,
+        polygon_id=polygon_value, kind=kind_value, status=RequestStatus.ASSIGNED,
+        comment=comment.strip(), tariff_id=tariff.id,
+        site_contact_name=site_contact_name.strip(), site_contact_phone=site_contact_phone.strip(),
+        site_contact_comment=site_contact_comment.strip(),
         sum_driver=_tariff_amount(tariff, km_value, volume_value, trips_value),
     )
     req.sum_trip = req.sum_driver
@@ -545,6 +612,19 @@ def _finite_float(raw, label, default=0.0, nullable=False):
     return value
 
 
+def _customer_identity_values(inn, bitrix_company_id):
+    clean_inn = "".join(ch for ch in str(inn or "") if ch.isdigit())
+    if clean_inn and len(clean_inn) not in {10, 12}:
+        raise HTTPException(400, "ИНН должен содержать 10 или 12 цифр")
+    try:
+        bitrix_id = int(bitrix_company_id) if str(bitrix_company_id or "").strip() else None
+    except ValueError:
+        raise HTTPException(400, "Bitrix ID должен быть целым числом")
+    if bitrix_id is not None and bitrix_id <= 0:
+        raise HTTPException(400, "Bitrix ID должен быть больше нуля")
+    return clean_inn or None, bitrix_id
+
+
 def _commit_or_conflict(db, detail="Данные конфликтуют с существующей записью"):
     try:
         db.commit()
@@ -580,8 +660,13 @@ def _export_row(values):
 def _salary_sensitive_values(trip):
     return (
         trip.driver_id, trip.planned_date, trip.vehicle_id, trip.kind,
-        trip.km, trip.volume, trip.actual_km, trip.actual_volume, trip.trips_count,
+        trip.km, trip.volume, trip.tonnage,
+        trip.actual_km, trip.actual_volume, trip.actual_tonnage, trip.trips_count,
         trip.tariff_id, trip.sum_trip, trip.sum_driver, trip.status,
+        trip.customer_id, trip.cargo_type_id, trip.polygon_id,
+        trip.is_empty_run, trip.empty_run_comment,
+        trip.has_downtime, trip.downtime_minutes, trip.downtime_comment,
+        trip.comment, trip.logist_comment,
     )
 
 
@@ -714,9 +799,13 @@ def edit_request(
     req_id: int, number: str = Form(...), planned_date: str = Form(...), planned_time: str = Form(""),
     driver_id: str = Form(...), vehicle_id: Optional[str] = Form(None), load_address: str = Form(""),
     unload_address: str = Form(""), route_name: str = Form(""), km: str = Form("0"),
-    volume: str = Form("0"), trips_count: str = Form("1"), cargo_type_id: Optional[str] = Form(None),
-    customer_id: Optional[str] = Form(None), polygon_id: Optional[str] = Form(None), kind: str = Form(...),
+    volume: str = Form("0"), tonnage: Optional[str] = Form(None), trips_count: str = Form("1"),
+    cargo_type_id: Optional[str] = Form(None), customer_id: Optional[str] = Form(None),
+    polygon_id: Optional[str] = Form(None), kind: str = Form(...),
     comment: str = Form(""), tariff_id: Optional[str] = Form(None),
+    polygon_cost_manual: Optional[str] = Form(None),
+    site_contact_name: str = Form(""), site_contact_phone: str = Form(""),
+    site_contact_comment: str = Form(""),
     current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db),
 ):
     req = db.query(models.TripRequest).filter(models.TripRequest.id == req_id).first()
@@ -744,11 +833,13 @@ def edit_request(
         planned_value = date.fromisoformat(planned_date)
         km_value = _finite_float(km, "Километраж")
         volume_value = _finite_float(volume, "Объём")
+        tonnage_value = _finite_float(tonnage, "Тоннаж", nullable=True)
+        polygon_cost_value = _finite_float(polygon_cost_manual, "Затраты полигона", nullable=True)
         trips_value = int(trips_count or 1)
     except (ValueError, TypeError):
         raise HTTPException(400, "Проверьте дату и числовые поля")
-    if km_value < 0 or volume_value < 0 or trips_value <= 0:
-        raise HTTPException(400, "Километраж и объём не могут быть отрицательными, число рейсов должно быть больше нуля")
+    if km_value < 0 or volume_value < 0 or (tonnage_value is not None and tonnage_value < 0) or (polygon_cost_value is not None and polygon_cost_value < 0) or trips_value <= 0:
+        raise HTTPException(400, "Километраж, объём, тоннаж и затраты не могут быть отрицательными, число рейсов должно быть больше нуля")
     clean_number = number.strip()
     if not clean_number:
         raise HTTPException(400, "Укажите номер заявки")
@@ -782,7 +873,12 @@ def edit_request(
     req.driver_id, req.vehicle_id = driver_value, vehicle_value
     req.customer_id, req.cargo_type_id, req.polygon_id = customer_value, cargo_value, polygon_value
     req.load_address, req.unload_address, req.route_name = load_address.strip(), unload_address.strip(), route_name.strip()
-    req.km, req.volume, req.trips_count, req.comment = km_value, volume_value, trips_value, comment.strip()
+    req.km, req.volume, req.tonnage = km_value, volume_value, tonnage_value
+    req.polygon_cost_manual = polygon_cost_value
+    req.trips_count, req.comment = trips_value, comment.strip()
+    req.site_contact_name = site_contact_name.strip()
+    req.site_contact_phone = site_contact_phone.strip()
+    req.site_contact_comment = site_contact_comment.strip()
     req.tariff_id = tariff.id
     if not salary_items:
         req.sum_driver = new_amount
@@ -812,7 +908,105 @@ def request_detail(request: Request, req_id: int, current_user: models.User = De
         raise HTTPException(404)
     menu = menu_for(current_user.role)
     history = db.query(models.StatusHistory).filter(models.StatusHistory.trip_request_id == req_id).order_by(models.StatusHistory.created_at.desc()).all()
-    return render_template("request_detail.html", {"request": request, "user": current_user, "menu": menu, "req": req, "history": history, "can_delete": req.id in _deletable_request_ids(db, [req]), "app_name": "ГРАУНД | Рейсы"})
+    attachments = db.query(models.Attachment).filter(models.Attachment.trip_request_id == req_id).order_by(models.Attachment.created_at.desc()).all()
+    return render_template("request_detail.html", {"request": request, "user": current_user, "menu": menu, "req": req, "history": history, "attachments": attachments, "can_delete": req.id in _deletable_request_ids(db, [req]), "app_name": "ГРАУНД | Рейсы"})
+
+
+ALLOWED_ATTACHMENT_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf"}
+MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024
+MAX_ATTACHMENTS_PER_TRIP = 5
+
+
+def _can_access_trip(user: models.User, trip: models.TripRequest) -> bool:
+    return user.role in {UserRole.ADMIN, UserRole.LOGIST} or (user.role == UserRole.DRIVER and trip.driver_id == user.id)
+
+
+def _attachment_signature_matches(content_type: str, content: bytes) -> bool:
+    signatures = {
+        "image/jpeg": content.startswith(b"\xff\xd8\xff"),
+        "image/png": content.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/webp": len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP",
+        "application/pdf": content.startswith(b"%PDF-"),
+    }
+    return signatures.get(content_type, False)
+
+
+@app.post("/requests/{req_id}/attachments")
+async def upload_attachments(
+    req_id: int, files: List[UploadFile] = File(...),
+    current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    trip_query = db.query(models.TripRequest).filter(models.TripRequest.id == req_id)
+    if engine.dialect.name == "postgresql":
+        trip_query = trip_query.with_for_update()
+    trip = trip_query.first()
+    if not trip or not _can_access_trip(current_user, trip):
+        raise HTTPException(403)
+    existing_count = db.query(models.Attachment).filter(models.Attachment.trip_request_id == req_id).count()
+    if not files or existing_count + len(files) > MAX_ATTACHMENTS_PER_TRIP:
+        raise HTTPException(400, "К одной заявке можно прикрепить не больше 5 файлов")
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    saved_paths = []
+    try:
+        for uploaded in files:
+            original_name = os.path.basename(uploaded.filename or "file")[:512]
+            content_type = (uploaded.content_type or "").lower()
+            if content_type not in ALLOWED_ATTACHMENT_TYPES:
+                raise HTTPException(400, "Разрешены только JPG, PNG, WEBP и PDF")
+            extension = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "application/pdf": ".pdf"}[content_type]
+            chunks = []
+            total = 0
+            while chunk := await uploaded.read(1024 * 1024):
+                total += len(chunk)
+                if total > MAX_ATTACHMENT_SIZE:
+                    raise HTTPException(400, "Размер одного файла не должен превышать 10 МБ")
+                chunks.append(chunk)
+            content = b"".join(chunks)
+            if not content or not _attachment_signature_matches(content_type, content):
+                raise HTTPException(400, "Содержимое файла не соответствует его типу")
+            stored_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}{extension}")
+            with open(stored_path, "wb") as output:
+                output.write(content)
+            saved_paths.append(stored_path)
+            db.add(models.Attachment(
+                trip_request_id=req_id, filename=original_name, content_type=content_type,
+                size=total, path=stored_path, content=content,
+            ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        for path in saved_paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        raise
+    return RedirectResponse(f"/requests/{req_id}", status_code=302)
+
+
+@app.get("/attachments/{attachment_id}")
+def download_attachment(
+    attachment_id: int, current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    attachment = db.query(models.Attachment).filter(models.Attachment.id == attachment_id).first()
+    if not attachment:
+        raise HTTPException(404)
+    trip = db.query(models.TripRequest).filter(models.TripRequest.id == attachment.trip_request_id).first()
+    if not trip or not _can_access_trip(current_user, trip):
+        raise HTTPException(403)
+    upload_root = os.path.realpath(UPLOAD_DIR)
+    stored_path = os.path.realpath(attachment.path or "")
+    if os.path.commonpath([upload_root, stored_path]) == upload_root and os.path.isfile(stored_path):
+        return FileResponse(stored_path, media_type=attachment.content_type or "application/octet-stream", filename=attachment.filename)
+    if attachment.content:
+        safe_name = os.path.basename(attachment.filename or "file").replace('"', "")
+        return Response(
+            content=attachment.content,
+            media_type=attachment.content_type or "application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+        )
+    raise HTTPException(404)
 
 @app.post("/requests/{req_id}/accept")
 def accept_trip(req_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -855,7 +1049,14 @@ def start_trip(req_id: int, actual_km: Optional[str] = Form(None), actual_volume
     return RedirectResponse(f"/requests/{req_id}", status_code=302)
 
 @app.post("/requests/{req_id}/complete")
-def complete_trip(req_id: int, actual_km: Optional[str] = Form(None), actual_volume: Optional[str] = Form(None), comment: str = Form(""), current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+def complete_trip(
+    req_id: int, actual_km: Optional[str] = Form(None), actual_volume: Optional[str] = Form(None),
+    actual_tonnage: Optional[str] = Form(None), comment: str = Form(""),
+    is_empty_run: Optional[str] = Form(None), empty_run_comment: str = Form(""),
+    has_downtime: Optional[str] = Form(None), downtime_minutes: Optional[str] = Form(None),
+    downtime_comment: str = Form(""), current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     req = db.query(models.TripRequest).filter(models.TripRequest.id == req_id).first()
     if not req or req.driver_id != current_user.id:
         raise HTTPException(403)
@@ -863,10 +1064,24 @@ def complete_trip(req_id: int, actual_km: Optional[str] = Form(None), actual_vol
         raise HTTPException(409, "Завершить можно только заявку в работе")
     km_value = _finite_float(actual_km, "Фактический километраж", nullable=True)
     volume_value = _finite_float(actual_volume, "Фактический объём", nullable=True)
+    tonnage_value = _finite_float(actual_tonnage, "Фактический тоннаж", nullable=True)
     km_value = (req.actual_km if req.actual_km is not None else (req.km or 0)) if km_value is None else km_value
     volume_value = (req.actual_volume if req.actual_volume is not None else (req.volume or 0)) if volume_value is None else volume_value
-    if km_value < 0 or volume_value < 0:
+    tonnage_value = req.actual_tonnage if tonnage_value is None else tonnage_value
+    if km_value < 0 or volume_value < 0 or (tonnage_value is not None and tonnage_value < 0):
         raise HTTPException(400, "Фактические значения не могут быть отрицательными")
+    empty_run_value = bool(is_empty_run)
+    downtime_value = bool(has_downtime)
+    empty_comment = empty_run_comment.strip()
+    downtime_comment_value = downtime_comment.strip()
+    try:
+        downtime_minutes_value = int(downtime_minutes or 0) if downtime_value else None
+    except ValueError:
+        raise HTTPException(400, "Длительность простоя должна быть целым числом минут")
+    if empty_run_value and not empty_comment:
+        raise HTTPException(400, "Для холостого прогона укажите комментарий")
+    if downtime_value and (not downtime_minutes_value or downtime_minutes_value <= 0):
+        raise HTTPException(400, "Укажите длительность простоя больше нуля")
     vehicle = db.query(models.Vehicle).filter(models.Vehicle.id == req.vehicle_id).first() if req.vehicle_id else None
     vehicle_type = db.query(models.VehicleType).filter(models.VehicleType.id == vehicle.type_id).first() if vehicle else None
     if not vehicle or not vehicle.is_active or not vehicle_type or vehicle_type.kind != req.kind:
@@ -877,7 +1092,10 @@ def complete_trip(req_id: int, actual_km: Optional[str] = Form(None), actual_vol
     old = req.status
     req.status = RequestStatus.DRIVER_COMPLETED
     req.finished_at = datetime.utcnow()
-    req.actual_km, req.actual_volume = km_value, volume_value
+    req.actual_km, req.actual_volume, req.actual_tonnage = km_value, volume_value, tonnage_value
+    req.is_empty_run, req.empty_run_comment = empty_run_value, empty_comment or None
+    req.has_downtime, req.downtime_minutes = downtime_value, downtime_minutes_value
+    req.downtime_comment = downtime_comment_value or None
     clean_comment = comment.strip()
     if clean_comment:
         req.comment = (req.comment or "") + (" | " if req.comment else "") + clean_comment
@@ -907,6 +1125,120 @@ def confirm_trip(req_id: int, current_user: models.User = Depends(require_role(U
     except Exception as e:
         print("BITRIX_SYNC_EXCEPTION", type(e).__name__, flush=True)
     return RedirectResponse(f"/requests/{req_id}", status_code=302)
+
+
+def _day_report_context(request, user, db, editing=None):
+    assigned_vehicle_ids = db.query(models.TripRequest.vehicle_id).filter(
+        models.TripRequest.driver_id == user.id,
+        models.TripRequest.vehicle_id.isnot(None),
+    )
+    reported_vehicle_ids = db.query(models.DriverDayReport.vehicle_id).filter(
+        models.DriverDayReport.driver_id == user.id,
+    )
+    vehicles = db.query(models.Vehicle).filter(
+        models.Vehicle.is_active == True,
+        models.Vehicle.id.in_(assigned_vehicle_ids.union(reported_vehicle_ids)),
+    ).order_by(models.Vehicle.name).all()
+    reports = db.query(models.DriverDayReport).filter(
+        models.DriverDayReport.driver_id == user.id
+    ).order_by(models.DriverDayReport.report_date.desc()).all()
+    return {
+        "request": request, "user": user, "menu": menu_for(user.role), "vehicles": vehicles,
+        "reports": reports, "editing": editing, "today": date.today(), "app_name": "ГРАУНД | Рейсы",
+    }
+
+
+@app.get("/driver/day-report", response_class=HTMLResponse)
+def driver_day_report_page(
+    request: Request, current_user: models.User = Depends(require_role(UserRole.DRIVER)),
+    db: Session = Depends(get_db),
+):
+    return render_template("driver_day_report.html", _day_report_context(request, current_user, db))
+
+
+@app.get("/driver/day-report/{report_id}/edit", response_class=HTMLResponse)
+def driver_day_report_edit(
+    request: Request, report_id: int,
+    current_user: models.User = Depends(require_role(UserRole.DRIVER)), db: Session = Depends(get_db),
+):
+    report = db.query(models.DriverDayReport).filter(models.DriverDayReport.id == report_id).first()
+    if not report or report.driver_id != current_user.id:
+        raise HTTPException(404)
+    return render_template("driver_day_report.html", _day_report_context(request, current_user, db, report))
+
+
+@app.post("/driver/day-report")
+def save_driver_day_report(
+    report_date: str = Form(...), vehicle_id: str = Form(...), total_km: str = Form("0"),
+    odometer: str = Form("0"), fuel_liters: str = Form("0"), comment: str = Form(""),
+    current_user: models.User = Depends(require_role(UserRole.DRIVER)), db: Session = Depends(get_db),
+):
+    try:
+        report_date_value = date.fromisoformat(report_date)
+        total_km_value = _finite_float(total_km, "Общий километраж")
+        odometer_value = _finite_float(odometer, "Показания спидометра")
+        fuel_value = _finite_float(fuel_liters, "Топливо")
+    except ValueError:
+        raise HTTPException(400, "Проверьте дату и числовые поля")
+    if min(total_km_value, odometer_value, fuel_value) < 0:
+        raise HTTPException(400, "Показатели отчёта дня не могут быть отрицательными")
+    vehicle_value = _form_fk(db, models.Vehicle, vehicle_id, "Автомобиль", required=True)
+    assigned_vehicle = db.query(models.TripRequest.id).filter(
+        models.TripRequest.driver_id == current_user.id,
+        models.TripRequest.vehicle_id == vehicle_value,
+    ).first()
+    previously_reported = db.query(models.DriverDayReport.id).filter(
+        models.DriverDayReport.driver_id == current_user.id,
+        models.DriverDayReport.vehicle_id == vehicle_value,
+    ).first()
+    vehicle = db.query(models.Vehicle).filter(models.Vehicle.id == vehicle_value, models.Vehicle.is_active == True).first()
+    if not vehicle or not (assigned_vehicle or previously_reported):
+        raise HTTPException(400, "Выберите автомобиль из своих заявок")
+    report = db.query(models.DriverDayReport).filter(
+        models.DriverDayReport.driver_id == current_user.id,
+        models.DriverDayReport.report_date == report_date_value,
+    ).first()
+    if not report:
+        report = models.DriverDayReport(driver_id=current_user.id, report_date=report_date_value)
+        db.add(report)
+    report.vehicle_id = vehicle_value
+    report.total_km = total_km_value
+    report.odometer = odometer_value
+    report.fuel_liters = fuel_value
+    report.comment = comment.strip()
+    _commit_or_conflict(db, "Отчёт за эту дату уже существует")
+    return RedirectResponse("/driver/day-report", status_code=302)
+
+
+@app.get("/reports/day", response_class=HTMLResponse)
+def day_reports(
+    request: Request, date_from: Optional[str] = None, date_to: Optional[str] = None,
+    driver_id: Optional[str] = None,
+    current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)),
+    db: Session = Depends(get_db),
+):
+    query = db.query(models.DriverDayReport)
+    try:
+        date_from_value = date.fromisoformat(date_from) if date_from else None
+        date_to_value = date.fromisoformat(date_to) if date_to else None
+    except ValueError:
+        raise HTTPException(400, "Проверьте даты отчёта")
+    if date_from_value and date_to_value and date_from_value > date_to_value:
+        raise HTTPException(400, "Дата начала не может быть позже даты окончания")
+    if date_from_value:
+        query = query.filter(models.DriverDayReport.report_date >= date_from_value)
+    if date_to_value:
+        query = query.filter(models.DriverDayReport.report_date <= date_to_value)
+    if driver_id:
+        driver_value = _form_fk(db, models.User, driver_id, "Водитель")
+        query = query.filter(models.DriverDayReport.driver_id == driver_value)
+    rows = query.order_by(models.DriverDayReport.report_date.desc()).all()
+    drivers = db.query(models.User).filter(models.User.role == UserRole.DRIVER).order_by(models.User.full_name).all()
+    return render_template("day_reports.html", {
+        "request": request, "user": current_user, "menu": menu_for(current_user.role),
+        "rows": rows, "drivers": drivers, "date_from": date_from or "", "date_to": date_to or "",
+        "selected_driver_id": driver_id or "", "app_name": "ГРАУНД | Рейсы",
+    })
 
 @app.get("/salary", response_class=HTMLResponse)
 def salary(request: Request, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, q: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1008,9 +1340,9 @@ def export_report(status_f: Optional[str] = None, driver_id: Optional[str] = Non
     if search: q = q.filter(models.TripRequest.number.ilike(f"%{search}%"))
     rows = q.order_by(models.TripRequest.planned_date.desc()).all()
     out = io.StringIO(); writer = csv.writer(out)
-    writer.writerow(["Номер", "Дата", "Статус", "Водитель", "Полигон", "Компания", "Объём, м³", "Сумма"])
+    writer.writerow(["Номер", "Дата", "Время", "Статус", "Водитель", "Полигон", "Компания", "Объём, м³", "Тоннаж план, т", "Тоннаж факт, т", "Сумма"])
     for r in rows:
-        writer.writerow(_export_row([r.number, r.planned_date, r.status.value, r.driver.full_name if r.driver else "", r.polygon.name if r.polygon else "", r.customer.name if r.customer else "", r.actual_volume if r.actual_volume is not None else (r.volume or 0), r.sum_driver or 0]))
+        writer.writerow(_export_row([r.number, r.planned_date, r.planned_time or "", r.status.value, r.driver.full_name if r.driver else "", r.polygon.name if r.polygon else "", r.customer.name if r.customer else "", r.actual_volume if r.actual_volume is not None else (r.volume or 0), r.tonnage if r.tonnage is not None else "", r.actual_tonnage if r.actual_tonnage is not None else "", r.sum_driver or 0]))
     return Response(content="\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=report.csv"})
 
 @app.get("/export/report.xlsx")
@@ -1029,9 +1361,9 @@ def export_report_xlsx(status_f: Optional[str] = None, driver_id: Optional[str] 
     if date_to: q = q.filter(models.TripRequest.planned_date <= date.fromisoformat(date_to))
     if search: q = q.filter(models.TripRequest.number.ilike(f"%{search}%"))
     rows = q.order_by(models.TripRequest.planned_date.desc()).all()
-    wb = Workbook(); ws = wb.active; ws.append(["Номер", "Дата", "Статус", "Водитель", "Полигон", "Компания", "Объём, м³", "Сумма"])
+    wb = Workbook(); ws = wb.active; ws.append(["Номер", "Дата", "Время", "Статус", "Водитель", "Полигон", "Компания", "Объём, м³", "Тоннаж план, т", "Тоннаж факт, т", "Сумма"])
     for r in rows:
-        ws.append(_export_row([r.number, r.planned_date, r.status.value, r.driver.full_name if r.driver else "", r.polygon.name if r.polygon else "", r.customer.name if r.customer else "", r.actual_volume if r.actual_volume is not None else (r.volume or 0), r.sum_driver or 0]))
+        ws.append(_export_row([r.number, r.planned_date, r.planned_time or "", r.status.value, r.driver.full_name if r.driver else "", r.polygon.name if r.polygon else "", r.customer.name if r.customer else "", r.actual_volume if r.actual_volume is not None else (r.volume or 0), r.tonnage if r.tonnage is not None else "", r.actual_tonnage if r.actual_tonnage is not None else "", r.sum_driver or 0]))
     output = io.BytesIO(); wb.save(output)
     return Response(
         content=output.getvalue(),
@@ -1049,6 +1381,20 @@ def _apply_polygon_filters(query, polygon_id=None, driver_id=None, date_from=Non
     if date_to:
         query = query.filter(models.TripRequest.planned_date <= date.fromisoformat(date_to))
     return query
+
+
+def _polygon_trip_cost(trip):
+    polygon = trip.polygon
+    if not polygon:
+        return 0.0
+    method = polygon.calculation_method or "volume"
+    if method == "manual":
+        return trip.polygon_cost_manual or 0.0
+    if method == "tonnes":
+        quantity = trip.actual_tonnage if trip.actual_tonnage is not None else (trip.tonnage or 0)
+        return quantity * (polygon.tonnage_rate or 0)
+    quantity = trip.actual_volume if trip.actual_volume is not None else (trip.volume or 0)
+    return quantity * (polygon.volume_rate or 0)
 
 @app.get("/polygons", response_class=HTMLResponse)
 def polygons_list(request: Request, polygon_id: Optional[str] = None, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1073,9 +1419,11 @@ def polygons_list(request: Request, polygon_id: Optional[str] = None, driver_id:
         items.append({
             "id": p.id,
             "name": p.name,
+            "polygon": p,
             "trips": len(rows),
             "volume": sum((r.actual_volume if r.actual_volume is not None else r.volume or 0) for r in rows),
-            "sum": sum((r.sum_driver or 0) for r in rows),
+            "tonnage": sum((r.actual_tonnage if r.actual_tonnage is not None else r.tonnage or 0) for r in rows),
+            "sum": sum(_polygon_trip_cost(r) for r in rows),
         })
     return render_template("polygons.html", {"request": request, "user": current_user, "menu": menu, "items": items, "polygons": polygons, "drivers": [current_user] if current_user.role == UserRole.DRIVER else db.query(models.User).filter(models.User.role == UserRole.DRIVER).all(), "polygon_id": polygon_id or "", "driver_id": driver_id or "", "date_from": date_from or "", "date_to": date_to or "", "app_name": "ГРАУНД | Рейсы"})
 
@@ -1103,9 +1451,9 @@ def export_polygon(polygon_id: str, driver_id: Optional[str] = None, date_from: 
         driver_id = str(current_user.id)
     rows = _apply_polygon_filters(polygon_query, polygon_id, driver_id, date_from, date_to).order_by(models.TripRequest.planned_date, models.TripRequest.id).all()
     out = io.StringIO(); writer = csv.writer(out)
-    writer.writerow(["Полигон", "Номер", "Дата", "Статус", "Водитель", "Автомобиль", "Объём, м³", "Сумма"])
+    writer.writerow(["Полигон", "Номер", "Дата", "Статус", "Водитель", "Автомобиль", "Объём, м³", "Тонны", "Затраты полигона"])
     for r in rows:
-        writer.writerow(_export_row([polygon.name, r.number, r.planned_date, r.status.value, r.driver.full_name if r.driver else "", r.vehicle.name if r.vehicle else "", r.actual_volume if r.actual_volume is not None else r.volume or 0, r.sum_driver or 0]))
+        writer.writerow(_export_row([polygon.name, r.number, r.planned_date, r.status.value, r.driver.full_name if r.driver else "", r.vehicle.name if r.vehicle else "", r.actual_volume if r.actual_volume is not None else r.volume or 0, r.actual_tonnage if r.actual_tonnage is not None else r.tonnage or 0, _polygon_trip_cost(r)]))
     return Response(content="\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f"attachment; filename=polygon-{polygon.id}.csv"})
 
 @app.get("/export/polygons.csv")
@@ -1116,13 +1464,13 @@ def export_polygons(polygon_id: Optional[str] = None, driver_id: Optional[str] =
         driver_id = str(current_user.id)
     rows = _apply_polygon_filters(polygon_query, polygon_id, driver_id, date_from, date_to).order_by(models.TripRequest.polygon_id).all()
     out = io.StringIO(); writer = csv.writer(out)
-    writer.writerow(["Полигон", "Заявок", "Объём, м³", "Сумма"])
+    writer.writerow(["Полигон", "Заявок", "Объём, м³", "Тонны", "Затраты полигона"])
     groups = {}
     for r in rows:
         key = r.polygon.name if r.polygon else "Без полигона"
         groups.setdefault(key, []).append(r)
     for name, rs in groups.items():
-        writer.writerow(_export_row([name, len(rs), sum((r.actual_volume if r.actual_volume is not None else r.volume or 0) for r in rs), sum((r.sum_driver or 0) for r in rs)]))
+        writer.writerow(_export_row([name, len(rs), sum((r.actual_volume if r.actual_volume is not None else r.volume or 0) for r in rs), sum((r.actual_tonnage if r.actual_tonnage is not None else r.tonnage or 0) for r in rs), sum(_polygon_trip_cost(r) for r in rs)]))
     return Response(content="\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=polygons.csv"})
 
 @app.get("/settings", response_class=HTMLResponse)
@@ -1187,11 +1535,24 @@ def add_settings_polygon(name: str = Form(...), address: str = Form(""), current
     return RedirectResponse("/settings#polygons", status_code=302)
 
 @app.post("/settings/customers")
-def add_customer(name: str = Form(...), address: str = Form(""), current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
+def add_customer(name: str = Form(...), address: str = Form(""), inn: str = Form(""), bitrix_company_id: str = Form(""), current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
     clean_name = name.strip()
-    if clean_name and not db.query(models.Customer).filter(models.Customer.name == clean_name).first():
-        db.add(models.Customer(name=clean_name, address=address.strip()))
-        db.commit()
+    normalized_name = bitrix._normalize(clean_name)
+    duplicate_name = next(
+        (row for row in db.query(models.Customer).all() if bitrix._normalize(row.name) == normalized_name),
+        None,
+    ) if normalized_name else None
+    if duplicate_name:
+        raise HTTPException(409, "Заказчик с таким названием уже существует")
+    if clean_name:
+        clean_inn, bitrix_id = _customer_identity_values(inn, bitrix_company_id)
+        duplicate = db.query(models.Customer).filter(
+            (models.Customer.inn == clean_inn) | (models.Customer.bitrix_company_id == bitrix_id)
+        ).first() if clean_inn or bitrix_id is not None else None
+        if duplicate:
+            raise HTTPException(409, "Заказчик с таким ИНН или Bitrix ID уже существует")
+        db.add(models.Customer(name=clean_name, address=address.strip(), inn=clean_inn, bitrix_company_id=bitrix_id))
+        _commit_or_conflict(db)
     return RedirectResponse("/settings#customers", status_code=302)
 
 @app.post("/settings/cargo-types")
@@ -1358,6 +1719,7 @@ def edit_setting_record(
     section: str, record_id: int, name: Optional[str] = Form(None), title: Optional[str] = Form(None),
     plate: Optional[str] = Form(None), type_id: Optional[str] = Form(None), capacity: Optional[str] = Form(None),
     address: str = Form(""), contact: str = Form(""), phone: str = Form(""), comment: str = Form(""),
+    inn: str = Form(""), bitrix_company_id: str = Form(""),
     description: str = Form(""), load_address: str = Form(""), unload_address: str = Form(""), distance: str = Form("0"),
     customer_id: Optional[str] = Form(None), unit: str = Form("м³"), kind: Optional[str] = Form(None), vehicle_type_id: Optional[str] = Form(None),
     formula: str = Form("trip"), trip_price: str = Form("0"), km_price: str = Form("0"),
@@ -1366,6 +1728,8 @@ def edit_setting_record(
     exact_km: Optional[str] = Form(None), exact_volume: Optional[str] = Form(None),
     extra_fee: Optional[str] = Form(None), coefficient: Optional[str] = Form(None),
     tariff_date_from: Optional[str] = Form(None, alias="date_from"), tariff_date_to: Optional[str] = Form(None, alias="date_to"),
+    entry_notes: str = Form(""), navigator_url: str = Form(""), calculation_method: str = Form("volume"),
+    volume_rate: str = Form("0"), tonnage_rate: str = Form("0"), waste_types: str = Form(""),
     is_active: Optional[str] = Form(None),
     current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db),
 ):
@@ -1435,9 +1799,25 @@ def edit_setting_record(
         clean_name = (name or "").strip()
         if not clean_name:
             raise HTTPException(400, "Укажите заказчика")
-        if db.query(models.Customer).filter(models.Customer.name == clean_name, models.Customer.id != record_id).first():
+        normalized_name = bitrix._normalize(clean_name)
+        duplicate_name = next(
+            (
+                customer for customer in db.query(models.Customer).filter(models.Customer.id != record_id).all()
+                if bitrix._normalize(customer.name) == normalized_name
+            ),
+            None,
+        )
+        if duplicate_name:
             raise HTTPException(400, "Такой заказчик уже существует")
+        clean_inn, bitrix_id = _customer_identity_values(inn, bitrix_company_id)
+        duplicate_identity = db.query(models.Customer).filter(
+            models.Customer.id != record_id,
+            (models.Customer.inn == clean_inn) | (models.Customer.bitrix_company_id == bitrix_id),
+        ).first() if clean_inn or bitrix_id is not None else None
+        if duplicate_identity:
+            raise HTTPException(409, "Заказчик с таким ИНН или Bitrix ID уже существует")
         row.name = clean_name
+        row.inn, row.bitrix_company_id = clean_inn, bitrix_id
         row.address, row.contact, row.phone, row.comment = address.strip(), contact.strip(), phone.strip(), comment.strip()
     elif section == "cargo-types":
         clean_name = (name or "").strip()
@@ -1452,8 +1832,24 @@ def edit_setting_record(
             raise HTTPException(400, "Укажите полигон")
         if db.query(models.Polygon).filter(models.Polygon.name == clean_name, models.Polygon.id != record_id).first():
             raise HTTPException(400, "Такой полигон уже существует")
+        if calculation_method not in {"volume", "tonnes", "manual"}:
+            raise HTTPException(400, "Некорректный способ расчёта полигона")
+        try:
+            volume_rate_value = _finite_float(volume_rate, "Тариф за куб")
+            tonnage_rate_value = _finite_float(tonnage_rate, "Тариф за тонну")
+        except ValueError:
+            raise HTTPException(400, "Проверьте тарифы полигона")
+        if volume_rate_value < 0 or tonnage_rate_value < 0:
+            raise HTTPException(400, "Тариф полигона не может быть отрицательным")
+        clean_navigator_url = navigator_url.strip()
+        if clean_navigator_url and urlsplit(clean_navigator_url).scheme.lower() not in {"http", "https"}:
+            raise HTTPException(400, "Ссылка навигатора должна начинаться с http:// или https://")
         row.name = clean_name
         row.address, row.contact, row.phone, row.comment = address.strip(), contact.strip(), phone.strip(), comment.strip()
+        row.entry_notes, row.navigator_url = entry_notes.strip(), clean_navigator_url
+        row.calculation_method = calculation_method
+        row.volume_rate, row.tonnage_rate = volume_rate_value, tonnage_rate_value
+        row.waste_types = waste_types.strip()
     elif section == "tariffs":
         row.title = (title or "").strip()
         if not row.title:
@@ -1608,6 +2004,8 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
         return JSONResponse({"ok": True, "action": "cancel", "trip_id": trip.id if trip else None})
 
     old_status = trip.status if trip else None
+    if old_status in {RequestStatus.LOGIST_CONFIRMED, RequestStatus.CANCELLED}:
+        raise HTTPException(409, "Финальную заявку нельзя изменять через webhook")
     old_salary_values = None
     salary_locked = False
     if trip:
@@ -1627,6 +2025,8 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
         if not trip:
             raise HTTPException(502, "Bitrix не вернул локальную заявку")
         old_status = trip.status
+        if old_status in {RequestStatus.LOGIST_CONFIRMED, RequestStatus.CANCELLED}:
+            raise HTTPException(409, "Финальную заявку нельзя изменять через webhook")
         old_salary_values = _salary_sensitive_values(trip)
         salary_locked = bool(db.query(models.SalaryCalcItem).filter_by(trip_request_id=trip.id).first())
         result = _sync_from_bitrix_safe(item_id, entity_type_id, db, settings)
@@ -1696,11 +2096,21 @@ def delete_request(req_id: int, current_user: models.User = Depends(require_role
         raise HTTPException(409, "Завершенную, подтвержденную или отмененную заявку удалять нельзя")
     if db.query(models.SalaryCalcItem).filter(models.SalaryCalcItem.trip_request_id == req.id).first():
         raise HTTPException(409, "Заявка включена в расчет зарплаты и не может быть удалена")
+    attachments = db.query(models.Attachment).filter(models.Attachment.trip_request_id == req.id).all()
+    attachment_paths = [row.path for row in attachments if row.path]
+    db.query(models.Attachment).filter(models.Attachment.trip_request_id == req.id).delete(
+        synchronize_session=False
+    )
     db.query(models.StatusHistory).filter(models.StatusHistory.trip_request_id == req.id).delete(
         synchronize_session=False
     )
     db.delete(req)
     _commit_or_conflict(db, "Заявка связана с другими данными и не может быть удалена")
+    for path in attachment_paths:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
     try:
         bitrix.delete_trip(req, db)
         db.commit()

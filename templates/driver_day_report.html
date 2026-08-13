@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><p class="eyebrow">Смена водителя</p><h1>Отчёт дня</h1><p class="muted">Один отчёт на каждую рабочую дату.</p></div>
+</div>
+<section class="panel">
+  <form method="post" action="/driver/day-report">
+    <div class="form-grid">
+      <label>Дата<input type="date" name="report_date" value="{{ editing.report_date if editing else today }}" required /></label>
+      <label>Автомобиль
+        <select name="vehicle_id" required>
+          <option value="">— выберите —</option>
+          {% for vehicle in vehicles %}<option value="{{ vehicle.id }}" {% if editing and editing.vehicle_id == vehicle.id %}selected{% endif %}>{{ vehicle.name }} · {{ vehicle.plate }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Общий километраж за смену<input type="number" min="0" step="any" name="total_km" value="{{ editing.total_km if editing else 0 }}" required /></label>
+      <label>Показания спидометра<input type="number" min="0" step="any" name="odometer" value="{{ editing.odometer if editing else 0 }}" required /></label>
+      <label>Залито топлива, л<input type="number" min="0" step="any" name="fuel_liters" value="{{ editing.fuel_liters if editing else 0 }}" required /></label>
+      <label class="wide">Комментарий<textarea name="comment" rows="3" placeholder="Что важно сообщить логисту">{{ (editing.comment or '') if editing else '' }}</textarea></label>
+    </div>
+    <div class="form-actions"><button class="btn btn-primary" type="submit">{{ 'Сохранить исправления' if editing else 'Сохранить отчёт' }}</button></div>
+  </form>
+</section>
+<h2 style="margin-top:22px">Мои отчёты</h2>
+<div class="table-wrap"><table class="table">
+  <thead><tr><th>Дата</th><th>Автомобиль</th><th>Км</th><th>Спидометр</th><th>Топливо</th><th>Комментарий</th><th></th></tr></thead>
+  <tbody>{% for row in reports %}<tr>
+    <td>{{ row.report_date.strftime('%d.%m.%Y') }}</td><td>{{ row.vehicle.name }}</td><td>{{ row.total_km }}</td><td>{{ row.odometer }}</td><td>{{ row.fuel_liters }} л</td><td>{{ row.comment or '—' }}</td>
+    <td><a class="btn btn-ghost btn-sm" href="/driver/day-report/{{ row.id }}/edit">Редактировать</a></td>
+  </tr>{% else %}<tr><td colspan="7" class="muted" style="text-align:center">Отчётов пока нет</td></tr>{% endfor %}</tbody>
+</table></div>
+{% endblock %}

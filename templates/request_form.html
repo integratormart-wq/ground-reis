@@ -35,6 +35,9 @@
       {% if not editing %}<label>Новый заказчик<input id="customer_name_manual" name="customer_name_manual" placeholder="Введите название" /></label>{% endif %}
       <label>Адрес подачи<input name="load_address" value="{{ editing.load_address if editing else '' }}" placeholder="Откуда забрать" /></label>
       <label>Адрес выгрузки<input name="unload_address" value="{{ editing.unload_address if editing else '' }}" placeholder="Куда доставить" /></label>
+      <label>Контакт на объекте<input name="site_contact_name" value="{{ (editing.site_contact_name or '') if editing else '' }}" placeholder="Имя или ФИО" /></label>
+      <label>Телефон на объекте<input type="tel" name="site_contact_phone" value="{{ (editing.site_contact_phone or '') if editing else '' }}" placeholder="+7 999 000-00-00" /></label>
+      <label class="wide">Комментарий к контакту<input name="site_contact_comment" value="{{ (editing.site_contact_comment or '') if editing else '' }}" placeholder="Например: позвонить за 20 минут" /></label>
       <label>Полигон
         <select name="polygon_id">
           <option value="">— выберите —</option>
@@ -74,6 +77,8 @@
       <label>Маршрут<input name="route_name" value="{{ editing.route_name if editing else '' }}" placeholder="Название или описание маршрута" /></label>
       <label>Километраж, км<input type="number" step="any" name="km" id="km" value="{{ editing.km if editing else 0 }}" /></label>
       <label>Объём, м³<input type="number" step="any" name="volume" id="volume" value="{{ editing.volume if editing else 0 }}" /></label>
+      <label>Тоннаж, т<input type="number" min="0" step="any" name="tonnage" value="{{ editing.tonnage if editing and editing.tonnage is not none else '' }}" /></label>
+      {% if editing %}<label>Затраты полигона вручную, ₽<input type="number" min="0" step="any" name="polygon_cost_manual" value="{{ editing.polygon_cost_manual if editing.polygon_cost_manual is not none else '' }}" placeholder="Только для ручного расчёта" /></label>{% endif %}
       <label>Количество рейсов<input type="number" name="trips_count" value="{{ editing.trips_count if editing else 1 }}" min="1" /></label>
     </div>
   </section>

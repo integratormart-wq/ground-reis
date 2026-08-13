@@ -81,6 +81,357 @@ def test_admin_can_edit_request_and_driver_cannot():
     db.close()
 
 
+def test_trip_time_contact_and_planned_tonnage_are_saved_and_visible():
+    db, admin, _, driver, _, vehicle, customer, cargo, polygon, tariff, trip = reset_db()
+    client = client_as(admin)
+    response = client.post(f"/requests/{trip.id}/edit", data={
+        "number": trip.number, "planned_date": "2026-08-13", "planned_time": "15:30",
+        "driver_id": str(driver.id), "vehicle_id": str(vehicle.id),
+        "customer_id": str(customer.id), "cargo_type_id": str(cargo.id),
+        "polygon_id": str(polygon.id), "tariff_id": str(tariff.id),
+        "load_address": "Объект клиента", "unload_address": "Полигон",
+        "route_name": "Клиент — полигон", "km": "25", "volume": "12",
+        "tonnage": "8.5", "trips_count": "1", "kind": "пухтовоз",
+        "site_contact_name": "Иван Петров", "site_contact_phone": "+79991234567",
+        "site_contact_comment": "Позвонить за 20 минут", "comment": "",
+    }, follow_redirects=False)
+    assert response.status_code == 302
+    db.expire_all()
+    saved = db.query(models.TripRequest).filter_by(id=trip.id).one()
+    assert saved.planned_time == "15:30"
+    assert saved.tonnage == 8.5
+    assert saved.site_contact_name == "Иван Петров"
+    assert saved.site_contact_phone == "+79991234567"
+    assert saved.site_contact_comment == "Позвонить за 20 минут"
+
+    detail = client.get(f"/requests/{trip.id}").text
+    assert "13.08.2026, 15:30" in detail
+    assert "8.5 т" in detail
+    assert 'href="tel:+79991234567"' in detail
+    assert "Иван Петров" in detail and "Позвонить за 20 минут" in detail
+    assert "13.08.2026, 15:30" in client.get("/requests").text
+    assert "13.08.2026, 15:30" in client.get("/pukhtovoz").text
+    assert "13.08.2026, 15:30" in client.get("/reports").text
+    driver_page = client_as(driver).get("/driver").text
+    assert "13.08.2026, 15:30" in driver_page
+    assert customer.name in driver_page and "Объект клиента" in driver_page
+    db.close()
+
+
+def test_new_trip_saves_time_contact_and_planned_tonnage():
+    db, admin, _, driver, _, vehicle, customer, cargo, polygon, tariff, _ = reset_db()
+    client = client_as(admin)
+    response = client.post("/requests/new", data={
+        "number": "П-NEW-FIELDS", "planned_date": "2026-08-14", "planned_time": "07:45",
+        "driver_id": str(driver.id), "vehicle_id": str(vehicle.id),
+        "customer_id": str(customer.id), "cargo_type_id": str(cargo.id),
+        "polygon_id": str(polygon.id), "tariff_id": str(tariff.id),
+        "load_address": "Новый объект", "unload_address": "Новый полигон",
+        "route_name": "Новый маршрут", "km": "30", "volume": "16",
+        "tonnage": "11.25", "trips_count": "1", "kind": "пухтовоз",
+        "site_contact_name": "Олег", "site_contact_phone": "+79990001122",
+        "site_contact_comment": "Въезд через КПП", "comment": "",
+    }, follow_redirects=False)
+    assert response.status_code == 303
+    saved = db.query(models.TripRequest).filter_by(number="П-NEW-FIELDS").one()
+    assert saved.planned_time == "07:45"
+    assert saved.tonnage == 11.25
+    assert (saved.site_contact_name, saved.site_contact_phone, saved.site_contact_comment) == (
+        "Олег", "+79990001122", "Въезд через КПП",
+    )
+    db.close()
+
+
+def test_driver_completes_trip_with_actual_tonnage_only_in_actual_fields():
+    db, _, _, driver, _, _, _, _, _, _, trip = reset_db()
+    trip.status = models.RequestStatus.IN_WORK
+    trip.tonnage = 10
+    trip.actual_tonnage = None
+    db.commit()
+    client = client_as(driver)
+
+    response = client.post(f"/requests/{trip.id}/complete", data={
+        "actual_km": "12", "actual_volume": "0", "actual_tonnage": "8.75",
+        "comment": "Вес по талону",
+    }, follow_redirects=False)
+    assert response.status_code == 302
+    db.expire_all()
+    saved = db.query(models.TripRequest).filter_by(id=trip.id).one()
+    assert saved.status == models.RequestStatus.DRIVER_COMPLETED
+    assert saved.tonnage == 10
+    assert saved.actual_tonnage == 8.75
+
+    saved.status = models.RequestStatus.IN_WORK
+    db.commit()
+    rejected = client.post(f"/requests/{trip.id}/complete", data={
+        "actual_km": "12", "actual_volume": "0", "actual_tonnage": "-1",
+    }, follow_redirects=False)
+    assert rejected.status_code == 400
+    db.close()
+
+
+def test_report_exports_include_time_and_tonnage_columns():
+    db, admin, _, _, _, _, _, _, _, _, trip = reset_db()
+    trip.planned_time = "15:30"
+    trip.tonnage = 9.5
+    trip.actual_tonnage = 8.75
+    db.commit()
+    client = client_as(admin)
+
+    csv_response = client.get("/export/report.csv")
+    csv_text = csv_response.content.decode("utf-8-sig")
+    assert csv_response.status_code == 200
+    assert "Время" in csv_text and "Тоннаж план, т" in csv_text and "Тоннаж факт, т" in csv_text
+    assert "15:30" in csv_text and "9.5" in csv_text and "8.75" in csv_text
+
+    xlsx_response = client.get("/export/report.xlsx")
+    workbook = load_workbook(io.BytesIO(xlsx_response.content))
+    rows = list(workbook.active.iter_rows(values_only=True))
+    assert "Время" in rows[0]
+    assert "Тоннаж план, т" in rows[0] and "Тоннаж факт, т" in rows[0]
+    assert "15:30" in rows[1] and 9.5 in rows[1] and 8.75 in rows[1]
+    db.close()
+
+
+def test_driver_facts_attachments_and_access_control(tmp_path, monkeypatch):
+    db, admin, logist, driver, vt, vehicle, customer, cargo, polygon, tariff, trip = reset_db()
+    other_driver = models.User(
+        full_name="Чужой водитель", login="other-driver", password_hash=app_module.pwd_hash("pass"),
+        role=models.UserRole.DRIVER, is_active=True,
+    )
+    db.add(other_driver)
+    trip.status = models.RequestStatus.IN_WORK
+    db.commit()
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", str(tmp_path))
+
+    driver_client = client_as(driver)
+    response = driver_client.post(f"/requests/{trip.id}/complete", data={
+        "actual_km": "15", "actual_volume": "5", "actual_tonnage": "4.2",
+        "is_empty_run": "1", "empty_run_comment": "Не смог загрузиться",
+        "has_downtime": "1", "downtime_minutes": "90",
+        "downtime_comment": "Ждал пропуск", "comment": "Фото приложено",
+    }, follow_redirects=False)
+    assert response.status_code == 302
+    db.refresh(trip)
+    assert trip.is_empty_run is True and trip.empty_run_comment == "Не смог загрузиться"
+    assert trip.has_downtime is True and trip.downtime_minutes == 90
+    assert trip.downtime_comment == "Ждал пропуск"
+
+    files = [
+        ("files", (f"photo-{index}.jpg", b"\xff\xd8\xfftest", "image/jpeg"))
+        for index in range(1, 6)
+    ]
+    uploaded = driver_client.post(f"/requests/{trip.id}/attachments", files=files, follow_redirects=False)
+    assert uploaded.status_code == 302
+    attachments = db.query(models.Attachment).filter_by(trip_request_id=trip.id).all()
+    assert len(attachments) == 5
+    assert all(Path(item.path).parent == tmp_path for item in attachments)
+
+    overflow = driver_client.post(
+        f"/requests/{trip.id}/attachments",
+        files={"files": ("sixth.jpg", b"\xff\xd8\xfftest", "image/jpeg")},
+    )
+    assert overflow.status_code == 400
+
+    logist_client = client_as(logist)
+    detail = logist_client.get(f"/requests/{trip.id}").text
+    assert "Холостой прогон" in detail and "90 мин" in detail and "photo-1.jpg" in detail
+    downloaded = logist_client.get(f"/attachments/{attachments[0].id}")
+    assert downloaded.status_code == 200 and downloaded.content == b"\xff\xd8\xfftest"
+    Path(attachments[0].path).unlink()
+    restored_from_db = logist_client.get(f"/attachments/{attachments[0].id}")
+    assert restored_from_db.status_code == 200 and restored_from_db.content == b"\xff\xd8\xfftest"
+
+    outsider = client_as(other_driver)
+    assert outsider.get(f"/attachments/{attachments[0].id}").status_code == 403
+    denied = outsider.post(
+        f"/requests/{trip.id}/attachments",
+        files={"files": ("foreign.jpg", b"\xff\xd8\xfftest", "image/jpeg")},
+    )
+    assert denied.status_code == 403
+    db.close()
+
+
+def test_driver_day_report_is_editable_unique_and_role_scoped():
+    db, admin, logist, driver, vt, vehicle, customer, cargo, polygon, tariff, trip = reset_db()
+    other_driver = models.User(
+        full_name="Другой водитель", login="day-other", password_hash=app_module.pwd_hash("pass"),
+        role=models.UserRole.DRIVER, is_active=True,
+    )
+    db.add(other_driver); db.commit()
+    client = client_as(driver)
+    created = client.post("/driver/day-report", data={
+        "report_date": "2026-08-13", "vehicle_id": str(vehicle.id),
+        "total_km": "180", "odometer": "125000", "fuel_liters": "90",
+        "comment": "Смена завершена",
+    }, follow_redirects=False)
+    assert created.status_code == 302
+    report = db.query(models.DriverDayReport).filter_by(driver_id=driver.id).one()
+    assert report.total_km == 180 and report.odometer == 125000 and report.fuel_liters == 90
+
+    updated = client.post("/driver/day-report", data={
+        "report_date": "2026-08-13", "vehicle_id": str(vehicle.id),
+        "total_km": "195", "odometer": "125015", "fuel_liters": "95",
+        "comment": "Исправлено водителем",
+    }, follow_redirects=False)
+    assert updated.status_code == 302
+    assert db.query(models.DriverDayReport).filter_by(driver_id=driver.id).count() == 1
+    db.refresh(report)
+    assert report.total_km == 195 and report.comment == "Исправлено водителем"
+    assert "Редактировать" in client.get("/driver/day-report").text
+
+    logist_page = client_as(logist).get("/reports/day").text
+    assert driver.full_name in logist_page and "195" in logist_page and "Исправлено водителем" in logist_page
+    assert client_as(other_driver).get(f"/driver/day-report/{report.id}/edit").status_code in {403, 404}
+    db.close()
+
+
+def test_polygon_cost_report_uses_polygon_tariff_not_driver_payment():
+    db, admin, logist, driver, vt, vehicle, customer, cargo, polygon, tariff, trip = reset_db()
+    client = client_as(admin)
+    saved = client.post(f"/settings/polygons/{polygon.id}/edit", data={
+        "name": "Шишкино — сортировка / полигон", "address": "Шишкино",
+        "contact": "Диспетчер", "phone": "+79995554433", "comment": "Приём до 20:00",
+        "entry_notes": "Заезд через вторые ворота", "navigator_url": "https://yandex.ru/maps/?rtext=Шишкино",
+        "calculation_method": "tonnes", "volume_rate": "0", "tonnage_rate": "750",
+        "waste_types": "ТБО, грунт",
+    }, follow_redirects=False)
+    assert saved.status_code == 302
+    db.refresh(polygon)
+    assert polygon.calculation_method == "tonnes" and polygon.tonnage_rate == 750
+    assert polygon.entry_notes == "Заезд через вторые ворота"
+
+    trip.status = models.RequestStatus.LOGIST_CONFIRMED
+    trip.actual_volume = 20
+    trip.actual_tonnage = 8
+    trip.sum_driver = 50000
+    db.commit()
+    page = client.get(f"/polygons?polygon_id={polygon.id}").text
+    assert "8" in page and "6 000" in page
+    assert "50 000" not in page
+    assert 'href="tel:+79995554433"' in page
+    assert 'href="https://yandex.ru/maps/?rtext=Шишкино"' in page
+
+    customer_response = client.post("/settings/customers", data={
+        "name": "Шишкино — клиент / точка отправления", "address": "Шишкино",
+    }, follow_redirects=False)
+    assert customer_response.status_code == 302
+    assert db.query(models.Customer).filter_by(name="Шишкино — клиент / точка отправления").one()
+    db.close()
+
+
+def test_manual_polygon_cost_is_editable_and_exported_consistently():
+    db, admin, logist, driver, vt, vehicle, customer, cargo, polygon, tariff, trip = reset_db()
+    polygon.calculation_method = "manual"
+    trip.polygon_cost_manual = 4321
+    trip.sum_driver = 99999
+    db.commit()
+    client = client_as(logist)
+
+    edit_page = client.get(f"/requests/{trip.id}/edit")
+    assert edit_page.status_code == 200
+    assert 'name="polygon_cost_manual"' in edit_page.text
+
+    csv_response = client.get(f"/export/polygon.csv?polygon_id={polygon.id}")
+    text = csv_response.content.decode("utf-8-sig")
+    assert "Затраты полигона" in text and "4321" in text
+    assert "99999" not in text
+
+    summary = client.get("/export/polygons.csv")
+    summary_text = summary.content.decode("utf-8-sig")
+    assert "Тонны" in summary_text and "4321" in summary_text
+    assert "99999" not in summary_text
+    db.close()
+
+
+def test_every_trip_status_has_stable_distinct_ui_class():
+    db, admin, *_rest, trip = reset_db()
+    client = client_as(admin)
+    css = (Path(app_module.root_dir) / "static" / "css" / "app.css").read_text(encoding="utf-8")
+    slugs = []
+    for status_value in models.RequestStatus:
+        slug = app_module.status_slug(status_value)
+        slugs.append(slug)
+        assert f".status-{slug}" in css
+        trip.status = status_value
+        db.commit()
+        page = client.get(f"/requests/{trip.id}").text
+        assert f'class="status status-{slug}"' in page
+    assert len(slugs) == len(set(slugs)) == len(models.RequestStatus)
+    db.close()
+
+
+def test_customer_identity_fields_are_editable_in_settings():
+    db, admin, *_ = reset_db()
+    client = client_as(admin)
+    response = client.post("/settings/customers", data={
+        "name": "Клиент с реквизитами", "address": "СПб",
+        "inn": "7812345678", "bitrix_company_id": "54321",
+    }, follow_redirects=False)
+    assert response.status_code == 302
+    customer = db.query(models.Customer).filter_by(name="Клиент с реквизитами").one()
+    assert customer.inn == "7812345678" and customer.bitrix_company_id == 54321
+    page = client.get(f"/settings/customers/{customer.id}/edit").text
+    assert 'name="inn"' in page and 'value="7812345678"' in page
+    assert 'name="bitrix_company_id"' in page and 'value="54321"' in page
+    db.close()
+
+
+def test_driver_day_reports_are_role_scoped_and_validate_dates():
+    db, admin, logist, driver, vt, vehicle, *_ = reset_db()
+    other_driver = models.User(
+        full_name="Чужой водитель", login="other-day-driver",
+        password_hash=app_module.pwd_hash("pass"), role=models.UserRole.DRIVER, is_active=True,
+    )
+    db.add(other_driver); db.flush()
+    foreign_vehicle = models.Vehicle(name="ЧУЖОЙ-АВТО", plate="Х999ХХ78", type_id=vt.id, is_active=True)
+    db.add(foreign_vehicle); db.flush()
+    foreign = models.DriverDayReport(
+        driver_id=other_driver.id, vehicle_id=vehicle.id, report_date=date(2026, 8, 12),
+        total_km=999, odometer=99999, fuel_liters=99, comment="ЧУЖОЙ-МАРКЕР",
+    )
+    db.add(foreign); db.commit()
+
+    driver_client = client_as(driver)
+    saved = driver_client.post("/driver/day-report", data={
+        "report_date": "2026-08-13", "vehicle_id": str(vehicle.id),
+        "total_km": "125.5", "odometer": "45678", "fuel_liters": "42.5",
+        "comment": "Свой отчёт",
+    }, follow_redirects=False)
+    assert saved.status_code == 302
+    own = db.query(models.DriverDayReport).filter_by(driver_id=driver.id).one()
+    page = driver_client.get("/driver/day-report")
+    assert page.status_code == 200 and "Свой отчёт" in page.text
+    assert "ЧУЖОЙ-МАРКЕР" not in page.text
+    assert "ЧУЖОЙ-АВТО" not in page.text
+    forbidden_vehicle = driver_client.post("/driver/day-report", data={
+        "report_date": "2026-08-14", "vehicle_id": str(foreign_vehicle.id),
+        "total_km": "1", "odometer": "1", "fuel_liters": "1", "comment": "",
+    }, follow_redirects=False)
+    assert forbidden_vehicle.status_code == 400
+    assert driver_client.get(f"/driver/day-report/{foreign.id}/edit").status_code == 404
+    assert driver_client.get(f"/driver/day-report/{own.id}/edit").status_code == 200
+    assert driver_client.get("/reports/day").status_code == 403
+
+    logist_client = client_as(logist)
+    report_page = logist_client.get("/reports/day")
+    assert report_page.status_code == 200
+    assert "Свой отчёт" in report_page.text and "ЧУЖОЙ-МАРКЕР" in report_page.text
+    assert logist_client.get("/reports/day?date_from=bad-date").status_code == 400
+    assert logist_client.get("/reports/day?date_from=2026-08-14&date_to=2026-08-13").status_code == 400
+    db.close()
+
+
+def test_customer_identity_columns_have_database_unique_indexes():
+    db, *_ = reset_db()
+    app_module._initialize_database()
+    from sqlalchemy import inspect
+    indexes = {row["name"]: row for row in inspect(models.engine).get_indexes("customers")}
+    assert bool(indexes["uq_customers_inn"]["unique"])
+    assert bool(indexes["uq_customers_bitrix_company_id"]["unique"])
+    db.close()
+
+
 def test_admin_edits_user_without_exposing_or_resetting_password_hash():
     db, admin, _, driver, *_ = reset_db()
     old_hash = driver.password_hash
@@ -668,6 +1019,51 @@ def test_bitrix_inbound_rejects_lifecycle_jump_and_salary_locked_changes(monkeyp
     assert response.status_code == 409
     db.expire_all()
     assert db.query(models.TripRequest).filter_by(id=trip.id).one().actual_volume is None
+
+    def change_actual_tonnage(item_id, entity_type_id, session, settings=None):
+        row = session.query(models.TripRequest).filter_by(id=trip.id).one()
+        row.actual_tonnage = 0
+        return {"ok": True, "action": "update", "trip_id": row.id}
+    monkeypatch.setattr(app_module.bitrix, "sync_from_bitrix", change_actual_tonnage)
+    response = client.post("/webhook/bitrix24?token=hook-secret", json=payload)
+    assert response.status_code == 409
+    db.expire_all()
+    assert db.query(models.TripRequest).filter_by(id=trip.id).one().actual_tonnage is None
+
+    db.query(models.SalaryCalcItem).delete(); db.query(models.SalaryCalc).delete()
+    trip.status = models.RequestStatus.LOGIST_CONFIRMED
+    trip.actual_volume = None
+    db.commit()
+    response = client.post("/webhook/bitrix24?token=hook-secret", json=payload)
+    assert response.status_code == 409
+    db.expire_all()
+    assert db.query(models.TripRequest).filter_by(id=trip.id).one().actual_volume is None
+    db.close()
+
+
+def test_delete_request_removes_attachment_rows_and_files(tmp_path, monkeypatch):
+    db, admin, _, _, _, _, _, _, _, _, trip = reset_db()
+    stored = tmp_path / "attachment.pdf"
+    stored.write_bytes(b"%PDF-test")
+    db.add(models.Attachment(
+        trip_request_id=trip.id, filename="attachment.pdf", content_type="application/pdf",
+        size=9, path=str(stored), content=b"%PDF-test",
+    ))
+    db.commit()
+    monkeypatch.setattr(app_module.bitrix, "delete_trip", lambda req, session: {"skipped": True})
+    response = client_as(admin).post(f"/requests/{trip.id}/delete", follow_redirects=False)
+    assert response.status_code == 302
+    assert db.query(models.TripRequest).filter_by(id=trip.id).first() is None
+    assert db.query(models.Attachment).filter_by(trip_request_id=trip.id).count() == 0
+    assert not stored.exists()
+    db.close()
+
+
+def test_empty_reports_row_spans_every_column():
+    db, admin, _, driver, *_ = reset_db()
+    db.query(models.TripRequest).delete(); db.commit()
+    assert 'colspan="10"' in client_as(admin).get("/reports").text
+    assert 'colspan="9"' in client_as(driver).get("/reports").text
     db.close()
 
 
@@ -748,7 +1144,7 @@ def test_bitrix_number_match_cannot_bypass_salary_lock(monkeypatch):
 
     response = client_as(admin).post("/webhook/bitrix24?token=number-match-secret", json={"event": "ONCRMDYNAMICITEMUPDATE"})
     assert response.status_code == 409
-    assert calls["count"] == 2
+    assert calls["count"] == 1
     db.expire_all()
     saved = db.query(models.TripRequest).filter_by(id=trip.id).one()
     assert saved.actual_volume is None

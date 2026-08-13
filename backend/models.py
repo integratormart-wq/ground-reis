@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, ForeignKey, Enum, Date, event
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, ForeignKey, Enum, Date, LargeBinary, UniqueConstraint, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from enum import Enum as PyEnum
@@ -86,6 +86,8 @@ class Customer(Base):
     __tablename__ = "customers"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), unique=True, nullable=False)
+    inn = Column(String(12), nullable=True, index=True)
+    bitrix_company_id = Column(Integer, nullable=True, unique=True, index=True)
     contact = Column(String(255))
     phone = Column(String(50))
     address = Column(Text)
@@ -145,6 +147,7 @@ class TripRequest(Base):
     route_name = Column(String(255))
     km = Column(Float, default=0)
     volume = Column(Float, default=0)
+    tonnage = Column(Float, nullable=True)
     trips_count = Column(Integer, default=1)
     cargo_type_id = Column(Integer, ForeignKey("cargo_types.id"), nullable=True)
     customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True)
@@ -154,11 +157,21 @@ class TripRequest(Base):
     finished_at = Column(DateTime, nullable=True)
     actual_km = Column(Float, nullable=True)
     actual_volume = Column(Float, nullable=True)
+    actual_tonnage = Column(Float, nullable=True)
+    is_empty_run = Column(Boolean, default=False)
+    empty_run_comment = Column(Text, nullable=True)
+    has_downtime = Column(Boolean, default=False)
+    downtime_minutes = Column(Integer, nullable=True)
+    downtime_comment = Column(Text, nullable=True)
+    polygon_cost_manual = Column(Float, nullable=True)
     sum_trip = Column(Float, nullable=True)
     sum_driver = Column(Float, nullable=True)
     tariff_id = Column(Integer, ForeignKey("tariffs.id"), nullable=True)
     comment = Column(Text)
     logist_comment = Column(Text)
+    site_contact_name = Column(String(255), nullable=True)
+    site_contact_phone = Column(String(50), nullable=True)
+    site_contact_comment = Column(Text, nullable=True)
     polygon_id = Column(Integer, ForeignKey("polygons.id"), nullable=True)
     waste_bin_count = Column(Integer, nullable=True)
     bitrix_element_id = Column(Integer, nullable=True, index=True)
@@ -260,7 +273,25 @@ class Attachment(Base):
     size = Column(Integer)
     created_at = Column(DateTime, default=datetime.utcnow)
     path = Column(String(1024))
+    content = Column(LargeBinary, nullable=True)
     trip_request = relationship("TripRequest")
+
+
+class DriverDayReport(Base):
+    __tablename__ = "driver_day_reports"
+    __table_args__ = (UniqueConstraint("driver_id", "report_date", name="uq_driver_day_report_date"),)
+    id = Column(Integer, primary_key=True, index=True)
+    report_date = Column(Date, nullable=False)
+    driver_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    vehicle_id = Column(Integer, ForeignKey("vehicles.id"), nullable=False)
+    total_km = Column(Float, default=0, nullable=False)
+    odometer = Column(Float, default=0, nullable=False)
+    fuel_liters = Column(Float, default=0, nullable=False)
+    comment = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    driver = relationship("User")
+    vehicle = relationship("Vehicle")
 
 class Polygon(Base):
     __tablename__ = "polygons"
@@ -270,6 +301,12 @@ class Polygon(Base):
     contact = Column(String(255))
     phone = Column(String(50))
     comment = Column(Text)
+    entry_notes = Column(Text)
+    navigator_url = Column(String(1024))
+    calculation_method = Column(String(20), default="volume")
+    volume_rate = Column(Float, default=0)
+    tonnage_rate = Column(Float, default=0)
+    waste_types = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class AuditLog(Base):

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">Отчёты</p><h1>Отчёты дня водителей</h1></div></div>
+<section class="panel">
+<form method="get" class="form-grid">
+  <label>С даты<input type="date" name="date_from" value="{{ date_from }}" /></label>
+  <label>По дату<input type="date" name="date_to" value="{{ date_to }}" /></label>
+  <label>Водитель<select name="driver_id"><option value="">Все водители</option>{% for driver in drivers %}<option value="{{ driver.id }}" {% if selected_driver_id|string == driver.id|string %}selected{% endif %}>{{ driver.full_name }}</option>{% endfor %}</select></label>
+  <div class="form-actions"><button class="btn btn-primary" type="submit">Показать</button><a class="btn btn-ghost" href="/reports/day">Сбросить</a></div>
+</form>
+</section>
+<div class="table-wrap" style="margin-top:16px"><table class="table">
+  <thead><tr><th>Дата</th><th>Водитель</th><th>Автомобиль</th><th>Км за смену</th><th>Спидометр</th><th>Топливо</th><th>Комментарий</th></tr></thead>
+  <tbody>{% for row in rows %}<tr><td>{{ row.report_date.strftime('%d.%m.%Y') }}</td><td>{{ row.driver.full_name }}</td><td>{{ row.vehicle.name }} · {{ row.vehicle.plate }}</td><td>{{ row.total_km }}</td><td>{{ row.odometer }}</td><td>{{ row.fuel_liters }} л</td><td>{{ row.comment or '—' }}</td></tr>{% else %}<tr><td colspan="7" class="muted" style="text-align:center">Ничего не найдено</td></tr>{% endfor %}</tbody>
+</table></div>
+{% endblock %}

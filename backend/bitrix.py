@@ -6,7 +6,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from backend import models
@@ -40,14 +40,33 @@ FIELD_MAP = {
     "load_address": "ufLoadAddr",
     "unload_address": "ufUnloadAddr",
     "route_name": "ufRoute",
+    "trips_count": "ufTripsCount",
+    "cargo_type_name": "ufCargoType",
+    "tariff_name": "ufTariff",
     "km": "ufKmPlan",
     "volume": "ufVolumePlan",
+    "tonnage": "ufTonnagePlan",
     "actual_km": "ufKmFact",
     "actual_volume": "ufVolumeFact",
+    "actual_tonnage": "ufTonnageFact",
     "status": "ufStatus",
     "customer_name": "ufCustomer",
+    "customer_bitrix_id": "ufCustomerBitrixId",
+    "customer_inn": "ufCustomerInn",
     "polygon_name": "ufPolygon",
+    "sum_trip": "ufSumTrip",
     "sum_driver": "ufSumDriver",
+    "started_at": "ufStartedAt",
+    "finished_at": "ufFinishedAt",
+    "waste_bin_count": "ufWasteBinCount",
+    "site_contact_name": "ufSiteContact",
+    "site_contact_phone": "ufSitePhone",
+    "site_contact_comment": "ufSiteContactComment",
+    "is_empty_run": "ufEmptyRun",
+    "empty_run_comment": "ufEmptyRunComment",
+    "has_downtime": "ufHasDowntime",
+    "downtime_minutes": "ufDowntimeMinutes",
+    "downtime_comment": "ufDowntimeComment",
     "comment": "ufComment",
     "logist_comment": "ufLogistComment",
 }
@@ -60,14 +79,33 @@ FIELD_TITLES = {
     "load_address": ("адрес загрузки", "адрес подачи", "загрузка"),
     "unload_address": ("адрес выгрузки", "выгрузка"),
     "route_name": ("маршрут",),
+    "trips_count": ("количество рейсов", "число рейсов", "рейсов"),
+    "cargo_type_name": ("тип груза", "груз"),
+    "tariff_name": ("тариф",),
     "km": ("километраж план", "плановый километраж", "километраж", "км план"),
     "volume": ("объем план", "плановый объем", "объем", "кубатура"),
+    "tonnage": ("тоннаж план", "плановый тоннаж", "тонны план"),
     "actual_km": ("фактический километраж", "факт км", "км факт"),
     "actual_volume": ("фактический объем", "факт объем", "объем факт"),
+    "actual_tonnage": ("фактический тоннаж", "тоннаж факт", "тонны факт"),
     "status": ("статус заявки", "статус рейса", "статус"),
     "customer_name": ("заказчик", "клиент", "компания"),
+    "customer_bitrix_id": ("id компании битрикс", "bitrix id клиента", "id клиента битрикс"),
+    "customer_inn": ("инн заказчика", "инн клиента", "инн"),
     "polygon_name": ("полигон",),
+    "sum_trip": ("сумма рейса", "стоимость рейса"),
     "sum_driver": ("сумма водителю", "зарплата водителя", "начисление водителю"),
+    "started_at": ("начало рейса", "время начала рейса"),
+    "finished_at": ("завершение рейса", "время завершения рейса"),
+    "waste_bin_count": ("количество контейнеров", "контейнеры", "кб"),
+    "site_contact_name": ("контакт на объекте", "контактное лицо на объекте"),
+    "site_contact_phone": ("телефон на объекте", "телефон контакта"),
+    "site_contact_comment": ("комментарий к контакту", "комментарий контакта"),
+    "is_empty_run": ("холостой прогон",),
+    "empty_run_comment": ("комментарий холостого прогона", "причина холостого прогона"),
+    "has_downtime": ("был простой", "простой"),
+    "downtime_minutes": ("длительность простоя", "простой минут"),
+    "downtime_comment": ("комментарий простоя", "причина простоя"),
     "comment": ("комментарий",),
     "logist_comment": ("комментарий логиста",),
 }
@@ -207,6 +245,30 @@ def resolve_stage(webhook_base: str, entity_id: str, status, item_id=None):
     return None, category_id
 
 
+def status_from_stage(webhook_base: str, entity_id: int, item: dict):
+    """Преобразует текущий канбан-этап Bitrix24 в локальный статус заявки."""
+    stage_id = item.get("stageId") or item.get("stage_id")
+    category_id = item.get("categoryId") if item.get("categoryId") is not None else item.get("category_id")
+    if not stage_id or category_id is None:
+        return None
+    response = _http_post(webhook_base, "crm.status.list", {
+        "filter": {"ENTITY_ID": f"DYNAMIC_{entity_id}_STAGE_{int(category_id)}"},
+    })
+    stages = response.get("result", []) if "error" not in response else []
+    if isinstance(stages, dict):
+        stages = stages.get("statuses") or stages.get("items") or []
+    status_by_title = {
+        _normalize(title): status for status, title in STATUS_STAGE_TITLES.items()
+    }
+    for stage in stages:
+        candidate_id = stage.get("STATUS_ID") or stage.get("statusId") or stage.get("id")
+        if str(candidate_id or "") != str(stage_id):
+            continue
+        title = stage.get("NAME") or stage.get("name") or stage.get("title")
+        return status_by_title.get(_normalize(title))
+    return None
+
+
 def _normalize(text) -> str:
     return re.sub(r"[^а-яa-z0-9]+", " ", str(text or "").lower().replace("ё", "е")).strip()
 
@@ -250,14 +312,33 @@ def _trip_values(req) -> dict:
         "load_address": req.load_address or "",
         "unload_address": req.unload_address or "",
         "route_name": req.route_name or "",
+        "trips_count": req.trips_count if req.trips_count is not None else 1,
+        "cargo_type_name": req.cargo_type.name if req.cargo_type else "",
+        "tariff_name": req.tariff.title if req.tariff else "",
         "km": req.km or 0,
         "volume": req.volume or 0,
+        "tonnage": req.tonnage if req.tonnage is not None else "",
         "actual_km": req.actual_km if req.actual_km is not None else "",
         "actual_volume": req.actual_volume if req.actual_volume is not None else "",
+        "actual_tonnage": req.actual_tonnage if req.actual_tonnage is not None else "",
         "status": req.status.value if hasattr(req.status, "value") else str(req.status),
         "customer_name": req.customer.name if req.customer else "",
+        "customer_bitrix_id": req.customer.bitrix_company_id if req.customer and req.customer.bitrix_company_id is not None else "",
+        "customer_inn": req.customer.inn if req.customer else "",
         "polygon_name": req.polygon.name if req.polygon else "",
+        "sum_trip": req.sum_trip if req.sum_trip is not None else "",
         "sum_driver": req.sum_driver or 0,
+        "started_at": _as_bitrix_value(req.started_at),
+        "finished_at": _as_bitrix_value(req.finished_at),
+        "waste_bin_count": req.waste_bin_count if req.waste_bin_count is not None else "",
+        "site_contact_name": req.site_contact_name or "",
+        "site_contact_phone": req.site_contact_phone or "",
+        "site_contact_comment": req.site_contact_comment or "",
+        "is_empty_run": "Да" if req.is_empty_run else "Нет",
+        "empty_run_comment": req.empty_run_comment or "",
+        "has_downtime": "Да" if req.has_downtime else "Нет",
+        "downtime_minutes": req.downtime_minutes if req.downtime_minutes is not None else "",
+        "downtime_comment": req.downtime_comment or "",
         "comment": req.comment or "",
         "logist_comment": req.logist_comment or "",
     }
@@ -303,6 +384,9 @@ def sync_trip(req, db, settings=None) -> dict:
         return {"error": response["error"], "action": action}
     result = response.get("result", {})
     item_id = result.get("id") or result.get("item", {}).get("id")
+    if action == "add" and not item_id:
+        print("BITRIX_SYNC_ERROR", action, "missing_item_id", flush=True)
+        return {"error": "bitrix_item_id_missing", "action": action}
     if item_id:
         if not req.bitrix_element_id:
             req.bitrix_element_id = int(item_id)
@@ -339,6 +423,10 @@ def _read_logical(item: dict, logical: str, mapping: dict):
     return ""
 
 
+def _has_logical(item: dict, logical: str, mapping: dict) -> bool:
+    return any(code and code in item for code in (mapping.get(logical), FIELD_MAP.get(logical)))
+
+
 def _to_float(value):
     try:
         return float(str(_scalar(value)).replace(",", "."))
@@ -359,12 +447,54 @@ def _optional_nonnegative_float(value, field):
     return result
 
 
+def _optional_nonnegative_int(value, field):
+    parsed = _optional_nonnegative_float(value, field)
+    if parsed is None:
+        return None
+    if not parsed.is_integer():
+        raise ValueError(f"invalid {field}")
+    return int(parsed)
+
+
+def _optional_bool(value, field):
+    raw = str(_scalar(value) or "").strip().lower()
+    if not raw:
+        return None
+    if raw in {"да", "y", "yes", "1", "true"}:
+        return True
+    if raw in {"нет", "n", "no", "0", "false"}:
+        return False
+    raise ValueError(f"invalid {field}")
+
+
+def _optional_inn(value):
+    raw = re.sub(r"\D", "", str(_scalar(value) or ""))
+    if not raw:
+        return None
+    if len(raw) not in {10, 12}:
+        raise ValueError("invalid customer_inn")
+    return raw
+
+
+def _optional_datetime(value, field):
+    raw = str(_scalar(value) or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        raise ValueError(f"invalid {field}")
+
+
 def _status(value):
     text = str(_scalar(value) or "").strip()
     for member in RequestStatus:
         if member.value.lower() == text.lower():
             return member
-    return RequestStatus.NEW
+    return None
 
 
 def _find_by_name(db, model, field, value):
@@ -415,24 +545,80 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         except ValueError:
             pass
     trip.number = number
-    trip.planned_time = str(_read_logical(item, "planned_time", mapping) or "")[:50]
-    trip.load_address = str(_read_logical(item, "load_address", mapping) or "")
-    trip.unload_address = str(_read_logical(item, "unload_address", mapping) or "")
-    trip.route_name = str(_read_logical(item, "route_name", mapping) or "")
+    for logical, attr, limit in (
+        ("planned_time", "planned_time", 50),
+        ("load_address", "load_address", None),
+        ("unload_address", "unload_address", None),
+        ("route_name", "route_name", None),
+    ):
+        if _has_logical(item, logical, mapping):
+            value = str(_read_logical(item, logical, mapping) or "")
+            setattr(trip, attr, value[:limit] if limit else value)
     try:
         km = _optional_nonnegative_float(_read_logical(item, "km", mapping), "km")
         volume = _optional_nonnegative_float(_read_logical(item, "volume", mapping), "volume")
+        tonnage = _optional_nonnegative_float(_read_logical(item, "tonnage", mapping), "tonnage")
         actual_km = _optional_nonnegative_float(_read_logical(item, "actual_km", mapping), "actual_km")
         actual_volume = _optional_nonnegative_float(_read_logical(item, "actual_volume", mapping), "actual_volume")
+        actual_tonnage = _optional_nonnegative_float(_read_logical(item, "actual_tonnage", mapping), "actual_tonnage")
+        trips_count = _optional_nonnegative_int(_read_logical(item, "trips_count", mapping), "trips_count")
+        waste_bin_count = _optional_nonnegative_int(_read_logical(item, "waste_bin_count", mapping), "waste_bin_count")
+        started_at = _optional_datetime(_read_logical(item, "started_at", mapping), "started_at")
+        finished_at = _optional_datetime(_read_logical(item, "finished_at", mapping), "finished_at")
+        customer_bitrix_id = _optional_nonnegative_int(_read_logical(item, "customer_bitrix_id", mapping), "customer_bitrix_id")
+        customer_inn = _optional_inn(_read_logical(item, "customer_inn", mapping))
+        is_empty_run = _optional_bool(_read_logical(item, "is_empty_run", mapping), "is_empty_run")
+        has_downtime = _optional_bool(_read_logical(item, "has_downtime", mapping), "has_downtime")
+        downtime_minutes = _optional_nonnegative_int(_read_logical(item, "downtime_minutes", mapping), "downtime_minutes")
     except ValueError as exc:
         return {"error": str(exc)}
-    trip.km = 0 if km is None else km
-    trip.volume = 0 if volume is None else volume
-    trip.actual_km = actual_km
-    trip.actual_volume = actual_volume
-    trip.status = _status(_read_logical(item, "status", mapping))
-    trip.comment = str(_read_logical(item, "comment", mapping) or "")
-    trip.logist_comment = str(_read_logical(item, "logist_comment", mapping) or "")
+    if trips_count is not None and trips_count < 1:
+        return {"error": "invalid trips_count"}
+
+    for logical, value in {
+        "km": km, "volume": volume, "tonnage": tonnage, "actual_km": actual_km,
+        "actual_volume": actual_volume, "actual_tonnage": actual_tonnage,
+        "trips_count": trips_count,
+        "waste_bin_count": waste_bin_count,
+    }.items():
+        if _has_logical(item, logical, mapping):
+            setattr(trip, logical, value)
+    if created:
+        trip.km = 0 if km is None else km
+        trip.volume = 0 if volume is None else volume
+        trip.trips_count = 1 if trips_count is None else trips_count
+    if _has_logical(item, "started_at", mapping):
+        trip.started_at = started_at
+    if _has_logical(item, "finished_at", mapping):
+        trip.finished_at = finished_at
+    if _has_logical(item, "is_empty_run", mapping):
+        trip.is_empty_run = bool(is_empty_run)
+    if _has_logical(item, "empty_run_comment", mapping):
+        trip.empty_run_comment = str(_read_logical(item, "empty_run_comment", mapping) or "")
+    if _has_logical(item, "has_downtime", mapping):
+        trip.has_downtime = bool(has_downtime)
+    if _has_logical(item, "downtime_minutes", mapping):
+        trip.downtime_minutes = downtime_minutes
+    if _has_logical(item, "downtime_comment", mapping):
+        trip.downtime_comment = str(_read_logical(item, "downtime_comment", mapping) or "")
+    stage_status = status_from_stage(settings.webhook_url, entity_type_id, item)
+    if stage_status:
+        trip.status = stage_status
+    elif _has_logical(item, "status", mapping):
+        inbound_status = _status(_read_logical(item, "status", mapping))
+        if inbound_status:
+            trip.status = inbound_status
+    if _has_logical(item, "comment", mapping):
+        trip.comment = str(_read_logical(item, "comment", mapping) or "")
+    if _has_logical(item, "logist_comment", mapping):
+        trip.logist_comment = str(_read_logical(item, "logist_comment", mapping) or "")
+    for logical, attr in (
+        ("site_contact_name", "site_contact_name"),
+        ("site_contact_phone", "site_contact_phone"),
+        ("site_contact_comment", "site_contact_comment"),
+    ):
+        if _has_logical(item, logical, mapping):
+            setattr(trip, attr, str(_read_logical(item, logical, mapping) or ""))
     trip.bitrix_element_id = int(item_id)
     trip.bitrix_entity_type_id = int(entity_type_id)
 
@@ -455,11 +641,56 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
             polygon = models.Polygon(name=polygon_name); db.add(polygon); db.flush()
         trip.polygon_id = polygon.id
     customer_name = str(_read_logical(item, "customer_name", mapping) or "").strip()
-    if customer_name:
-        customer = _find_by_name(db, models.Customer, models.Customer.name, customer_name)
+    if customer_name or customer_bitrix_id is not None or customer_inn:
+        customer = None
+        if customer_bitrix_id is not None:
+            customer = db.query(models.Customer).filter(models.Customer.bitrix_company_id == customer_bitrix_id).first()
+        if not customer and customer_inn:
+            customer = db.query(models.Customer).filter(models.Customer.inn == customer_inn).first()
+        if not customer and customer_name:
+            normalized_name = _normalize(customer_name)
+            customer = next((row for row in db.query(models.Customer).all() if _normalize(row.name) == normalized_name), None)
         if not customer:
+            if not customer_name:
+                return {"error": "customer_name_required"}
             customer = models.Customer(name=customer_name); db.add(customer); db.flush()
+        id_owner = db.query(models.Customer).filter(
+            models.Customer.bitrix_company_id == customer_bitrix_id,
+            models.Customer.id != customer.id,
+        ).first() if customer_bitrix_id is not None else None
+        inn_owner = db.query(models.Customer).filter(
+            models.Customer.inn == customer_inn,
+            models.Customer.id != customer.id,
+        ).first() if customer_inn else None
+        normalized_name_owner = None
+        if customer_name:
+            normalized_name = _normalize(customer_name)
+            normalized_name_owner = next(
+                (
+                    row for row in db.query(models.Customer).filter(models.Customer.id != customer.id).all()
+                    if _normalize(row.name) == normalized_name
+                ),
+                None,
+            )
+        if id_owner or inn_owner or normalized_name_owner:
+            return {"error": "customer_identity_conflict"}
+        if customer_name:
+            customer.name = customer_name
+        if customer_bitrix_id is not None:
+            customer.bitrix_company_id = customer_bitrix_id
+        if customer_inn:
+            customer.inn = customer_inn
         trip.customer_id = customer.id
+    cargo_name = str(_read_logical(item, "cargo_type_name", mapping) or "").strip()
+    if cargo_name:
+        cargo = _find_by_name(db, models.CargoType, models.CargoType.name, cargo_name)
+        if cargo:
+            trip.cargo_type_id = cargo.id
+    tariff_name = str(_read_logical(item, "tariff_name", mapping) or "").strip()
+    if tariff_name:
+        tariff = _find_by_name(db, models.Tariff, models.Tariff.title, tariff_name)
+        if tariff and tariff.kind == kind:
+            trip.tariff_id = tariff.id
     db.flush()
     print("BITRIX_INBOUND_OK", "add" if created else "update", entity_type_id, item_id, trip.id, flush=True)
     return {"ok": True, "action": "add" if created else "update", "trip_id": trip.id}
