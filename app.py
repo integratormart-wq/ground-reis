@@ -234,9 +234,13 @@ else:
 
 @app.get("/healthz", include_in_schema=False)
 def healthz():
+    payload = {"status": "ready" if _DB_READY.is_set() else "starting"}
+    render_commit = os.getenv("RENDER_GIT_COMMIT", "").strip()
+    if render_commit:
+        payload["commit"] = render_commit[:12]
     if not _DB_READY.is_set():
-        return JSONResponse({"status": "starting"}, status_code=503)
-    return {"status": "ready"}
+        return JSONResponse(payload, status_code=503)
+    return payload
 
 def get_db():
     if not _DB_READY.is_set():

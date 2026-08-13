@@ -157,6 +157,14 @@ def test_healthz_reports_starting_then_ready():
     assert ready.status_code == 200 and ready.json() == {"status": "ready"}
 
 
+def test_healthz_exposes_safe_render_commit_marker(monkeypatch):
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "b163b972ea05eb1662090a18ca04ee1216a303bf")
+    app_module._DB_READY.set()
+    response = TestClient(app_module.app).get("/healthz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready", "commit": "b163b972ea05"}
+
+
 def test_bitrix_form_encoder_flattens_nested_fields():
     encoded = app_module.bitrix._encode_params({"entityTypeId": 1, "fields": {"title": "П-1", "ufVolumePlan": 12}})
     assert encoded["entityTypeId"] == 1
