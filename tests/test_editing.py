@@ -1092,6 +1092,50 @@ def test_delete_request_removes_attachment_rows_and_files(tmp_path, monkeypatch)
     db.close()
 
 
+def test_delete_request_rolls_back_when_bitrix_delete_fails(tmp_path, monkeypatch):
+    db, admin, _, _, _, _, _, _, _, _, trip = reset_db()
+    trip.bitrix_element_id = 9001
+    trip.bitrix_entity_type_id = 1088
+    stored = tmp_path / "keep-on-bitrix-error.pdf"
+    stored.write_bytes(b"%PDF-test")
+    attachment = models.Attachment(
+        trip_request_id=trip.id, filename=stored.name, content_type="application/pdf",
+        size=9, path=str(stored), content=b"%PDF-test",
+    )
+    db.add(attachment); db.commit()
+    monkeypatch.setattr(app_module.bitrix, "delete_trip", lambda req, session: {"error": "remote_failed"})
+
+    response = client_as(admin).post(f"/requests/{trip.id}/delete", follow_redirects=False)
+
+    assert response.status_code == 502
+    assert db.query(models.TripRequest).filter_by(id=trip.id).one()
+    assert db.query(models.Attachment).filter_by(id=attachment.id).one()
+    assert stored.exists()
+    db.close()
+
+
+def test_confirmed_polygon_cost_is_historical_snapshot():
+    db, admin, _, _, _, _, _, _, polygon, _, trip = reset_db()
+    polygon.calculation_method = "tonnes"
+    polygon.tonnage_rate = 750
+    trip.status = models.RequestStatus.DRIVER_COMPLETED
+    trip.actual_tonnage = 8
+    db.commit()
+
+    response = client_as(admin).post(f"/requests/{trip.id}/confirm", follow_redirects=False)
+
+    assert response.status_code == 302
+    db.refresh(trip)
+    assert trip.polygon_cost_manual == 6000
+    polygon.tonnage_rate = 1000
+    db.commit()
+    page = client_as(admin).get(f"/polygons?polygon_id={polygon.id}")
+    assert page.status_code == 200
+    assert "6 000" in page.text
+    assert "8 000" not in page.text
+    db.close()
+
+
 def test_salary_locked_request_rejects_all_operational_edits():
     db, admin, _, driver, _, vehicle, customer, cargo, polygon, tariff, trip = reset_db()
     trip.sum_driver = trip.sum_trip = 1000

@@ -1133,6 +1133,7 @@ def confirm_trip(req_id: int, current_user: models.User = Depends(require_role(U
         raise HTTPException(404)
     if req.status != RequestStatus.DRIVER_COMPLETED:
         raise HTTPException(409, "Подтвердить можно только завершенную водителем заявку")
+    req.polygon_cost_manual = _polygon_trip_cost(req)
     req.status = RequestStatus.LOGIST_CONFIRMED
     db.add(models.StatusHistory(trip_request_id=req.id, user_id=current_user.id, old_status=RequestStatus.DRIVER_COMPLETED.value, new_status=RequestStatus.LOGIST_CONFIRMED.value))
     db.commit()
@@ -1403,6 +1404,8 @@ def _polygon_trip_cost(trip):
     method = polygon.calculation_method or "volume"
     if method == "manual":
         return trip.polygon_cost_manual or 0.0
+    if trip.status == RequestStatus.LOGIST_CONFIRMED and trip.polygon_cost_manual is not None:
+        return trip.polygon_cost_manual
     if method == "tonnes":
         quantity = trip.actual_tonnage if trip.actual_tonnage is not None else (trip.tonnage or 0)
         return quantity * (polygon.tonnage_rate or 0)
@@ -2086,6 +2089,8 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
         trip.tariff_id = tariff.id
         amount = _tariff_amount(tariff, km_value, volume_value, trip.trips_count if trip.trips_count is not None else 1)
         trip.sum_trip = trip.sum_driver = amount
+    if trip.status == RequestStatus.LOGIST_CONFIRMED and trip.polygon_cost_manual is None:
+        trip.polygon_cost_manual = _polygon_trip_cost(trip)
     if salary_locked:
         new_salary_values = _salary_sensitive_values(trip)
         if new_salary_values != old_salary_values:
@@ -2113,6 +2118,15 @@ def delete_request(req_id: int, current_user: models.User = Depends(require_role
         raise HTTPException(409, "Завершенную, подтвержденную или отмененную заявку удалять нельзя")
     if db.query(models.SalaryCalcItem).filter(models.SalaryCalcItem.trip_request_id == req.id).first():
         raise HTTPException(409, "Заявка включена в расчет зарплаты и не может быть удалена")
+    try:
+        delete_result = bitrix.delete_trip(req, db)
+    except Exception as exc:
+        db.rollback()
+        print("BITRIX_DELETE_EXCEPTION", type(exc).__name__, flush=True)
+        raise HTTPException(502, "Bitrix24 не подтвердил удаление заявки")
+    if delete_result.get("error"):
+        db.rollback()
+        raise HTTPException(502, "Bitrix24 не подтвердил удаление заявки")
     attachments = db.query(models.Attachment).filter(models.Attachment.trip_request_id == req.id).all()
     attachment_paths = [row.path for row in attachments if row.path]
     db.query(models.Attachment).filter(models.Attachment.trip_request_id == req.id).delete(
@@ -2128,11 +2142,6 @@ def delete_request(req_id: int, current_user: models.User = Depends(require_role
             os.remove(path)
         except OSError:
             pass
-    try:
-        bitrix.delete_trip(req, db)
-        db.commit()
-    except Exception as exc:
-        print("BITRIX_DELETE_EXCEPTION", type(exc).__name__, flush=True)
     return RedirectResponse("/requests", status_code=302)
 
 @app.get("/archive", response_class=HTMLResponse)
