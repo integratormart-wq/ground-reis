@@ -254,6 +254,7 @@ def test_driver_facts_attachments_and_access_control(tmp_path, monkeypatch):
 
 def test_driver_day_report_is_editable_unique_and_role_scoped():
     db, admin, logist, driver, vt, vehicle, customer, cargo, polygon, tariff, trip = reset_db()
+    trip.planned_date = date(2026, 8, 13)
     other_driver = models.User(
         full_name="Другой водитель", login="day-other", password_hash=app_module.pwd_hash("pass"),
         role=models.UserRole.DRIVER, is_active=True,
@@ -300,6 +301,15 @@ def test_polygon_cost_report_uses_polygon_tariff_not_driver_payment():
     db.refresh(polygon)
     assert polygon.calculation_method == "tonnes" and polygon.tonnage_rate == 750
     assert polygon.entry_notes == "Заезд через вторые ворота"
+    for unsafe_url in ("javascript:alert(1)", "data:text/html,x", "https:javascript-alert"):
+        rejected = client.post(f"/settings/polygons/{polygon.id}/edit", data={
+            "name": polygon.name, "address": polygon.address or "", "contact": polygon.contact or "",
+            "phone": polygon.phone or "", "comment": polygon.comment or "",
+            "entry_notes": polygon.entry_notes or "", "navigator_url": unsafe_url,
+            "calculation_method": polygon.calculation_method, "volume_rate": str(polygon.volume_rate or 0),
+            "tonnage_rate": str(polygon.tonnage_rate or 0), "waste_types": polygon.waste_types or "",
+        }, follow_redirects=False)
+        assert rejected.status_code == 400
 
     trip.status = models.RequestStatus.LOGIST_CONFIRMED
     trip.actual_volume = 20
@@ -379,6 +389,8 @@ def test_customer_identity_fields_are_editable_in_settings():
 
 def test_driver_day_reports_are_role_scoped_and_validate_dates():
     db, admin, logist, driver, vt, vehicle, *_ = reset_db()
+    trip = db.query(models.TripRequest).filter_by(driver_id=driver.id).one()
+    trip.planned_date = date(2026, 8, 13)
     other_driver = models.User(
         full_name="Чужой водитель", login="other-day-driver",
         password_hash=app_module.pwd_hash("pass"), role=models.UserRole.DRIVER, is_active=True,
@@ -409,6 +421,11 @@ def test_driver_day_reports_are_role_scoped_and_validate_dates():
         "total_km": "1", "odometer": "1", "fuel_liters": "1", "comment": "",
     }, follow_redirects=False)
     assert forbidden_vehicle.status_code == 400
+    historical_vehicle = driver_client.post("/driver/day-report", data={
+        "report_date": "2026-08-14", "vehicle_id": str(vehicle.id),
+        "total_km": "1", "odometer": "1", "fuel_liters": "1", "comment": "",
+    }, follow_redirects=False)
+    assert historical_vehicle.status_code == 400
     assert driver_client.get(f"/driver/day-report/{foreign.id}/edit").status_code == 404
     assert driver_client.get(f"/driver/day-report/{own.id}/edit").status_code == 200
     assert driver_client.get("/reports/day").status_code == 403

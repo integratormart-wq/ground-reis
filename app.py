@@ -1149,8 +1149,8 @@ def _day_report_context(request, user, db, editing=None):
         models.TripRequest.vehicle_id.isnot(None),
     )
     reported_vehicle_ids = db.query(models.DriverDayReport.vehicle_id).filter(
-        models.DriverDayReport.driver_id == user.id,
-    )
+        models.DriverDayReport.id == editing.id,
+    ) if editing else db.query(models.DriverDayReport.vehicle_id).filter(False)
     vehicles = db.query(models.Vehicle).filter(
         models.Vehicle.is_active == True,
         models.Vehicle.id.in_(assigned_vehicle_ids.union(reported_vehicle_ids)),
@@ -1199,21 +1199,18 @@ def save_driver_day_report(
     if min(total_km_value, odometer_value, fuel_value) < 0:
         raise HTTPException(400, "Показатели отчёта дня не могут быть отрицательными")
     vehicle_value = _form_fk(db, models.Vehicle, vehicle_id, "Автомобиль", required=True)
-    assigned_vehicle = db.query(models.TripRequest.id).filter(
-        models.TripRequest.driver_id == current_user.id,
-        models.TripRequest.vehicle_id == vehicle_value,
-    ).first()
-    previously_reported = db.query(models.DriverDayReport.id).filter(
-        models.DriverDayReport.driver_id == current_user.id,
-        models.DriverDayReport.vehicle_id == vehicle_value,
-    ).first()
-    vehicle = db.query(models.Vehicle).filter(models.Vehicle.id == vehicle_value, models.Vehicle.is_active == True).first()
-    if not vehicle or not (assigned_vehicle or previously_reported):
-        raise HTTPException(400, "Выберите автомобиль из своих заявок")
     report = db.query(models.DriverDayReport).filter(
         models.DriverDayReport.driver_id == current_user.id,
         models.DriverDayReport.report_date == report_date_value,
     ).first()
+    assigned_vehicle = db.query(models.TripRequest.id).filter(
+        models.TripRequest.driver_id == current_user.id,
+        models.TripRequest.vehicle_id == vehicle_value,
+        models.TripRequest.planned_date == report_date_value,
+    ).first()
+    vehicle = db.query(models.Vehicle).filter(models.Vehicle.id == vehicle_value, models.Vehicle.is_active == True).first()
+    if not vehicle or not (assigned_vehicle or (report and report.vehicle_id == vehicle_value)):
+        raise HTTPException(400, "Выберите автомобиль из своих заявок на эту дату")
     if not report:
         report = models.DriverDayReport(driver_id=current_user.id, report_date=report_date_value)
         db.add(report)
@@ -1858,8 +1855,12 @@ def edit_setting_record(
         if volume_rate_value < 0 or tonnage_rate_value < 0:
             raise HTTPException(400, "Тариф полигона не может быть отрицательным")
         clean_navigator_url = navigator_url.strip()
-        if clean_navigator_url and urlsplit(clean_navigator_url).scheme.lower() not in {"http", "https"}:
-            raise HTTPException(400, "Ссылка навигатора должна начинаться с http:// или https://")
+        parsed_navigator_url = urlsplit(clean_navigator_url) if clean_navigator_url else None
+        if clean_navigator_url and (
+            parsed_navigator_url.scheme.lower() not in {"http", "https"}
+            or not parsed_navigator_url.hostname
+        ):
+            raise HTTPException(400, "Укажите полную ссылку навигатора с http:// или https://")
         row.name = clean_name
         row.address, row.contact, row.phone, row.comment = address.strip(), contact.strip(), phone.strip(), comment.strip()
         row.entry_notes, row.navigator_url = entry_notes.strip(), clean_navigator_url
