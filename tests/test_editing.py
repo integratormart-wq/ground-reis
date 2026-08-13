@@ -747,10 +747,10 @@ def test_final_review_vehicle_retype_and_salary_lock():
     data = {"number": trip.number, "planned_date": str(trip.planned_date), "driver_id": str(driver.id), "vehicle_id": str(vehicle.id), "customer_id": str(customer.id), "cargo_type_id": str(cargo.id), "polygon_id": str(polygon.id), "tariff_id": str(tariff.id), "km": "13", "volume": str(trip.volume), "trips_count": str(trip.trips_count), "kind": "пухтовоз", "comment": "изменение"}
     assert client.post(f"/requests/{trip.id}/edit", data=data, follow_redirects=False).status_code == 409
     data["km"] = str(trip.km)
-    assert client.post(f"/requests/{trip.id}/edit", data=data, follow_redirects=False).status_code == 302
+    assert client.post(f"/requests/{trip.id}/edit", data=data, follow_redirects=False).status_code == 409
     db.expire_all()
     assert db.query(models.SalaryCalcItem).filter_by(trip_request_id=trip.id).one().sum == tariff.trip_price
-    assert db.query(models.TripRequest).filter_by(id=trip.id).one().comment == "изменение"
+    assert db.query(models.TripRequest).filter_by(id=trip.id).one().comment == "Старый комментарий"
     db.close()
 
 
@@ -992,6 +992,7 @@ def test_bitrix_inbound_rejects_lifecycle_jump_and_salary_locked_changes(monkeyp
     db, admin, logist, driver, vt, vehicle, customer, cargo, polygon, tariff, trip = reset_db()
     trip.bitrix_element_id = 777
     trip.bitrix_entity_type_id = 150
+    trip.sum_driver = trip.sum_trip = 1000
     settings = models.IntegrationSetting(provider="bitrix24", webhook_url="https://example/rest/1/token/", secret="hook-secret", is_active=True)
     db.add(settings); db.commit()
 
@@ -1030,6 +1031,21 @@ def test_bitrix_inbound_rejects_lifecycle_jump_and_salary_locked_changes(monkeyp
     db.expire_all()
     assert db.query(models.TripRequest).filter_by(id=trip.id).one().actual_tonnage is None
 
+    def change_operational_values(item_id, entity_type_id, session, settings=None):
+        row = session.query(models.TripRequest).filter_by(id=trip.id).one()
+        row.planned_time = "23:59"
+        row.site_contact_phone = "+79990000000"
+        row.polygon_cost_manual = 1234
+        return {"ok": True, "action": "update", "trip_id": row.id}
+    monkeypatch.setattr(app_module.bitrix, "sync_from_bitrix", change_operational_values)
+    response = client.post("/webhook/bitrix24?token=hook-secret", json=payload)
+    assert response.status_code == 409
+    db.expire_all()
+    locked = db.query(models.TripRequest).filter_by(id=trip.id).one()
+    assert locked.planned_time == "08:00"
+    assert locked.site_contact_phone is None
+    assert locked.polygon_cost_manual is None
+
     db.query(models.SalaryCalcItem).delete(); db.query(models.SalaryCalc).delete()
     trip.status = models.RequestStatus.LOGIST_CONFIRMED
     trip.actual_volume = None
@@ -1056,6 +1072,51 @@ def test_delete_request_removes_attachment_rows_and_files(tmp_path, monkeypatch)
     assert db.query(models.TripRequest).filter_by(id=trip.id).first() is None
     assert db.query(models.Attachment).filter_by(trip_request_id=trip.id).count() == 0
     assert not stored.exists()
+    db.close()
+
+
+def test_salary_locked_request_rejects_all_operational_edits():
+    db, admin, _, driver, _, vehicle, customer, cargo, polygon, tariff, trip = reset_db()
+    trip.sum_driver = trip.sum_trip = 1000
+    calc = models.SalaryCalc(driver_id=driver.id, date_from=date.today(), date_to=date.today())
+    db.add(calc); db.flush()
+    db.add(models.SalaryCalcItem(salary_calc_id=calc.id, trip_request_id=trip.id, sum=trip.sum_driver or 0))
+    db.commit()
+    response = client_as(admin).post(f"/requests/{trip.id}/edit", data={
+        "number": trip.number, "planned_date": str(trip.planned_date), "planned_time": "23:59",
+        "driver_id": str(driver.id), "vehicle_id": str(vehicle.id),
+        "customer_id": str(customer.id), "cargo_type_id": str(cargo.id),
+        "polygon_id": str(polygon.id), "tariff_id": str(tariff.id),
+        "load_address": trip.load_address, "unload_address": trip.unload_address,
+        "route_name": trip.route_name, "km": str(trip.km), "volume": str(trip.volume),
+        "tonnage": "12", "trips_count": str(trip.trips_count), "kind": trip.kind.value,
+        "comment": "Изменён", "polygon_cost_manual": "1234",
+        "site_contact_name": "Другой", "site_contact_phone": "+79990000000",
+        "site_contact_comment": "Изменён",
+    }, follow_redirects=False)
+    assert response.status_code == 409
+    db.expire_all()
+    locked = db.query(models.TripRequest).filter_by(id=trip.id).one()
+    assert locked.planned_time == "08:00"
+    assert locked.tonnage is None
+    assert locked.polygon_cost_manual is None
+    assert locked.comment == "Старый комментарий"
+    db.close()
+
+
+def test_sqlite_attachment_limit_reserves_write_lock_before_count(monkeypatch):
+    db, *_ = reset_db()
+    statements = []
+    original_execute = db.execute
+
+    def recording_execute(statement, *args, **kwargs):
+        statements.append(str(statement))
+        return original_execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(db, "execute", recording_execute)
+    app_module._lock_attachment_parent(db, 1)
+    assert statements and statements[0].upper() == "BEGIN IMMEDIATE"
+    db.rollback()
     db.close()
 
 

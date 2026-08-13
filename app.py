@@ -9,7 +9,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from urllib.parse import urlsplit
-from sqlalchemy import func
+from sqlalchemy import func, text
 from jose import jwt
 import bcrypt
 from openpyxl import Workbook
@@ -659,14 +659,19 @@ def _export_row(values):
 
 def _salary_sensitive_values(trip):
     return (
-        trip.driver_id, trip.planned_date, trip.vehicle_id, trip.kind,
+        trip.number, trip.planned_date, trip.planned_time,
+        trip.driver_id, trip.vehicle_id,
+        trip.load_address, trip.unload_address, trip.route_name,
         trip.km, trip.volume, trip.tonnage,
-        trip.actual_km, trip.actual_volume, trip.actual_tonnage, trip.trips_count,
-        trip.tariff_id, trip.sum_trip, trip.sum_driver, trip.status,
-        trip.customer_id, trip.cargo_type_id, trip.polygon_id,
+        trip.trips_count, trip.cargo_type_id, trip.customer_id,
+        trip.kind, trip.status, trip.started_at, trip.finished_at,
+        trip.actual_km, trip.actual_volume, trip.actual_tonnage,
         trip.is_empty_run, trip.empty_run_comment,
         trip.has_downtime, trip.downtime_minutes, trip.downtime_comment,
+        trip.polygon_cost_manual, trip.sum_trip, trip.sum_driver, trip.tariff_id,
         trip.comment, trip.logist_comment,
+        trip.site_contact_name, trip.site_contact_phone, trip.site_contact_comment,
+        trip.polygon_id, trip.waste_bin_count,
     )
 
 
@@ -860,14 +865,8 @@ def edit_request(
     if not tariff:
         raise HTTPException(400, "Не найден подходящий активный тариф")
     salary_items = db.query(models.SalaryCalcItem).filter(models.SalaryCalcItem.trip_request_id == req.id).all()
+    locked_snapshot = _salary_sensitive_values(req) if salary_items else None
     new_amount = _tariff_amount(tariff, calculation_km, calculation_volume, trips_value)
-    salary_fields_changed = any((
-        req.driver_id != driver_value, req.planned_date != planned_value, req.vehicle_id != vehicle_value,
-        req.kind != kind_value, (req.km or 0) != km_value, (req.volume or 0) != volume_value,
-        (req.trips_count or 1) != trips_value, req.tariff_id != tariff.id, (req.sum_driver or 0) != new_amount,
-    ))
-    if salary_items and salary_fields_changed:
-        raise HTTPException(409, "Нельзя менять расчетные поля заявки, уже включенной в расчет зарплаты")
     req.number = clean_number
     req.planned_date, req.planned_time, req.kind = planned_value, planned_time.strip(), kind_value
     req.driver_id, req.vehicle_id = driver_value, vehicle_value
@@ -883,6 +882,9 @@ def edit_request(
     if not salary_items:
         req.sum_driver = new_amount
         req.sum_trip = new_amount
+    elif _salary_sensitive_values(req) != locked_snapshot:
+        db.rollback()
+        raise HTTPException(409, "Нельзя менять заявку, уже включенную в расчет зарплаты")
     new_snapshot = json.dumps({
         "number": req.number, "status": req.status.value, "planned_date": str(req.planned_date), "planned_time": req.planned_time,
         "kind": req.kind.value, "driver_id": req.driver_id, "vehicle_id": req.vehicle_id, "customer_id": req.customer_id,
@@ -931,15 +933,25 @@ def _attachment_signature_matches(content_type: str, content: bytes) -> bool:
     return signatures.get(content_type, False)
 
 
+def _lock_attachment_parent(db: Session, req_id: int):
+    if engine.dialect.name == "sqlite":
+        # Auth dependencies can start a read transaction. Restart it as a reserved
+        # write transaction before COUNT so concurrent uploads serialize in SQLite.
+        db.rollback()
+        db.execute(text("BEGIN IMMEDIATE"))
+        return db.query(models.TripRequest).filter(models.TripRequest.id == req_id).first()
+    query = db.query(models.TripRequest).filter(models.TripRequest.id == req_id)
+    if engine.dialect.name == "postgresql":
+        query = query.with_for_update()
+    return query.first()
+
+
 @app.post("/requests/{req_id}/attachments")
 async def upload_attachments(
     req_id: int, files: List[UploadFile] = File(...),
     current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
-    trip_query = db.query(models.TripRequest).filter(models.TripRequest.id == req_id)
-    if engine.dialect.name == "postgresql":
-        trip_query = trip_query.with_for_update()
-    trip = trip_query.first()
+    trip = _lock_attachment_parent(db, req_id)
     if not trip or not _can_access_trip(current_user, trip):
         raise HTTPException(403)
     existing_count = db.query(models.Attachment).filter(models.Attachment.trip_request_id == req_id).count()
