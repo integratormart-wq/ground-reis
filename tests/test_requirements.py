@@ -835,3 +835,75 @@ def test_ground_bitrix_process_ids_route_and_same_item_id_does_not_collide(monke
         (1092, models.TripType.SAMOSVAL),
     }
     db.close()
+
+
+def test_polygon_can_store_multiple_cargo_tariffs_with_different_units_and_update_existing():
+    db, admin, *_ = reset_db()
+    polygon = models.Polygon(name="Полигон тарифный", address="Адрес")
+    construction = models.CargoType(name="Строительный мусор", unit="м³")
+    industrial = models.CargoType(name="Промышленный мусор", unit="т")
+    db.add_all([polygon, construction, industrial]); db.commit()
+    client = client_as(admin)
+
+    response = client.post("/polygon-tariffs", data={
+        "polygon_id": str(polygon.id),
+        "cargo_type_id": [str(construction.id), str(industrial.id)],
+        "rate": ["900", "3570"],
+        "unit": ["м³", "т"],
+        "return_to": "/polygons",
+    }, follow_redirects=False)
+    assert response.status_code == 302
+    rows = db.query(models.PolygonTariff).filter_by(polygon_id=polygon.id).order_by(models.PolygonTariff.cargo_type_id).all()
+    assert len(rows) == 2
+    assert {(row.cargo_type.name, row.rate, row.unit) for row in rows} == {
+        ("Строительный мусор", 900, "м³"),
+        ("Промышленный мусор", 3570, "т"),
+    }
+
+    updated = client.post("/polygon-tariffs", data={
+        "polygon_id": str(polygon.id),
+        "cargo_type_id": [str(construction.id)],
+        "rate": ["950"],
+        "unit": ["м³"],
+        "return_to": "/settings#polygons",
+    }, follow_redirects=False)
+    assert updated.status_code == 302
+    db.expire_all()
+    assert db.query(models.PolygonTariff).filter_by(polygon_id=polygon.id).count() == 2
+    assert db.query(models.PolygonTariff).filter_by(polygon_id=polygon.id, cargo_type_id=construction.id).one().rate == 950
+    db.close()
+
+
+def test_polygon_tariffs_are_visible_in_polygon_settings_and_request_preview():
+    db, admin, *_ = reset_db()
+    polygon = models.Polygon(name="Полигон Север", address="Север")
+    construction = models.CargoType(name="Строительный мусор", unit="м³")
+    industrial = models.CargoType(name="Промышленный мусор", unit="т")
+    db.add_all([polygon, construction, industrial]); db.flush()
+    db.add_all([
+        models.PolygonTariff(polygon_id=polygon.id, cargo_type_id=construction.id, rate=900, unit="м³"),
+        models.PolygonTariff(polygon_id=polygon.id, cargo_type_id=industrial.id, rate=3570, unit="т"),
+    ])
+    db.commit()
+    client = client_as(admin)
+
+    polygons_page = client.get("/polygons")
+    assert polygons_page.status_code == 200
+    assert "Добавить или изменить тарифы полигона" in polygons_page.text
+    assert "Строительный мусор" in polygons_page.text and "900" in polygons_page.text and "₽/м³" in polygons_page.text
+    assert "Промышленный мусор" in polygons_page.text and "3 570" in polygons_page.text and "₽/т" in polygons_page.text
+
+    settings_page = client.get("/settings")
+    assert settings_page.status_code == 200
+    assert "Полигоны и тарифы" in settings_page.text
+    assert "settings-section" in settings_page.text
+    assert "Сохранить тарифы полигона" in settings_page.text
+
+    request_page = client.get("/pukhtovoz/new")
+    assert request_page.status_code == 200
+    assert "Тариф полигона" in request_page.text
+    assert "Предварительные затраты полигона" in request_page.text
+    assert '"rate": 900' in request_page.text
+    assert '"rate": 3570' in request_page.text
+    assert "syncPolygonTariff" in request_page.text
+    db.close()
