@@ -1444,10 +1444,10 @@ def polygons_list(request: Request, polygon_id: Optional[str] = None, driver_id:
     return render_template("polygons.html", {"request": request, "user": current_user, "menu": menu, "items": items, "polygons": polygons, "drivers": [current_user] if current_user.role == UserRole.DRIVER else db.query(models.User).filter(models.User.role == UserRole.DRIVER).all(), "polygon_id": polygon_id or "", "driver_id": driver_id or "", "date_from": date_from or "", "date_to": date_to or "", "app_name": "ГРАУНД | Рейсы"})
 
 @app.post("/polygons")
-def create_polygon(name: str = Form(""), address: str = Form(""), current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db)):
+def create_polygon(name: str = Form(""), address: str = Form(""), contact: str = Form(""), phone: str = Form(""), current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db)):
     clean_name = name.strip()
     if clean_name and not db.query(models.Polygon).filter(models.Polygon.name == clean_name).first():
-        db.add(models.Polygon(name=clean_name, address=address.strip()))
+        db.add(models.Polygon(name=clean_name, address=address.strip(), contact=contact.strip(), phone=phone.strip()))
         db.commit()
     return RedirectResponse("/polygons", status_code=302)
 
@@ -1543,10 +1543,10 @@ def add_vehicle(name: str = Form(...), plate: str = Form(...), type_id: int = Fo
     return RedirectResponse("/settings#vehicles", status_code=302)
 
 @app.post("/settings/polygons")
-def add_settings_polygon(name: str = Form(...), address: str = Form(""), current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
+def add_settings_polygon(name: str = Form(...), address: str = Form(""), contact: str = Form(""), phone: str = Form(""), current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
     clean_name = name.strip()
     if clean_name and not db.query(models.Polygon).filter(models.Polygon.name == clean_name).first():
-        db.add(models.Polygon(name=clean_name, address=address.strip()))
+        db.add(models.Polygon(name=clean_name, address=address.strip(), contact=contact.strip(), phone=phone.strip()))
         db.commit()
     return RedirectResponse("/settings#polygons", status_code=302)
 
