@@ -99,6 +99,7 @@ class CargoType(Base):
     name = Column(String(255), unique=True, nullable=False)
     unit = Column(String(50))
     comment = Column(Text)
+    polygon_tariffs = relationship("PolygonTariff", back_populates="cargo_type", cascade="all, delete-orphan")
 
 class Route(Base):
     __tablename__ = "routes"
@@ -173,6 +174,8 @@ class TripRequest(Base):
     site_contact_phone = Column(String(50), nullable=True)
     site_contact_comment = Column(Text, nullable=True)
     polygon_id = Column(Integer, ForeignKey("polygons.id"), nullable=True)
+    polygon_rate_snapshot = Column(Float, nullable=True)
+    polygon_unit_snapshot = Column(String(10), nullable=True)
     waste_bin_count = Column(Integer, nullable=True)
     bitrix_element_id = Column(Integer, nullable=True, index=True)
     bitrix_entity_type_id = Column(Integer, nullable=True, index=True)
@@ -308,6 +311,21 @@ class Polygon(Base):
     tonnage_rate = Column(Float, default=0)
     waste_types = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
+    tariffs = relationship("PolygonTariff", back_populates="polygon", cascade="all, delete-orphan")
+
+
+class PolygonTariff(Base):
+    __tablename__ = "polygon_tariffs"
+    __table_args__ = (UniqueConstraint("polygon_id", "cargo_type_id", name="uq_polygon_cargo_tariff"),)
+    id = Column(Integer, primary_key=True, index=True)
+    polygon_id = Column(Integer, ForeignKey("polygons.id"), nullable=False, index=True)
+    cargo_type_id = Column(Integer, ForeignKey("cargo_types.id"), nullable=False, index=True)
+    rate = Column(Float, nullable=False, default=0)
+    unit = Column(String(10), nullable=False, default="м³")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    polygon = relationship("Polygon", back_populates="tariffs")
+    cargo_type = relationship("CargoType", back_populates="polygon_tariffs")
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
