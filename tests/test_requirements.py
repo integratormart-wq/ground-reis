@@ -40,6 +40,49 @@ def test_settings_additions_appear_in_new_request_form():
     db.close()
 
 
+def test_polygon_creation_saves_address_contact_and_phone_from_both_entry_points():
+    db, admin, *_ = reset_db()
+    client = client_as(admin)
+
+    polygons_page = client.get("/polygons")
+    assert polygons_page.status_code == 200
+    assert 'name="address"' in polygons_page.text
+    assert 'name="contact"' in polygons_page.text
+    assert 'name="phone"' in polygons_page.text
+
+    settings_page = client.get("/settings")
+    assert settings_page.status_code == 200
+    assert 'action="/settings/polygons"' in settings_page.text
+    assert 'name="contact"' in settings_page.text
+    assert 'name="phone"' in settings_page.text
+
+    direct = client.post("/polygons", data={
+        "name": "Полигон Контакт 1",
+        "address": "Ленинградская область, 1",
+        "contact": "Иван Иванов",
+        "phone": "+79990000001",
+    }, follow_redirects=False)
+    assert direct.status_code == 302
+
+    settings = client.post("/settings/polygons", data={
+        "name": "Полигон Контакт 2",
+        "address": "Ленинградская область, 2",
+        "contact": "Петр Петров",
+        "phone": "+79990000002",
+    }, follow_redirects=False)
+    assert settings.status_code == 302
+
+    first = db.query(models.Polygon).filter_by(name="Полигон Контакт 1").one()
+    second = db.query(models.Polygon).filter_by(name="Полигон Контакт 2").one()
+    assert (first.address, first.contact, first.phone) == (
+        "Ленинградская область, 1", "Иван Иванов", "+79990000001",
+    )
+    assert (second.address, second.contact, second.phone) == (
+        "Ленинградская область, 2", "Петр Петров", "+79990000002",
+    )
+    db.close()
+
+
 def test_request_form_and_reports_do_not_show_waste_bin_field():
     db, admin, *_ = reset_db()
     client = client_as(admin)
