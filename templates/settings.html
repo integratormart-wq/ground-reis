@@ -2,91 +2,45 @@
 {% block content %}
 <div class="page-header"><h1>Настройки</h1></div>
 
-<nav class="settings-section-nav" aria-label="Разделы настроек">
-  <a href="#vehicle-types">Типы автомобилей</a>
-  <a href="#routes">Объекты и маршруты</a>
-  <a href="#tariffs">Тарифы пухтовозов</a>
-  <a href="#tariffs-samosval">Тарифы самосвалов</a>
-  <a href="#vehicles">Автомобили</a>
-  <a href="#customers">Заказчики</a>
-  <a href="#cargo">Типы грузов</a>
-  <a href="#polygons">Полигоны</a>
-  {% if user.role == 'admin' %}<a href="#integrations">Интеграции</a>{% endif %}
-</nav>
-
-<h3 id="vehicle-types" data-settings-section>Типы автомобилей</h3>
-<table class="table"><thead><tr><th>Название</th><th>Направление</th><th></th></tr></thead><tbody>
-{% for vt in vtypes %}<tr><td>{{ vt.name }}</td><td>{{ vt.kind.value }}</td><td class="actions-cell"><a class="btn btn-ghost btn-sm" href="/settings/vehicle-types/{{ vt.id }}/edit">Редактировать</a><form method="post" action="/settings/vehicle-types/{{ vt.id }}/delete" onsubmit="return confirm('Удалить?')"><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>{% endfor %}
-</tbody></table>
-<form method="post" action="/settings/vehicle-types" class="filters"><input name="name" placeholder="Название типа" required /><select name="kind"><option value="пухтовоз">Пухтовоз</option><option value="самосвал">Самосвал</option></select><input name="description" placeholder="Описание" /><button class="btn" type="submit">Добавить тип</button></form>
-
-<h3 id="routes" data-settings-section>Объекты и маршруты</h3>
-<table class="table"><thead><tr><th>Название</th><th>Подача</th><th>Выгрузка</th><th>Км</th><th></th></tr></thead><tbody>
-{% for r in routes %}<tr><td>{{ r.name }}</td><td>{{ r.load_address or '' }}</td><td>{{ r.unload_address or '' }}</td><td>{{ r.distance or 0 }}</td><td class="actions-cell"><a class="btn btn-ghost btn-sm" href="/settings/routes/{{ r.id }}/edit">Редактировать</a><form method="post" action="/settings/routes/{{ r.id }}/delete" onsubmit="return confirm('Удалить?')"><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>{% endfor %}
-</tbody></table>
-<form method="post" action="/settings/routes" class="filters"><input name="name" placeholder="Название объекта или маршрута" required /><input name="load_address" placeholder="Адрес подачи" /><input name="unload_address" placeholder="Адрес выгрузки" /><input name="distance" type="number" step="any" placeholder="Км" /><select name="customer_id"><option value="">— заказчик —</option>{% for c in customers %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select><input name="comment" placeholder="Комментарий" /><button class="btn" type="submit">Добавить объект</button></form>
-
-<h3 id="tariffs" data-settings-section>Тарифы пухтовозов</h3>
-<div class="table-wrap"><table class="table">
-  <thead><tr><th>Название тарифа</th><th>Стоимость рейса, ₽</th><th>Активен</th><th></th></tr></thead>
-  <tbody>{% for t in tariffs if t.kind.value == 'пухтовоз' %}<tr><td>{{ t.title }}</td><td>{{ t.trip_price or 0 }}</td><td>{{ 'Да' if t.is_active else 'Нет' }}</td><td class="actions-cell"><a class="btn btn-ghost btn-sm" href="/settings/tariffs/{{ t.id }}/edit">Редактировать</a><form method="post" action="/settings/tariffs/{{ t.id }}/delete" onsubmit="return confirm('Удалить?')"><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>{% else %}<tr><td colspan="4">Тарифов пухтовозов нет</td></tr>{% endfor %}</tbody>
-</table></div>
+<h3>Тарифы</h3>
+<table class="table">
+  <thead><tr><th>Название</th><th>Направление</th><th>Формула</th><th>Ставка за рейс</th><th>Активен</th><th></th></tr></thead>
+  <tbody>
+  {% for t in tariffs %}
+  <tr>
+    <td>{{ t.title }}</td>
+    <td>{{ t.kind.value }}</td>
+    <td>{{ t.formula }}</td>
+    <td>{{ t.trip_price }}</td>
+    <td>{{ 'Да' if t.is_active else 'Нет' }}</td>
+    <td>
+      <form method="post" action="/settings/tariffs/{{ t.id }}/delete" onsubmit="return confirm('Удалить?')">
+        <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
 {% if user.role in ['admin','logist'] %}
-<div class="form tariff-grid-form"><form id="pukhtovoz-tariff-form" method="post" action="/settings/tariffs/pukhtovoz-grid">
-  <div id="pukhtovoz-tariff-rows" class="tariff-grid-rows">
-    <div class="tariff-grid-row tariff-grid-row--pukhtovoz"><label>Название тарифа<input name="pukhtovoz_title" required /></label><label>Стоимость рейса, ₽<input type="number" min="0" step="any" name="pukhtovoz_price" required /></label><button class="btn btn-ghost btn-sm tariff-row-remove" type="button">Убрать строку</button></div>
-  </div>
-  <template id="pukhtovoz-tariff-row-template"><div class="tariff-grid-row tariff-grid-row--pukhtovoz"><label>Название тарифа<input name="pukhtovoz_title" required /></label><label>Стоимость рейса, ₽<input type="number" min="0" step="any" name="pukhtovoz_price" required /></label><button class="btn btn-ghost btn-sm tariff-row-remove" type="button">Убрать строку</button></div></template>
-  <label><input type="checkbox" name="is_active" checked /> Активны</label>
-  <div class="form-row tariff-grid-actions"><button id="add-pukhtovoz-tariff-row" class="btn btn-ghost" type="button">Добавить тариф</button><button class="btn btn-primary" type="submit">Сохранить тарифы</button></div>
-</form></div>
+<form method="post" action="/settings/tariffs" class="filters">
+  <input name="title" placeholder="Название" required />
+  <select name="kind">
+    <option value="pukhtovoz">Пухтовоз</option>
+    <option value="samosval">Самосвал</option>
+  </select>
+  <select name="formula">
+    <option value="trip">За рейс</option>
+    <option value="km">За км</option>
+    <option value="volume">За объем</option>
+  </select>
+  <input name="trip_price" type="number" step="any" placeholder="Ставка" required />
+  <label><input type="checkbox" name="is_active" checked /> Активен</label>
+  <button class="btn" type="submit">Добавить тариф</button>
+</form>
 {% endif %}
 
-<h3 id="tariffs-samosval" data-settings-section>Тарифы самосвалов</h3>
-<div class="table-wrap"><table class="table">
-  <thead><tr><th>Название тарифа</th><th>Объём, м³</th><th>Километры</th><th>Стоимость рейса, ₽</th><th>Активен</th><th></th></tr></thead>
-  <tbody>{% for t in tariffs if t.kind.value == 'самосвал' %}<tr><td>{{ t.title }}</td><td>{{ t.min_volume or 0 }}</td><td>{{ t.min_km or 0 }}</td><td>{{ t.trip_price or 0 }}</td><td>{{ 'Да' if t.is_active else 'Нет' }}</td><td class="actions-cell"><a class="btn btn-ghost btn-sm" href="/settings/tariffs/{{ t.id }}/edit">Редактировать</a><form method="post" action="/settings/tariffs/{{ t.id }}/delete" onsubmit="return confirm('Удалить?')"><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>{% else %}<tr><td colspan="6">Тарифов самосвалов нет</td></tr>{% endfor %}</tbody>
-</table></div>
-{% if user.role in ['admin','logist'] %}
-<div class="form tariff-grid-form"><form id="samosval-tariff-form" method="post" action="/settings/tariffs/samosval-grid">
-  <div id="samosval-tariff-rows" class="tariff-grid-rows">
-    <div class="tariff-grid-row tariff-grid-row--samosval"><label>Название тарифа<input name="samosval_title" required /></label><label>Объём, м³<input type="number" min="0" step="any" name="samosval_volume" required /></label><label>Километры<input type="number" min="0" step="any" name="samosval_km" required /></label><label>Стоимость рейса, ₽<input type="number" min="0" step="any" name="samosval_price" required /></label><button class="btn btn-ghost btn-sm tariff-row-remove" type="button">Убрать строку</button></div>
-  </div>
-  <template id="samosval-tariff-row-template"><div class="tariff-grid-row tariff-grid-row--samosval"><label>Название тарифа<input name="samosval_title" required /></label><label>Объём, м³<input type="number" min="0" step="any" name="samosval_volume" required /></label><label>Километры<input type="number" min="0" step="any" name="samosval_km" required /></label><label>Стоимость рейса, ₽<input type="number" min="0" step="any" name="samosval_price" required /></label><button class="btn btn-ghost btn-sm tariff-row-remove" type="button">Убрать строку</button></div></template>
-  <label><input type="checkbox" name="is_active" checked /> Активны</label>
-  <div class="form-row tariff-grid-actions"><button id="add-samosval-tariff-row" class="btn btn-ghost" type="button">Добавить тариф</button><button class="btn btn-primary" type="submit">Сохранить тарифы</button></div>
-</form></div>
-{% endif %}
-
-<script>
-(() => {
-  const bindTariffGrid = (prefix) => {
-    const rows = document.getElementById(`${prefix}-tariff-rows`);
-    const template = document.getElementById(`${prefix}-tariff-row-template`);
-    const addButton = document.getElementById(`add-${prefix}-tariff-row`);
-    if (!rows || !template || !addButton) return;
-    const updateRemoveButtons = () => {
-      const buttons = rows.querySelectorAll('.tariff-row-remove');
-      buttons.forEach(button => { button.disabled = buttons.length === 1; });
-    };
-    rows.addEventListener('click', event => {
-      const button = event.target.closest('.tariff-row-remove');
-      if (!button || rows.children.length === 1) return;
-      button.closest('.tariff-grid-row').remove();
-      updateRemoveButtons();
-    });
-    addButton.addEventListener('click', () => {
-      rows.appendChild(template.content.cloneNode(true));
-      updateRemoveButtons();
-    });
-    updateRemoveButtons();
-  };
-  bindTariffGrid('pukhtovoz');
-  bindTariffGrid('samosval');
-})();
-</script>
-
-<h3 id="vehicles" data-settings-section>Автомобили</h3>
+<h3>Автомобили</h3>
 <table class="table">
   <thead><tr><th>Имя</th><th>Госномер</th><th>Тип</th><th>Вместимость</th><th></th></tr></thead>
   <tbody>
@@ -97,7 +51,6 @@
     <td>{{ v.type.name if v.type else '' }}</td>
     <td>{{ v.capacity }}</td>
     <td>
-      <a class="btn btn-ghost btn-sm" href="/settings/vehicles/{{ v.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/vehicles/{{ v.id }}/delete" onsubmit="return confirm('Удалить?')">
         <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
       </form>
@@ -120,16 +73,15 @@
 </form>
 {% endif %}
 
-<h3 id="customers" data-settings-section>Заказчики</h3>
+<h3>Заказчики</h3>
 <table class="table">
-  <thead><tr><th>Имя</th><th>ИНН</th><th>Bitrix ID</th><th>Адрес</th><th></th></tr></thead>
+  <thead><tr><th>Имя</th><th>Адрес</th><th></th></tr></thead>
   <tbody>
   {% for c in customers %}
   <tr>
     <td>{{ c.name }}</td>
-    <td>{{ c.inn or '—' }}</td><td>{{ c.bitrix_company_id or '—' }}</td><td>{{ c.address }}</td>
+    <td>{{ c.address }}</td>
     <td>
-      <a class="btn btn-ghost btn-sm" href="/settings/customers/{{ c.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/customers/{{ c.id }}/delete" onsubmit="return confirm('Удалить?')">
         <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
       </form>
@@ -141,23 +93,20 @@
 {% if user.role in ['admin','logist'] %}
 <form method="post" action="/settings/customers" class="filters">
   <input name="name" placeholder="Имя" required />
-  <input name="inn" inputmode="numeric" placeholder="ИНН" />
-  <input name="bitrix_company_id" type="number" min="1" placeholder="Bitrix ID компании" />
   <input name="address" placeholder="Адрес" />
   <button class="btn" type="submit">Добавить</button>
 </form>
 {% endif %}
 
-<h3 id="cargo" data-settings-section>Типы грузов</h3>
+<h3>Типы грузов</h3>
 <table class="table">
   <thead><tr><th>Имя</th><th>Единица</th><th></th></tr></thead>
   <tbody>
   {% for c in cargo_types %}
   <tr>
     <td>{{ c.name }}</td>
-    <td>{{ (c.unit or '')|replace('м3', 'м³') }}</td>
+    <td>{{ c.unit }}</td>
     <td>
-      <a class="btn btn-ghost btn-sm" href="/settings/cargo-types/{{ c.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/cargo-types/{{ c.id }}/delete" onsubmit="return confirm('Удалить?')">
         <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
       </form>
@@ -174,7 +123,7 @@
 </form>
 {% endif %}
 
-<h3 id="polygons" data-settings-section>Полигоны</h3>
+<h3>Полигоны</h3>
 <table class="table">
   <thead><tr><th>Название</th><th>Адрес</th><th></th></tr></thead>
   <tbody>
@@ -183,7 +132,6 @@
     <td>{{ p.name }}</td>
     <td>{{ p.address }}</td>
     <td>
-      <a class="btn btn-ghost btn-sm" href="/settings/polygons/{{ p.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/polygons/{{ p.id }}/delete" onsubmit="return confirm('Удалить?')">
         <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
       </form>
@@ -200,14 +148,14 @@
 </form>
 {% endif %}
 
-{% if user.role == 'admin' %}
-<h3 id="integrations" data-settings-section>Интеграции</h3>
+{% if user.role in ['admin','logist'] %}
 <form method="post" action="/settings/integrations" class="filters" style="margin-top:18px">
+  <h3>Интеграции</h3>
   <label>Битрикс24 вебхук URL
-    <input type="password" name="webhook_url" value="" autocomplete="new-password" placeholder="{% if integrations.get('bitrix24') and integrations.get('bitrix24').webhook_url %}URL сохранён — оставьте пустым без изменений{% else %}https://...{% endif %}" />
+    <input name="webhook_url" value="{{ integrations.get('bitrix24').webhook_url if integrations.get('bitrix24') else '' }}" placeholder="https://..." />
   </label>
   <label>Ключ интеграции
-    <input type="password" name="secret" value="" autocomplete="new-password" placeholder="{% if integrations.get('bitrix24') and integrations.get('bitrix24').secret %}Ключ сохранён — оставьте пустым без изменений{% else %}секрет{% endif %}" />
+    <input name="secret" value="{{ integrations.get('bitrix24').secret if integrations.get('bitrix24') else '' }}" placeholder="секрет" />
   </label>
   <label>Ответственный
     <input name="responsible_id" value="{{ integrations.get('bitrix24').responsible_id if integrations.get('bitrix24') else '' }}" placeholder="ID пользователя" />
@@ -217,42 +165,4 @@
 </form>
 <p><a class="btn btn-ghost" href="/settings/bitrix/test" target="_blank">Проверить подключение и показать смарт-процессы</a></p>
 {% endif %}
-
-<script>
-(() => {
-  const root = document.querySelector('main.container');
-  if (!root) return;
-  const headings = [...root.querySelectorAll(':scope > h3[data-settings-section]')];
-  const sections = headings.map((heading, index) => {
-    const nextHeading = headings[index + 1] || null;
-    const section = document.createElement('details');
-    section.className = 'settings-section';
-    section.dataset.anchor = heading.id;
-    const summary = document.createElement('summary');
-    summary.textContent = heading.textContent;
-    heading.before(section);
-    section.appendChild(summary);
-    let node = heading.nextSibling;
-    heading.remove();
-    while (node && node !== nextHeading) {
-      const next = node.nextSibling;
-      section.appendChild(node);
-      node = next;
-    }
-    return section;
-  });
-
-  const openHashSection = () => {
-    const anchor = window.location.hash.slice(1);
-    if (!anchor) return;
-    const section = sections.find(item => item.dataset.anchor === anchor);
-    if (!section) return;
-    sections.forEach(item => { item.open = false; });
-    section.open = true;
-    window.requestAnimationFrame(() => section.scrollIntoView({ block: 'start' }));
-  };
-  openHashSection();
-  window.addEventListener('hashchange', openHashSection);
-})();
-</script>
 {% endblock %}
