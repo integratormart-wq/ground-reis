@@ -120,6 +120,8 @@ def _initialize_database():
                 "downtime_minutes": "INTEGER",
                 "downtime_comment": "TEXT",
                 "polygon_cost_manual": "FLOAT",
+                "polygon_rate_snapshot": "FLOAT",
+                "polygon_unit_snapshot": "VARCHAR(10)",
             }
             for column_name, column_type in trip_column_migrations.items():
                 if column_name not in cols:
@@ -454,7 +456,7 @@ def new_request(request: Request, current_user: models.User = Depends(require_ro
 @app.get("/pukhtovoz/new", response_class=HTMLResponse)
 def new_pukhtovoz(request: Request, current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
-    vtypes = db.query(models.VehicleType).all(); vehicles = db.query(models.Vehicle).filter(models.Vehicle.is_active == True).all(); drivers = db.query(models.User).filter(models.User.role == UserRole.DRIVER).all(); customers = db.query(models.Customer).all(); cargo_types = db.query(models.CargoType).all(); polygons = db.query(models.Polygon).all(); tariffs = db.query(models.Tariff).all()
+    vtypes = db.query(models.VehicleType).all(); vehicles = db.query(models.Vehicle).filter(models.Vehicle.is_active == True).all(); drivers = db.query(models.User).filter(models.User.role == UserRole.DRIVER).all(); customers = db.query(models.Customer).all(); cargo_types = db.query(models.CargoType).all(); polygons = db.query(models.Polygon).all(); tariffs = db.query(models.Tariff).all(); polygon_tariffs = db.query(models.PolygonTariff).all()
     last = db.query(models.TripRequest).filter(models.TripRequest.kind == TripType.PUKHTOVOZ, models.TripRequest.number.like("П-%")).order_by(models.TripRequest.id.desc()).first()
     next_num = 1
     if last and last.number:
@@ -462,12 +464,12 @@ def new_pukhtovoz(request: Request, current_user: models.User = Depends(require_
             next_num = int(str(last.number).split("-", 1)[1]) + 1
         except Exception:
             next_num = 1
-    return render_template("request_form.html", {"request": request, "user": current_user, "menu": menu, "vtypes": vtypes, "vehicles": vehicles, "drivers": drivers, "customers": customers, "cargo_types": cargo_types, "polygons": polygons, "tariffs": tariffs, "kind": "пухтовоз", "next_number": next_num, "next_number_hint": f"П-{next_num}", "app_name": "ГРАУНД | Рейсы"})
+    return render_template("request_form.html", {"request": request, "user": current_user, "menu": menu, "vtypes": vtypes, "vehicles": vehicles, "drivers": drivers, "customers": customers, "cargo_types": cargo_types, "polygons": polygons, "tariffs": tariffs, "polygon_tariffs": polygon_tariffs, "kind": "пухтовоз", "next_number": next_num, "next_number_hint": f"П-{next_num}", "app_name": "ГРАУНД | Рейсы"})
 
 @app.get("/samosval/new", response_class=HTMLResponse)
 def new_samosval(request: Request, current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
-    vtypes = db.query(models.VehicleType).all(); vehicles = db.query(models.Vehicle).filter(models.Vehicle.is_active == True).all(); drivers = db.query(models.User).filter(models.User.role == UserRole.DRIVER).all(); customers = db.query(models.Customer).all(); cargo_types = db.query(models.CargoType).all(); polygons = db.query(models.Polygon).all(); tariffs = db.query(models.Tariff).all()
+    vtypes = db.query(models.VehicleType).all(); vehicles = db.query(models.Vehicle).filter(models.Vehicle.is_active == True).all(); drivers = db.query(models.User).filter(models.User.role == UserRole.DRIVER).all(); customers = db.query(models.Customer).all(); cargo_types = db.query(models.CargoType).all(); polygons = db.query(models.Polygon).all(); tariffs = db.query(models.Tariff).all(); polygon_tariffs = db.query(models.PolygonTariff).all()
     last = db.query(models.TripRequest).filter(models.TripRequest.kind == TripType.SAMOSVAL, models.TripRequest.number.like("С-%")).order_by(models.TripRequest.id.desc()).first()
     next_num = 1
     if last and last.number:
@@ -475,7 +477,7 @@ def new_samosval(request: Request, current_user: models.User = Depends(require_r
             next_num = int(str(last.number).split("-", 1)[1]) + 1
         except Exception:
             next_num = 1
-    return render_template("request_form.html", {"request": request, "user": current_user, "menu": menu, "vtypes": vtypes, "vehicles": vehicles, "drivers": drivers, "customers": customers, "cargo_types": cargo_types, "polygons": polygons, "tariffs": tariffs, "kind": "самосвал", "next_number": next_num, "next_number_hint": f"С-{next_num}", "app_name": "ГРАУНД | Рейсы"})
+    return render_template("request_form.html", {"request": request, "user": current_user, "menu": menu, "vtypes": vtypes, "vehicles": vehicles, "drivers": drivers, "customers": customers, "cargo_types": cargo_types, "polygons": polygons, "tariffs": tariffs, "polygon_tariffs": polygon_tariffs, "kind": "самосвал", "next_number": next_num, "next_number_hint": f"С-{next_num}", "app_name": "ГРАУНД | Рейсы"})
 
 @app.post("/requests/new")
 def create_request(
@@ -585,6 +587,7 @@ def _request_edit_context(request, current_user, db, req):
         "drivers": db.query(models.User).filter(models.User.role == UserRole.DRIVER).all(),
         "customers": db.query(models.Customer).all(), "cargo_types": db.query(models.CargoType).all(),
         "polygons": db.query(models.Polygon).all(), "tariffs": db.query(models.Tariff).all(),
+        "polygon_tariffs": db.query(models.PolygonTariff).all(),
         "kind": req.kind.value, "editing": req, "next_number": None, "next_number_hint": req.number,
         "app_name": "ГРАУНД | Рейсы",
     }
@@ -1133,7 +1136,14 @@ def confirm_trip(req_id: int, current_user: models.User = Depends(require_role(U
         raise HTTPException(404)
     if req.status != RequestStatus.DRIVER_COMPLETED:
         raise HTTPException(409, "Подтвердить можно только завершенную водителем заявку")
+    polygon_rate_info = _polygon_rate_info(req, use_snapshot=False)
     req.polygon_cost_manual = _polygon_trip_cost(req)
+    if polygon_rate_info and polygon_rate_info["source"] != "manual":
+        req.polygon_rate_snapshot = polygon_rate_info["rate"]
+        req.polygon_unit_snapshot = polygon_rate_info["unit"]
+    else:
+        req.polygon_rate_snapshot = None
+        req.polygon_unit_snapshot = None
     req.status = RequestStatus.LOGIST_CONFIRMED
     db.add(models.StatusHistory(trip_request_id=req.id, user_id=current_user.id, old_status=RequestStatus.DRIVER_COMPLETED.value, new_status=RequestStatus.LOGIST_CONFIRMED.value))
     db.commit()
@@ -1331,6 +1341,7 @@ def reports(request: Request, status_f: Optional[str] = None, driver_id: Optiona
         "volume": sum((r.actual_volume if r.actual_volume is not None else (r.volume or 0)) for r in rows),
         "bins": sum((r.waste_bin_count or 0) for r in rows),
         "sum": sum((r.sum_driver or 0) for r in rows),
+        "polygon_cost": sum(_polygon_trip_cost(r) for r in rows),
     }
     return render_template("reports.html", {"request": request, "user": current_user, "menu": menu, "summary": summary, "rows": rows, "statuses": RequestStatus, "drivers": drivers, "polygons": polygons, "customers": customers, "status_f": status_f or "", "driver_id": driver_id or "", "polygon_id": polygon_id or "", "customer_id": customer_id or "", "date_from": date_from or "", "date_to": date_to or "", "q": q or "", "app_name": "ГРАУНД | Рейсы"})
 
@@ -1354,9 +1365,9 @@ def export_report(status_f: Optional[str] = None, driver_id: Optional[str] = Non
     if search: q = q.filter(models.TripRequest.number.ilike(f"%{search}%"))
     rows = q.order_by(models.TripRequest.planned_date.desc()).all()
     out = io.StringIO(); writer = csv.writer(out)
-    writer.writerow(["Номер", "Дата", "Время", "Статус", "Водитель", "Полигон", "Компания", "Объём, м³", "Тоннаж план, т", "Тоннаж факт, т", "Сумма"])
+    writer.writerow(["Номер", "Дата", "Время", "Статус", "Водитель", "Полигон", "Тип груза", "Тариф полигона", "Затраты полигона", "Компания", "Объём, м³", "Тоннаж план, т", "Тоннаж факт, т", "Сумма"])
     for r in rows:
-        writer.writerow(_export_row([r.number, r.planned_date, r.planned_time or "", r.status.value, r.driver.full_name if r.driver else "", r.polygon.name if r.polygon else "", r.customer.name if r.customer else "", r.actual_volume if r.actual_volume is not None else (r.volume or 0), r.tonnage if r.tonnage is not None else "", r.actual_tonnage if r.actual_tonnage is not None else "", r.sum_driver or 0]))
+        writer.writerow(_export_row([r.number, r.planned_date, r.planned_time or "", r.status.value, r.driver.full_name if r.driver else "", r.polygon.name if r.polygon else "", r.cargo_type.name if r.cargo_type else "", _polygon_tariff_label(r), _polygon_trip_cost(r), r.customer.name if r.customer else "", r.actual_volume if r.actual_volume is not None else (r.volume or 0), r.tonnage if r.tonnage is not None else "", r.actual_tonnage if r.actual_tonnage is not None else "", r.sum_driver or 0]))
     return Response(content="\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=report.csv"})
 
 @app.get("/export/report.xlsx")
@@ -1375,9 +1386,9 @@ def export_report_xlsx(status_f: Optional[str] = None, driver_id: Optional[str] 
     if date_to: q = q.filter(models.TripRequest.planned_date <= date.fromisoformat(date_to))
     if search: q = q.filter(models.TripRequest.number.ilike(f"%{search}%"))
     rows = q.order_by(models.TripRequest.planned_date.desc()).all()
-    wb = Workbook(); ws = wb.active; ws.append(["Номер", "Дата", "Время", "Статус", "Водитель", "Полигон", "Компания", "Объём, м³", "Тоннаж план, т", "Тоннаж факт, т", "Сумма"])
+    wb = Workbook(); ws = wb.active; ws.append(["Номер", "Дата", "Время", "Статус", "Водитель", "Полигон", "Тип груза", "Тариф полигона", "Затраты полигона", "Компания", "Объём, м³", "Тоннаж план, т", "Тоннаж факт, т", "Сумма"])
     for r in rows:
-        ws.append(_export_row([r.number, r.planned_date, r.planned_time or "", r.status.value, r.driver.full_name if r.driver else "", r.polygon.name if r.polygon else "", r.customer.name if r.customer else "", r.actual_volume if r.actual_volume is not None else (r.volume or 0), r.tonnage if r.tonnage is not None else "", r.actual_tonnage if r.actual_tonnage is not None else "", r.sum_driver or 0]))
+        ws.append(_export_row([r.number, r.planned_date, r.planned_time or "", r.status.value, r.driver.full_name if r.driver else "", r.polygon.name if r.polygon else "", r.cargo_type.name if r.cargo_type else "", _polygon_tariff_label(r), _polygon_trip_cost(r), r.customer.name if r.customer else "", r.actual_volume if r.actual_volume is not None else (r.volume or 0), r.tonnage if r.tonnage is not None else "", r.actual_tonnage if r.actual_tonnage is not None else "", r.sum_driver or 0]))
     output = io.BytesIO(); wb.save(output)
     return Response(
         content=output.getvalue(),
@@ -1397,20 +1408,81 @@ def _apply_polygon_filters(query, polygon_id=None, driver_id=None, date_from=Non
     return query
 
 
+POLYGON_TARIFF_UNITS = {"м³", "т"}
+
+
+def _normalize_polygon_tariff_unit(raw_unit):
+    value = str(raw_unit or "").strip().lower().replace(" ", "")
+    if value in {"м³", "м3", "m3", "куб", "кубы", "куб.м", "куб.м."}:
+        return "м³"
+    if value in {"т", "т.", "тонна", "тонны", "тонн", "t"}:
+        return "т"
+    raise HTTPException(400, "Единица тарифа полигона должна быть м³ или т")
+
+
+def _exact_polygon_tariff(trip):
+    polygon = trip.polygon
+    cargo_type_id = trip.cargo_type_id
+    if not polygon or not cargo_type_id:
+        return None
+    return next((item for item in (polygon.tariffs or []) if item.cargo_type_id == cargo_type_id), None)
+
+
+def _polygon_rate_info(trip, use_snapshot=True):
+    if use_snapshot and trip.status == RequestStatus.LOGIST_CONFIRMED:
+        if trip.polygon_rate_snapshot is not None and trip.polygon_unit_snapshot:
+            return {"rate": float(trip.polygon_rate_snapshot), "unit": trip.polygon_unit_snapshot, "source": "snapshot"}
+        if trip.polygon_cost_manual is not None:
+            # Старые подтверждённые заявки уже имеют зафиксированную сумму, но не имеют
+            # снимка ставки. Не подменяем исторический тариф текущей новой настройкой.
+            return {"rate": None, "unit": None, "source": "historical"}
+    exact = _exact_polygon_tariff(trip)
+    if exact:
+        return {"rate": float(exact.rate or 0), "unit": exact.unit or "м³", "source": "exact"}
+    polygon = trip.polygon
+    if not polygon:
+        return None
+    method = polygon.calculation_method or "volume"
+    if method == "manual":
+        return {"rate": None, "unit": None, "source": "manual"}
+    if method == "tonnes":
+        return {"rate": float(polygon.tonnage_rate or 0), "unit": "т", "source": "legacy"}
+    return {"rate": float(polygon.volume_rate or 0), "unit": "м³", "source": "legacy"}
+
+
+def _polygon_tariff_label(trip):
+    info = _polygon_rate_info(trip)
+    if not info:
+        return "—"
+    if info["source"] == "manual":
+        return "Вручную"
+    if info["source"] == "historical":
+        return "Зафиксировано"
+    rate = info["rate"] or 0
+    formatted = f"{rate:,.2f}".replace(",", " ").replace(".00", "")
+    return f"{formatted} ₽/{info['unit']}"
+
+
 def _polygon_trip_cost(trip):
     polygon = trip.polygon
     if not polygon:
         return 0.0
-    method = polygon.calculation_method or "volume"
-    if method == "manual":
-        return trip.polygon_cost_manual or 0.0
     if trip.status == RequestStatus.LOGIST_CONFIRMED and trip.polygon_cost_manual is not None:
         return trip.polygon_cost_manual
-    if method == "tonnes":
+    info = _polygon_rate_info(trip, use_snapshot=False)
+    if not info:
+        return 0.0
+    if info["source"] == "manual":
+        return trip.polygon_cost_manual or 0.0
+    if info["unit"] == "т":
         quantity = trip.actual_tonnage if trip.actual_tonnage is not None else (trip.tonnage or 0)
-        return quantity * (polygon.tonnage_rate or 0)
-    quantity = trip.actual_volume if trip.actual_volume is not None else (trip.volume or 0)
-    return quantity * (polygon.volume_rate or 0)
+    else:
+        quantity = trip.actual_volume if trip.actual_volume is not None else (trip.volume or 0)
+    return quantity * (info["rate"] or 0)
+
+
+jinja_env.globals["polygon_tariff_label"] = _polygon_tariff_label
+jinja_env.globals["polygon_trip_cost"] = _polygon_trip_cost
 
 @app.get("/polygons", response_class=HTMLResponse)
 def polygons_list(request: Request, polygon_id: Optional[str] = None, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1441,7 +1513,7 @@ def polygons_list(request: Request, polygon_id: Optional[str] = None, driver_id:
             "tonnage": sum((r.actual_tonnage if r.actual_tonnage is not None else r.tonnage or 0) for r in rows),
             "sum": sum(_polygon_trip_cost(r) for r in rows),
         })
-    return render_template("polygons.html", {"request": request, "user": current_user, "menu": menu, "items": items, "polygons": polygons, "drivers": [current_user] if current_user.role == UserRole.DRIVER else db.query(models.User).filter(models.User.role == UserRole.DRIVER).all(), "polygon_id": polygon_id or "", "driver_id": driver_id or "", "date_from": date_from or "", "date_to": date_to or "", "app_name": "ГРАУНД | Рейсы"})
+    return render_template("polygons.html", {"request": request, "user": current_user, "menu": menu, "items": items, "polygons": polygons, "cargo_types": db.query(models.CargoType).order_by(models.CargoType.name).all(), "polygon_tariffs": db.query(models.PolygonTariff).order_by(models.PolygonTariff.polygon_id, models.PolygonTariff.cargo_type_id).all(), "drivers": [current_user] if current_user.role == UserRole.DRIVER else db.query(models.User).filter(models.User.role == UserRole.DRIVER).all(), "polygon_id": polygon_id or "", "driver_id": driver_id or "", "date_from": date_from or "", "date_to": date_to or "", "app_name": "ГРАУНД | Рейсы"})
 
 @app.post("/polygons")
 def create_polygon(name: str = Form(""), address: str = Form(""), contact: str = Form(""), phone: str = Form(""), current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db)):
@@ -1450,6 +1522,51 @@ def create_polygon(name: str = Form(""), address: str = Form(""), contact: str =
         db.add(models.Polygon(name=clean_name, address=address.strip(), contact=contact.strip(), phone=phone.strip()))
         db.commit()
     return RedirectResponse("/polygons", status_code=302)
+
+
+@app.post("/polygon-tariffs")
+def save_polygon_tariffs(
+    polygon_id: str = Form(...), cargo_type_id: List[str] = Form(...), unit: List[str] = Form(...),
+    rate: List[str] = Form(...), return_to: str = Form("/polygons"),
+    current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db),
+):
+    polygon_value = _form_fk(db, models.Polygon, polygon_id, "Полигон", required=True)
+    if not (len(cargo_type_id) == len(unit) == len(rate)) or not cargo_type_id:
+        raise HTTPException(400, "Проверьте строки тарифов полигона")
+    seen_cargo = set()
+    for cargo_raw, unit_raw, rate_raw in zip(cargo_type_id, unit, rate):
+        cargo_value = _form_fk(db, models.CargoType, cargo_raw, "Тип груза", required=True)
+        if cargo_value in seen_cargo:
+            raise HTTPException(400, "Один тип груза нельзя добавить дважды в одной форме")
+        seen_cargo.add(cargo_value)
+        tariff_unit = _normalize_polygon_tariff_unit(unit_raw)
+        tariff_rate = _finite_float(rate_raw, "Стоимость тарифа полигона")
+        if tariff_rate < 0:
+            raise HTTPException(400, "Стоимость тарифа полигона не может быть отрицательной")
+        row = db.query(models.PolygonTariff).filter_by(polygon_id=polygon_value, cargo_type_id=cargo_value).first()
+        if row:
+            row.rate, row.unit = tariff_rate, tariff_unit
+        else:
+            db.add(models.PolygonTariff(
+                polygon_id=polygon_value, cargo_type_id=cargo_value, rate=tariff_rate, unit=tariff_unit,
+            ))
+    _commit_or_conflict(db, "Не удалось сохранить тариф полигона")
+    target = return_to if return_to in {"/polygons", "/settings#polygons"} else "/polygons"
+    return RedirectResponse(target, status_code=302)
+
+
+@app.post("/polygon-tariffs/{tariff_id}/delete")
+def delete_polygon_tariff(
+    tariff_id: int, return_to: str = Form("/polygons"),
+    current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db),
+):
+    row = db.query(models.PolygonTariff).filter_by(id=tariff_id).first()
+    if not row:
+        raise HTTPException(404, "Тариф полигона не найден")
+    db.delete(row)
+    db.commit()
+    target = return_to if return_to in {"/polygons", "/settings#polygons"} else "/polygons"
+    return RedirectResponse(target, status_code=302)
 
 @app.get("/export/polygon.csv")
 def export_polygon(polygon_id: str, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1467,9 +1584,9 @@ def export_polygon(polygon_id: str, driver_id: Optional[str] = None, date_from: 
         driver_id = str(current_user.id)
     rows = _apply_polygon_filters(polygon_query, polygon_id, driver_id, date_from, date_to).order_by(models.TripRequest.planned_date, models.TripRequest.id).all()
     out = io.StringIO(); writer = csv.writer(out)
-    writer.writerow(["Полигон", "Номер", "Дата", "Статус", "Водитель", "Автомобиль", "Объём, м³", "Тонны", "Затраты полигона"])
+    writer.writerow(["Полигон", "Номер", "Дата", "Статус", "Водитель", "Автомобиль", "Тип груза", "Тариф полигона", "Объём, м³", "Тонны", "Затраты полигона"])
     for r in rows:
-        writer.writerow(_export_row([polygon.name, r.number, r.planned_date, r.status.value, r.driver.full_name if r.driver else "", r.vehicle.name if r.vehicle else "", r.actual_volume if r.actual_volume is not None else r.volume or 0, r.actual_tonnage if r.actual_tonnage is not None else r.tonnage or 0, _polygon_trip_cost(r)]))
+        writer.writerow(_export_row([polygon.name, r.number, r.planned_date, r.status.value, r.driver.full_name if r.driver else "", r.vehicle.name if r.vehicle else "", r.cargo_type.name if r.cargo_type else "", _polygon_tariff_label(r), r.actual_volume if r.actual_volume is not None else r.volume or 0, r.actual_tonnage if r.actual_tonnage is not None else r.tonnage or 0, _polygon_trip_cost(r)]))
     return Response(content="\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f"attachment; filename=polygon-{polygon.id}.csv"})
 
 @app.get("/export/polygons.csv")
@@ -1492,11 +1609,11 @@ def export_polygons(polygon_id: Optional[str] = None, driver_id: Optional[str] =
 @app.get("/settings", response_class=HTMLResponse)
 def settings(request: Request, current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
-    tariffs = db.query(models.Tariff).all(); vehicles = db.query(models.Vehicle).all(); vtypes = db.query(models.VehicleType).all(); customers = db.query(models.Customer).all(); cargo_types = db.query(models.CargoType).all(); polygons = db.query(models.Polygon).all(); routes = db.query(models.Route).all()
+    tariffs = db.query(models.Tariff).all(); vehicles = db.query(models.Vehicle).all(); vtypes = db.query(models.VehicleType).all(); customers = db.query(models.Customer).all(); cargo_types = db.query(models.CargoType).all(); polygons = db.query(models.Polygon).all(); routes = db.query(models.Route).all(); polygon_tariffs = db.query(models.PolygonTariff).order_by(models.PolygonTariff.polygon_id, models.PolygonTariff.cargo_type_id).all()
     integrations = {}
     for row in db.query(models.IntegrationSetting).all():
         integrations[row.provider] = row
-    return render_template("settings.html", {"request": request, "user": current_user, "menu": menu, "tariffs": tariffs, "vehicles": vehicles, "vtypes": vtypes, "customers": customers, "cargo_types": cargo_types, "polygons": polygons, "routes": routes, "integrations": integrations, "app_name": "ГРАУНД | Рейсы"})
+    return render_template("settings.html", {"request": request, "user": current_user, "menu": menu, "tariffs": tariffs, "polygon_tariffs": polygon_tariffs, "vehicles": vehicles, "vtypes": vtypes, "customers": customers, "cargo_types": cargo_types, "polygons": polygons, "routes": routes, "integrations": integrations, "app_name": "ГРАУНД | Рейсы"})
 
 @app.post("/settings/vehicle-types")
 def add_vehicle_type(name: str = Form(...), kind: str = Form(...), description: str = Form(""), current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
@@ -2090,7 +2207,11 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
         amount = _tariff_amount(tariff, km_value, volume_value, trip.trips_count if trip.trips_count is not None else 1)
         trip.sum_trip = trip.sum_driver = amount
     if trip.status == RequestStatus.LOGIST_CONFIRMED and trip.polygon_cost_manual is None:
+        polygon_rate_info = _polygon_rate_info(trip, use_snapshot=False)
         trip.polygon_cost_manual = _polygon_trip_cost(trip)
+        if polygon_rate_info and polygon_rate_info["source"] != "manual":
+            trip.polygon_rate_snapshot = polygon_rate_info["rate"]
+            trip.polygon_unit_snapshot = polygon_rate_info["unit"]
     if salary_locked:
         new_salary_values = _salary_sensitive_values(trip)
         if new_salary_values != old_salary_values:
