@@ -83,6 +83,30 @@ def test_polygon_creation_saves_address_contact_and_phone_from_both_entry_points
     db.close()
 
 
+def test_new_request_form_displays_selected_polygon_contact_details():
+    db, admin, *_ = reset_db()
+    polygon = models.Polygon(
+        name="Полигон с реквизитами",
+        address="Ленинградская область, Полигонная 7",
+        contact="Сергей Петров",
+        phone="+79991234567",
+    )
+    db.add(polygon); db.commit()
+    client = client_as(admin)
+
+    page = client.get("/pukhtovoz/new")
+    assert page.status_code == 200
+    assert 'id="polygon_id"' in page.text
+    assert "Адрес полигона" in page.text
+    assert "Контактное лицо полигона" in page.text
+    assert "Телефон полигона" in page.text
+    assert "Ленинградская область, Полигонная 7" in page.text
+    assert "Сергей Петров" in page.text
+    assert "+79991234567" in page.text
+    assert "syncPolygonDetails" in page.text
+    db.close()
+
+
 def test_request_form_and_reports_do_not_show_waste_bin_field():
     db, admin, *_ = reset_db()
     client = client_as(admin)
