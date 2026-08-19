@@ -42,9 +42,10 @@
       <label>Адрес<input name="address" value="{{ row.address or '' }}" /></label>
       <label>Контакт<input name="contact" value="{{ row.contact or '' }}" /></label>
       <label>Телефон<input name="phone" value="{{ row.phone or '' }}" /></label>
-      <label>Способ расчёта<select name="calculation_method"><option value="volume" {% if row.calculation_method == 'volume' %}selected{% endif %}>По кубам</option><option value="tonnes" {% if row.calculation_method == 'tonnes' %}selected{% endif %}>По тоннам</option><option value="manual" {% if row.calculation_method == 'manual' %}selected{% endif %}>Вручную</option></select></label>
-      <label>Тариф за куб, ₽<input name="volume_rate" type="number" min="0" step="any" value="{{ row.volume_rate or 0 }}" /></label>
-      <label>Тариф за тонну, ₽<input name="tonnage_rate" type="number" min="0" step="any" value="{{ row.tonnage_rate or 0 }}" /></label>
+      <label>Резервный способ расчёта<select name="calculation_method"><option value="volume" {% if row.calculation_method == 'volume' %}selected{% endif %}>По кубам</option><option value="tonnes" {% if row.calculation_method == 'tonnes' %}selected{% endif %}>По тоннам</option><option value="manual" {% if row.calculation_method == 'manual' %}selected{% endif %}>Вручную</option></select></label>
+      <label>Резервный тариф за куб, ₽<input name="volume_rate" type="number" min="0" step="any" value="{{ row.volume_rate or 0 }}" /></label>
+      <label>Резервный тариф за тонну, ₽<input name="tonnage_rate" type="number" min="0" step="any" value="{{ row.tonnage_rate or 0 }}" /></label>
+      <p class="muted wide">Точные тарифы по типам груза настраиваются в разделе «Полигоны и тарифы» и имеют приоритет. Эти поля остаются резервными для старых заявок и случаев без точного тарифа.</p>
       <label class="wide">Особенности заезда<textarea name="entry_notes">{{ row.entry_notes or '' }}</textarea></label>
       <label class="wide">Ссылка Яндекс.Навигатора<input name="navigator_url" type="url" value="{{ row.navigator_url or '' }}" /></label>
       <label class="wide">Виды отходов<textarea name="waste_types">{{ row.waste_types or '' }}</textarea></label>

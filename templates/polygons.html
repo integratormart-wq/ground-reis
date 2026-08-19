@@ -13,6 +13,44 @@
     <button class="btn" type="submit">Добавить</button>
   </form>
 </div>
+{% if polygons and cargo_types %}
+<details class="polygon-tariff-manager-card">
+  <summary>Добавить или изменить тарифы полигона</summary>
+  <form method="post" action="/polygon-tariffs" id="polygons-page-tariff-form" class="polygon-tariff-manager-form">
+    <input type="hidden" name="return_to" value="/polygons" />
+    <label>Полигон
+      <select name="polygon_id" required>
+        <option value="">— выберите полигон —</option>
+        {% for p in polygons %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <div class="polygon-tariff-grid" id="polygons-page-tariff-rows">
+      <div class="polygon-tariff-row">
+        <label>Тип груза<select name="cargo_type_id" class="polygon-cargo-select" required><option value="">— выберите —</option>{% for c in cargo_types %}<option value="{{ c.id }}" data-unit="{{ (c.unit or 'м³')|replace('м3','м³') }}">{{ c.name }}</option>{% endfor %}</select></label>
+        <label>Стоимость, ₽<input name="rate" type="number" min="0" step="any" required /></label>
+        <label>Единица<select name="unit" class="polygon-unit-select" required><option value="м³">₽/м³</option><option value="т">₽/т</option></select></label>
+        <button class="btn btn-ghost btn-sm polygon-tariff-remove" type="button">Убрать строку</button>
+      </div>
+    </div>
+    <template id="polygons-page-tariff-template">
+      <div class="polygon-tariff-row">
+        <label>Тип груза<select name="cargo_type_id" class="polygon-cargo-select" required><option value="">— выберите —</option>{% for c in cargo_types %}<option value="{{ c.id }}" data-unit="{{ (c.unit or 'м³')|replace('м3','м³') }}">{{ c.name }}</option>{% endfor %}</select></label>
+        <label>Стоимость, ₽<input name="rate" type="number" min="0" step="any" required /></label>
+        <label>Единица<select name="unit" class="polygon-unit-select" required><option value="м³">₽/м³</option><option value="т">₽/т</option></select></label>
+        <button class="btn btn-ghost btn-sm polygon-tariff-remove" type="button">Убрать строку</button>
+      </div>
+    </template>
+    <p class="muted">Для одного полигона можно сохранить несколько типов груза с разной стоимостью и разными единицами расчёта.</p>
+    <div class="form-row tariff-grid-actions"><button class="btn btn-ghost" type="button" id="polygons-page-add-tariff">Добавить ещё тип груза</button><button class="btn btn-primary" type="submit">Сохранить тарифы</button></div>
+  </form>
+  {% if polygon_tariffs %}
+  <div class="table-wrap polygon-tariff-saved-table"><table class="table">
+    <thead><tr><th>Полигон</th><th>Тип груза</th><th>Тариф</th><th></th></tr></thead>
+    <tbody>{% for pt in polygon_tariffs %}<tr><td>{{ pt.polygon.name }}</td><td>{{ pt.cargo_type.name }}</td><td>{{ "{:,.2f}".format(pt.rate or 0).replace(",", " ").replace(".00", "") }} ₽/{{ pt.unit }}</td><td><form method="post" action="/polygon-tariffs/{{ pt.id }}/delete" onsubmit="return confirm('Удалить тариф полигона?')"><input type="hidden" name="return_to" value="/polygons" /><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% endif %}
+</details>
+{% endif %}
 {% endif %}
 <div class="filters">
   <form method="get" style="display:flex;flex-wrap:wrap;gap:10px;align-items:end">
@@ -30,11 +68,35 @@
   </form>
 </div>
 <div class="table-wrap"><table class="table">
-  <thead><tr><th>Полигон</th><th>Контакты и заезд</th><th>Заявок</th><th>Объём, м³</th><th>Тонны</th><th>Затраты полигона</th><th></th></tr></thead>
+  <thead><tr><th>Полигон</th><th>Контакты и заезд</th><th>Тарифы</th><th>Заявок</th><th>Объём, м³</th><th>Тонны</th><th>Затраты полигона</th><th></th></tr></thead>
   <tbody>
   {% for it in items %}
-  <tr><td><b>{{ it.name }}</b><br><span class="muted">{{ it.polygon.address or '' }}</span></td><td>{{ it.polygon.contact or '—' }}{% if it.polygon.phone %}<br><a href="tel:{{ it.polygon.phone }}">{{ it.polygon.phone }}</a>{% endif %}{% if it.polygon.entry_notes %}<br><span class="muted">{{ it.polygon.entry_notes }}</span>{% endif %}{% if it.polygon.navigator_url %}<br><a href="{{ it.polygon.navigator_url }}" target="_blank" rel="noopener noreferrer">Открыть в Яндекс.Навигаторе</a>{% endif %}</td><td>{{ it.trips }}</td><td>{{ it.volume }}</td><td>{{ it.tonnage }}</td><td>{{ "{:,.0f}".format(it.sum).replace(",", " ") }} ₽</td><td class="actions-cell">{% if user.role == 'admin' %}<a class="btn btn-ghost btn-sm" href="/settings/polygons/{{ it.id }}/edit">Редактировать</a> {% endif %}<a class="link" href="/export/polygon.csv?polygon_id={{ it.id }}&date_from={{ date_from }}&date_to={{ date_to }}">CSV</a></td></tr>
+  <tr><td><b>{{ it.name }}</b><br><span class="muted">{{ it.polygon.address or '' }}</span></td><td>{{ it.polygon.contact or '—' }}{% if it.polygon.phone %}<br><a href="tel:{{ it.polygon.phone }}">{{ it.polygon.phone }}</a>{% endif %}{% if it.polygon.entry_notes %}<br><span class="muted">{{ it.polygon.entry_notes }}</span>{% endif %}{% if it.polygon.navigator_url %}<br><a href="{{ it.polygon.navigator_url }}" target="_blank" rel="noopener noreferrer">Открыть в Яндекс.Навигаторе</a>{% endif %}</td><td><div class="polygon-tariff-list">{% for pt in it.polygon.tariffs %}<span class="polygon-tariff-chip">{{ pt.cargo_type.name }} — {{ "{:,.2f}".format(pt.rate or 0).replace(",", " ").replace(".00", "") }} ₽/{{ pt.unit }}</span>{% else %}<span class="muted">Не настроены</span>{% endfor %}</div></td><td>{{ it.trips }}</td><td>{{ it.volume }}</td><td>{{ it.tonnage }}</td><td>{{ "{:,.0f}".format(it.sum).replace(",", " ") }} ₽</td><td class="actions-cell">{% if user.role == 'admin' %}<a class="btn btn-ghost btn-sm" href="/settings/polygons/{{ it.id }}/edit">Редактировать</a> {% endif %}<a class="link" href="/export/polygon.csv?polygon_id={{ it.id }}&date_from={{ date_from }}&date_to={{ date_to }}">CSV</a></td></tr>
   {% endfor %}
   </tbody>
 </table></div>
+<script>
+(() => {
+  const rows = document.getElementById('polygons-page-tariff-rows');
+  const template = document.getElementById('polygons-page-tariff-template');
+  const add = document.getElementById('polygons-page-add-tariff');
+  if (!rows || !template || !add) return;
+  const syncUnit = select => {
+    const row = select.closest('.polygon-tariff-row');
+    const unit = row.querySelector('.polygon-unit-select');
+    const suggested = select.options[select.selectedIndex]?.dataset?.unit || '';
+    if (suggested === 'т' || suggested.toLowerCase().startsWith('т')) unit.value = 'т';
+    else if (suggested) unit.value = 'м³';
+  };
+  const updateRemove = () => rows.querySelectorAll('.polygon-tariff-remove').forEach(button => { button.disabled = rows.children.length === 1; });
+  rows.addEventListener('change', event => { if (event.target.matches('.polygon-cargo-select')) syncUnit(event.target); });
+  rows.addEventListener('click', event => {
+    const button = event.target.closest('.polygon-tariff-remove');
+    if (!button || rows.children.length === 1) return;
+    button.closest('.polygon-tariff-row').remove(); updateRemove();
+  });
+  add.addEventListener('click', () => { rows.appendChild(template.content.cloneNode(true)); updateRemove(); });
+  updateRemove();
+})();
+</script>
 {% endblock %}

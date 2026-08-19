@@ -2,45 +2,91 @@
 {% block content %}
 <div class="page-header"><h1>Настройки</h1></div>
 
-<h3>Тарифы</h3>
-<table class="table">
-  <thead><tr><th>Название</th><th>Направление</th><th>Формула</th><th>Ставка за рейс</th><th>Активен</th><th></th></tr></thead>
-  <tbody>
-  {% for t in tariffs %}
-  <tr>
-    <td>{{ t.title }}</td>
-    <td>{{ t.kind.value }}</td>
-    <td>{{ t.formula }}</td>
-    <td>{{ t.trip_price }}</td>
-    <td>{{ 'Да' if t.is_active else 'Нет' }}</td>
-    <td>
-      <form method="post" action="/settings/tariffs/{{ t.id }}/delete" onsubmit="return confirm('Удалить?')">
-        <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
-      </form>
-    </td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
+<nav class="settings-section-nav" aria-label="Разделы настроек">
+  <a href="#vehicle-types">Типы автомобилей</a>
+  <a href="#routes">Объекты и маршруты</a>
+  <a href="#tariffs">Тарифы пухтовозов</a>
+  <a href="#tariffs-samosval">Тарифы самосвалов</a>
+  <a href="#vehicles">Автомобили</a>
+  <a href="#customers">Заказчики</a>
+  <a href="#cargo">Типы грузов</a>
+  <a href="#polygons">Полигоны и тарифы</a>
+  {% if user.role == 'admin' %}<a href="#integrations">Интеграции</a>{% endif %}
+</nav>
+
+<h3 id="vehicle-types" data-settings-section>Типы автомобилей</h3>
+<table class="table"><thead><tr><th>Название</th><th>Направление</th><th></th></tr></thead><tbody>
+{% for vt in vtypes %}<tr><td>{{ vt.name }}</td><td>{{ vt.kind.value }}</td><td class="actions-cell"><a class="btn btn-ghost btn-sm" href="/settings/vehicle-types/{{ vt.id }}/edit">Редактировать</a><form method="post" action="/settings/vehicle-types/{{ vt.id }}/delete" onsubmit="return confirm('Удалить?')"><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>{% endfor %}
+</tbody></table>
+<form method="post" action="/settings/vehicle-types" class="filters"><input name="name" placeholder="Название типа" required /><select name="kind"><option value="пухтовоз">Пухтовоз</option><option value="самосвал">Самосвал</option></select><input name="description" placeholder="Описание" /><button class="btn" type="submit">Добавить тип</button></form>
+
+<h3 id="routes" data-settings-section>Объекты и маршруты</h3>
+<table class="table"><thead><tr><th>Название</th><th>Подача</th><th>Выгрузка</th><th>Км</th><th></th></tr></thead><tbody>
+{% for r in routes %}<tr><td>{{ r.name }}</td><td>{{ r.load_address or '' }}</td><td>{{ r.unload_address or '' }}</td><td>{{ r.distance or 0 }}</td><td class="actions-cell"><a class="btn btn-ghost btn-sm" href="/settings/routes/{{ r.id }}/edit">Редактировать</a><form method="post" action="/settings/routes/{{ r.id }}/delete" onsubmit="return confirm('Удалить?')"><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>{% endfor %}
+</tbody></table>
+<form method="post" action="/settings/routes" class="filters"><input name="name" placeholder="Название объекта или маршрута" required /><input name="load_address" placeholder="Адрес подачи" /><input name="unload_address" placeholder="Адрес выгрузки" /><input name="distance" type="number" step="any" placeholder="Км" /><select name="customer_id"><option value="">— заказчик —</option>{% for c in customers %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select><input name="comment" placeholder="Комментарий" /><button class="btn" type="submit">Добавить объект</button></form>
+
+<h3 id="tariffs" data-settings-section>Тарифы пухтовозов</h3>
+<div class="table-wrap"><table class="table">
+  <thead><tr><th>Название тарифа</th><th>Стоимость рейса, ₽</th><th>Активен</th><th></th></tr></thead>
+  <tbody>{% for t in tariffs if t.kind.value == 'пухтовоз' %}<tr><td>{{ t.title }}</td><td>{{ t.trip_price or 0 }}</td><td>{{ 'Да' if t.is_active else 'Нет' }}</td><td class="actions-cell"><a class="btn btn-ghost btn-sm" href="/settings/tariffs/{{ t.id }}/edit">Редактировать</a><form method="post" action="/settings/tariffs/{{ t.id }}/delete" onsubmit="return confirm('Удалить?')"><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>{% else %}<tr><td colspan="4">Тарифов пухтовозов нет</td></tr>{% endfor %}</tbody>
+</table></div>
 {% if user.role in ['admin','logist'] %}
-<form method="post" action="/settings/tariffs" class="filters">
-  <input name="title" placeholder="Название" required />
-  <select name="kind">
-    <option value="pukhtovoz">Пухтовоз</option>
-    <option value="samosval">Самосвал</option>
-  </select>
-  <select name="formula">
-    <option value="trip">За рейс</option>
-    <option value="km">За км</option>
-    <option value="volume">За объем</option>
-  </select>
-  <input name="trip_price" type="number" step="any" placeholder="Ставка" required />
-  <label><input type="checkbox" name="is_active" checked /> Активен</label>
-  <button class="btn" type="submit">Добавить тариф</button>
-</form>
+<div class="form tariff-grid-form"><form id="pukhtovoz-tariff-form" method="post" action="/settings/tariffs/pukhtovoz-grid">
+  <div id="pukhtovoz-tariff-rows" class="tariff-grid-rows">
+    <div class="tariff-grid-row tariff-grid-row--pukhtovoz"><label>Название тарифа<input name="pukhtovoz_title" required /></label><label>Стоимость рейса, ₽<input type="number" min="0" step="any" name="pukhtovoz_price" required /></label><button class="btn btn-ghost btn-sm tariff-row-remove" type="button">Убрать строку</button></div>
+  </div>
+  <template id="pukhtovoz-tariff-row-template"><div class="tariff-grid-row tariff-grid-row--pukhtovoz"><label>Название тарифа<input name="pukhtovoz_title" required /></label><label>Стоимость рейса, ₽<input type="number" min="0" step="any" name="pukhtovoz_price" required /></label><button class="btn btn-ghost btn-sm tariff-row-remove" type="button">Убрать строку</button></div></template>
+  <label><input type="checkbox" name="is_active" checked /> Активны</label>
+  <div class="form-row tariff-grid-actions"><button id="add-pukhtovoz-tariff-row" class="btn btn-ghost" type="button">Добавить тариф</button><button class="btn btn-primary" type="submit">Сохранить тарифы</button></div>
+</form></div>
 {% endif %}
 
-<h3>Автомобили</h3>
+<h3 id="tariffs-samosval" data-settings-section>Тарифы самосвалов</h3>
+<div class="table-wrap"><table class="table">
+  <thead><tr><th>Название тарифа</th><th>Объём, м³</th><th>Километры</th><th>Стоимость рейса, ₽</th><th>Активен</th><th></th></tr></thead>
+  <tbody>{% for t in tariffs if t.kind.value == 'самосвал' %}<tr><td>{{ t.title }}</td><td>{{ t.min_volume or 0 }}</td><td>{{ t.min_km or 0 }}</td><td>{{ t.trip_price or 0 }}</td><td>{{ 'Да' if t.is_active else 'Нет' }}</td><td class="actions-cell"><a class="btn btn-ghost btn-sm" href="/settings/tariffs/{{ t.id }}/edit">Редактировать</a><form method="post" action="/settings/tariffs/{{ t.id }}/delete" onsubmit="return confirm('Удалить?')"><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>{% else %}<tr><td colspan="6">Тарифов самосвалов нет</td></tr>{% endfor %}</tbody>
+</table></div>
+{% if user.role in ['admin','logist'] %}
+<div class="form tariff-grid-form"><form id="samosval-tariff-form" method="post" action="/settings/tariffs/samosval-grid">
+  <div id="samosval-tariff-rows" class="tariff-grid-rows">
+    <div class="tariff-grid-row tariff-grid-row--samosval"><label>Название тарифа<input name="samosval_title" required /></label><label>Объём, м³<input type="number" min="0" step="any" name="samosval_volume" required /></label><label>Километры<input type="number" min="0" step="any" name="samosval_km" required /></label><label>Стоимость рейса, ₽<input type="number" min="0" step="any" name="samosval_price" required /></label><button class="btn btn-ghost btn-sm tariff-row-remove" type="button">Убрать строку</button></div>
+  </div>
+  <template id="samosval-tariff-row-template"><div class="tariff-grid-row tariff-grid-row--samosval"><label>Название тарифа<input name="samosval_title" required /></label><label>Объём, м³<input type="number" min="0" step="any" name="samosval_volume" required /></label><label>Километры<input type="number" min="0" step="any" name="samosval_km" required /></label><label>Стоимость рейса, ₽<input type="number" min="0" step="any" name="samosval_price" required /></label><button class="btn btn-ghost btn-sm tariff-row-remove" type="button">Убрать строку</button></div></template>
+  <label><input type="checkbox" name="is_active" checked /> Активны</label>
+  <div class="form-row tariff-grid-actions"><button id="add-samosval-tariff-row" class="btn btn-ghost" type="button">Добавить тариф</button><button class="btn btn-primary" type="submit">Сохранить тарифы</button></div>
+</form></div>
+{% endif %}
+
+<script>
+(() => {
+  const bindTariffGrid = (prefix) => {
+    const rows = document.getElementById(`${prefix}-tariff-rows`);
+    const template = document.getElementById(`${prefix}-tariff-row-template`);
+    const addButton = document.getElementById(`add-${prefix}-tariff-row`);
+    if (!rows || !template || !addButton) return;
+    const updateRemoveButtons = () => {
+      const buttons = rows.querySelectorAll('.tariff-row-remove');
+      buttons.forEach(button => { button.disabled = buttons.length === 1; });
+    };
+    rows.addEventListener('click', event => {
+      const button = event.target.closest('.tariff-row-remove');
+      if (!button || rows.children.length === 1) return;
+      button.closest('.tariff-grid-row').remove();
+      updateRemoveButtons();
+    });
+    addButton.addEventListener('click', () => {
+      rows.appendChild(template.content.cloneNode(true));
+      updateRemoveButtons();
+    });
+    updateRemoveButtons();
+  };
+  bindTariffGrid('pukhtovoz');
+  bindTariffGrid('samosval');
+})();
+</script>
+
+<h3 id="vehicles" data-settings-section>Автомобили</h3>
 <table class="table">
   <thead><tr><th>Имя</th><th>Госномер</th><th>Тип</th><th>Вместимость</th><th></th></tr></thead>
   <tbody>
@@ -51,6 +97,7 @@
     <td>{{ v.type.name if v.type else '' }}</td>
     <td>{{ v.capacity }}</td>
     <td>
+      <a class="btn btn-ghost btn-sm" href="/settings/vehicles/{{ v.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/vehicles/{{ v.id }}/delete" onsubmit="return confirm('Удалить?')">
         <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
       </form>
@@ -73,15 +120,16 @@
 </form>
 {% endif %}
 
-<h3>Заказчики</h3>
+<h3 id="customers" data-settings-section>Заказчики</h3>
 <table class="table">
-  <thead><tr><th>Имя</th><th>Адрес</th><th></th></tr></thead>
+  <thead><tr><th>Имя</th><th>ИНН</th><th>Bitrix ID</th><th>Адрес</th><th></th></tr></thead>
   <tbody>
   {% for c in customers %}
   <tr>
     <td>{{ c.name }}</td>
-    <td>{{ c.address }}</td>
+    <td>{{ c.inn or '—' }}</td><td>{{ c.bitrix_company_id or '—' }}</td><td>{{ c.address }}</td>
     <td>
+      <a class="btn btn-ghost btn-sm" href="/settings/customers/{{ c.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/customers/{{ c.id }}/delete" onsubmit="return confirm('Удалить?')">
         <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
       </form>
@@ -93,20 +141,23 @@
 {% if user.role in ['admin','logist'] %}
 <form method="post" action="/settings/customers" class="filters">
   <input name="name" placeholder="Имя" required />
+  <input name="inn" inputmode="numeric" placeholder="ИНН" />
+  <input name="bitrix_company_id" type="number" min="1" placeholder="Bitrix ID компании" />
   <input name="address" placeholder="Адрес" />
   <button class="btn" type="submit">Добавить</button>
 </form>
 {% endif %}
 
-<h3>Типы грузов</h3>
+<h3 id="cargo" data-settings-section>Типы грузов</h3>
 <table class="table">
   <thead><tr><th>Имя</th><th>Единица</th><th></th></tr></thead>
   <tbody>
   {% for c in cargo_types %}
   <tr>
     <td>{{ c.name }}</td>
-    <td>{{ c.unit }}</td>
+    <td>{{ (c.unit or '')|replace('м3', 'м³') }}</td>
     <td>
+      <a class="btn btn-ghost btn-sm" href="/settings/cargo-types/{{ c.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/cargo-types/{{ c.id }}/delete" onsubmit="return confirm('Удалить?')">
         <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
       </form>
@@ -123,15 +174,25 @@
 </form>
 {% endif %}
 
-<h3>Полигоны</h3>
+<h3 id="polygons" data-settings-section>Полигоны и тарифы</h3>
 <table class="table">
-  <thead><tr><th>Название</th><th>Адрес</th><th></th></tr></thead>
+  <thead><tr><th>Название</th><th>Адрес</th><th>Тарифы по типам груза</th><th></th></tr></thead>
   <tbody>
   {% for p in polygons %}
   <tr>
     <td>{{ p.name }}</td>
     <td>{{ p.address }}</td>
     <td>
+      <div class="polygon-tariff-list">
+      {% for pt in polygon_tariffs if pt.polygon_id == p.id %}
+        <span class="polygon-tariff-chip">{{ pt.cargo_type.name }} — {{ "{:,.2f}".format(pt.rate or 0).replace(",", " ").replace(".00", "") }} ₽/{{ pt.unit }}</span>
+      {% else %}
+        <span class="muted">Тарифы не настроены</span>
+      {% endfor %}
+      </div>
+    </td>
+    <td>
+      <a class="btn btn-ghost btn-sm" href="/settings/polygons/{{ p.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/polygons/{{ p.id }}/delete" onsubmit="return confirm('Удалить?')">
         <button class="btn btn-ghost btn-sm" type="submit">Удалить</button>
       </form>
@@ -144,18 +205,91 @@
 <form method="post" action="/settings/polygons" class="filters">
   <input name="name" placeholder="Название" required />
   <input name="address" placeholder="Адрес" />
+  <input name="contact" placeholder="Контактное лицо" />
+  <input name="phone" placeholder="Телефон" type="tel" />
   <button class="btn" type="submit">Добавить</button>
 </form>
 {% endif %}
 
-{% if user.role in ['admin','logist'] %}
+{% if user.role in ['admin','logist'] and polygons and cargo_types %}
+<div class="form polygon-tariff-manager">
+  <form method="post" action="/polygon-tariffs" id="settings-polygon-tariff-form">
+    <input type="hidden" name="return_to" value="/settings#polygons" />
+    <label>Полигон
+      <select name="polygon_id" required>
+        <option value="">— выберите полигон —</option>
+        {% for p in polygons %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <div class="polygon-tariff-grid" id="settings-polygon-tariff-rows">
+      <div class="polygon-tariff-row">
+        <label>Тип груза<select name="cargo_type_id" class="polygon-cargo-select" required><option value="">— выберите —</option>{% for c in cargo_types %}<option value="{{ c.id }}" data-unit="{{ (c.unit or 'м³')|replace('м3','м³') }}">{{ c.name }}</option>{% endfor %}</select></label>
+        <label>Стоимость, ₽<input name="rate" type="number" min="0" step="any" required /></label>
+        <label>Единица<select name="unit" class="polygon-unit-select" required><option value="м³">₽/м³</option><option value="т">₽/т</option></select></label>
+        <button class="btn btn-ghost btn-sm polygon-tariff-remove" type="button">Убрать строку</button>
+      </div>
+    </div>
+    <template id="settings-polygon-tariff-template">
+      <div class="polygon-tariff-row">
+        <label>Тип груза<select name="cargo_type_id" class="polygon-cargo-select" required><option value="">— выберите —</option>{% for c in cargo_types %}<option value="{{ c.id }}" data-unit="{{ (c.unit or 'м³')|replace('м3','м³') }}">{{ c.name }}</option>{% endfor %}</select></label>
+        <label>Стоимость, ₽<input name="rate" type="number" min="0" step="any" required /></label>
+        <label>Единица<select name="unit" class="polygon-unit-select" required><option value="м³">₽/м³</option><option value="т">₽/т</option></select></label>
+        <button class="btn btn-ghost btn-sm polygon-tariff-remove" type="button">Убрать строку</button>
+      </div>
+    </template>
+    <p class="muted">Можно добавить сразу несколько типов груза для одного полигона. Если такой тип уже есть, его стоимость обновится.</p>
+    <div class="form-row tariff-grid-actions">
+      <button class="btn btn-ghost" type="button" id="settings-add-polygon-tariff">Добавить ещё тип груза</button>
+      <button class="btn btn-primary" type="submit">Сохранить тарифы полигона</button>
+    </div>
+  </form>
+</div>
+
+{% if polygon_tariffs %}
+<div class="table-wrap"><table class="table">
+  <thead><tr><th>Полигон</th><th>Тип груза</th><th>Стоимость</th><th>Единица</th><th></th></tr></thead>
+  <tbody>
+  {% for pt in polygon_tariffs %}
+  <tr><td>{{ pt.polygon.name }}</td><td>{{ pt.cargo_type.name }}</td><td>{{ "{:,.2f}".format(pt.rate or 0).replace(",", " ").replace(".00", "") }} ₽</td><td>₽/{{ pt.unit }}</td><td><form method="post" action="/polygon-tariffs/{{ pt.id }}/delete" onsubmit="return confirm('Удалить тариф полигона?')"><input type="hidden" name="return_to" value="/settings#polygons" /><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endif %}
+{% endif %}
+
+<script>
+(() => {
+  const rows = document.getElementById('settings-polygon-tariff-rows');
+  const template = document.getElementById('settings-polygon-tariff-template');
+  const add = document.getElementById('settings-add-polygon-tariff');
+  if (!rows || !template || !add) return;
+  const syncUnit = select => {
+    const row = select.closest('.polygon-tariff-row');
+    const unit = row.querySelector('.polygon-unit-select');
+    const suggested = select.options[select.selectedIndex]?.dataset?.unit || '';
+    if (suggested === 'т' || suggested.toLowerCase().startsWith('т')) unit.value = 'т';
+    else if (suggested) unit.value = 'м³';
+  };
+  const updateRemove = () => rows.querySelectorAll('.polygon-tariff-remove').forEach(button => { button.disabled = rows.children.length === 1; });
+  rows.addEventListener('change', event => { if (event.target.matches('.polygon-cargo-select')) syncUnit(event.target); });
+  rows.addEventListener('click', event => {
+    const button = event.target.closest('.polygon-tariff-remove');
+    if (!button || rows.children.length === 1) return;
+    button.closest('.polygon-tariff-row').remove(); updateRemove();
+  });
+  add.addEventListener('click', () => { rows.appendChild(template.content.cloneNode(true)); updateRemove(); });
+  updateRemove();
+})();
+</script>
+
+{% if user.role == 'admin' %}
+<h3 id="integrations" data-settings-section>Интеграции</h3>
 <form method="post" action="/settings/integrations" class="filters" style="margin-top:18px">
-  <h3>Интеграции</h3>
   <label>Битрикс24 вебхук URL
-    <input name="webhook_url" value="{{ integrations.get('bitrix24').webhook_url if integrations.get('bitrix24') else '' }}" placeholder="https://..." />
+    <input type="password" name="webhook_url" value="" autocomplete="new-password" placeholder="{% if integrations.get('bitrix24') and integrations.get('bitrix24').webhook_url %}URL сохранён — оставьте пустым без изменений{% else %}https://...{% endif %}" />
   </label>
   <label>Ключ интеграции
-    <input name="secret" value="{{ integrations.get('bitrix24').secret if integrations.get('bitrix24') else '' }}" placeholder="секрет" />
+    <input type="password" name="secret" value="" autocomplete="new-password" placeholder="{% if integrations.get('bitrix24') and integrations.get('bitrix24').secret %}Ключ сохранён — оставьте пустым без изменений{% else %}секрет{% endif %}" />
   </label>
   <label>Ответственный
     <input name="responsible_id" value="{{ integrations.get('bitrix24').responsible_id if integrations.get('bitrix24') else '' }}" placeholder="ID пользователя" />
@@ -165,4 +299,42 @@
 </form>
 <p><a class="btn btn-ghost" href="/settings/bitrix/test" target="_blank">Проверить подключение и показать смарт-процессы</a></p>
 {% endif %}
+
+<script>
+(() => {
+  const root = document.querySelector('main.container');
+  if (!root) return;
+  const headings = [...root.querySelectorAll(':scope > h3[data-settings-section]')];
+  const sections = headings.map((heading, index) => {
+    const nextHeading = headings[index + 1] || null;
+    const section = document.createElement('details');
+    section.className = 'settings-section';
+    section.dataset.anchor = heading.id;
+    const summary = document.createElement('summary');
+    summary.textContent = heading.textContent;
+    heading.before(section);
+    section.appendChild(summary);
+    let node = heading.nextSibling;
+    heading.remove();
+    while (node && node !== nextHeading) {
+      const next = node.nextSibling;
+      section.appendChild(node);
+      node = next;
+    }
+    return section;
+  });
+
+  const openHashSection = () => {
+    const anchor = window.location.hash.slice(1);
+    if (!anchor) return;
+    const section = sections.find(item => item.dataset.anchor === anchor);
+    if (!section) return;
+    sections.forEach(item => { item.open = false; });
+    section.open = true;
+    window.requestAnimationFrame(() => section.scrollIntoView({ block: 'start' }));
+  };
+  openHashSection();
+  window.addEventListener('hashchange', openHashSection);
+})();
+</script>
 {% endblock %}
