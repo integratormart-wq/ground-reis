@@ -39,11 +39,14 @@
       <label>Телефон на объекте<input type="tel" name="site_contact_phone" value="{{ (editing.site_contact_phone or '') if editing else '' }}" placeholder="+7 999 000-00-00" /></label>
       <label class="wide">Комментарий к контакту<input name="site_contact_comment" value="{{ (editing.site_contact_comment or '') if editing else '' }}" placeholder="Например: позвонить за 20 минут" /></label>
       <label>Полигон
-        <select name="polygon_id">
+        <select name="polygon_id" id="polygon_id">
           <option value="">— выберите —</option>
-          {% for p in polygons %}<option value="{{ p.id }}" {% if editing and editing.polygon_id == p.id %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
+          {% for p in polygons %}<option value="{{ p.id }}" data-address="{{ p.address or '' }}" data-contact="{{ p.contact or '' }}" data-phone="{{ p.phone or '' }}" {% if editing and editing.polygon_id == p.id %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
         </select>
       </label>
+      <label>Адрес полигона<input id="polygon_address" value="" placeholder="Выберите полигон" readonly /></label>
+      <label>Контактное лицо полигона<input id="polygon_contact" value="" placeholder="Выберите полигон" readonly /></label>
+      <label>Телефон полигона<input id="polygon_phone" value="" placeholder="Выберите полигон" readonly /></label>
       <label>Тип груза
         <select name="cargo_type_id">
           <option value="">— выберите —</option>
@@ -112,6 +115,19 @@
 </form>
 
 <script>
+const polygonEl = document.getElementById('polygon_id');
+const polygonAddressEl = document.getElementById('polygon_address');
+const polygonContactEl = document.getElementById('polygon_contact');
+const polygonPhoneEl = document.getElementById('polygon_phone');
+function syncPolygonDetails(){
+  const option = polygonEl.options[polygonEl.selectedIndex];
+  polygonAddressEl.value = option && option.dataset ? (option.dataset.address || '') : '';
+  polygonContactEl.value = option && option.dataset ? (option.dataset.contact || '') : '';
+  polygonPhoneEl.value = option && option.dataset ? (option.dataset.phone || '') : '';
+}
+polygonEl.addEventListener('change', syncPolygonDetails);
+syncPolygonDetails();
+
 const tariffs = [
 {% for t in tariffs %}
 {{ {
