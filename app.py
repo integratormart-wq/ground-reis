@@ -1257,10 +1257,27 @@ def day_reports(
         driver_value = _form_fk(db, models.User, driver_id, "Водитель")
         query = query.filter(models.DriverDayReport.driver_id == driver_value)
     rows = query.order_by(models.DriverDayReport.report_date.desc()).all()
+    trips_by_report = {row.id: [] for row in rows}
+    if rows:
+        report_keys = {(row.driver_id, row.report_date) for row in rows}
+        driver_ids = {row.driver_id for row in rows}
+        report_dates = {row.report_date for row in rows}
+        trips = db.query(models.TripRequest).filter(
+            models.TripRequest.driver_id.in_(driver_ids),
+            models.TripRequest.planned_date.in_(report_dates),
+        ).order_by(models.TripRequest.planned_date.desc(), models.TripRequest.planned_time, models.TripRequest.id).all()
+        grouped_trips = {}
+        for trip in trips:
+            key = (trip.driver_id, trip.planned_date)
+            if key in report_keys:
+                grouped_trips.setdefault(key, []).append(trip)
+        for row in rows:
+            trips_by_report[row.id] = grouped_trips.get((row.driver_id, row.report_date), [])
     drivers = db.query(models.User).filter(models.User.role == UserRole.DRIVER).order_by(models.User.full_name).all()
     return render_template("day_reports.html", {
         "request": request, "user": current_user, "menu": menu_for(current_user.role),
-        "rows": rows, "drivers": drivers, "date_from": date_from or "", "date_to": date_to or "",
+        "rows": rows, "trips_by_report": trips_by_report, "drivers": drivers,
+        "date_from": date_from or "", "date_to": date_to or "",
         "selected_driver_id": driver_id or "", "app_name": "ГРАУНД | Рейсы",
     })
 
