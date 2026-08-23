@@ -7,34 +7,57 @@
   <div class="card"><div class="card-title">Подача машины</div><div class="card-value">{{ req.planned_date.strftime('%d.%m.%Y') }}{% if req.planned_time %}, {{ req.planned_time[:5] }}{% endif %}</div></div>
   <div class="card"><div class="card-title">Сумма водителю</div><div class="card-value">{{ "%.0f"|format(req.sum_driver or 0) }} ₽</div></div>
 </div>
-<div class="details">
-  <div><b>Водитель:</b> {{ req.driver.full_name if req.driver else '—' }}</div>
-  <div><b>Автомобиль:</b> {{ req.vehicle.name if req.vehicle else '—' }}</div>
-  <div><b>Госномер:</b> {{ req.vehicle.plate if req.vehicle else '—' }}</div>
-  <div><b>Адрес подачи:</b> {{ req.load_address }}</div>
-  <div><b>Адрес выгрузки:</b> {{ req.unload_address }}</div>
-  <div><b>Маршрут:</b> {{ req.route_name }}</div>
-  <div><b>Километраж:</b> {{ req.km }}</div>
-  <div><b>Объём:</b> {{ req.volume }}</div>
-  <div><b>Тоннаж:</b> {{ req.tonnage if req.tonnage is not none else '—' }}{% if req.tonnage is not none %} т{% endif %}</div>
-  <div><b>Рейсов:</b> {{ req.trips_count }}</div>
-  <div><b>Факт. км:</b> {{ req.actual_km if req.actual_km is not none else '—' }}</div>
-  <div><b>Фактический объём:</b> {{ req.actual_volume if req.actual_volume is not none else '—' }}</div>
-  <div><b>Фактический тоннаж:</b> {{ req.actual_tonnage if req.actual_tonnage is not none else '—' }}{% if req.actual_tonnage is not none %} т{% endif %}</div>
-  <div><b>Холостой прогон:</b> {{ 'Да' if req.is_empty_run else 'Нет' }}{% if req.empty_run_comment %} — {{ req.empty_run_comment }}{% endif %}</div>
-  <div><b>Простой:</b> {% if req.has_downtime %}{{ req.downtime_minutes or 0 }} мин{% if req.downtime_comment %} — {{ req.downtime_comment }}{% endif %}{% else %}Нет{% endif %}</div>
-  <div><b>Тариф:</b> {{ req.tariff.title if req.tariff else '—' }}</div>
-  <div><b>Полигон:</b> {{ req.polygon.name if req.polygon else '—' }}</div>
-  {% if req.polygon %}
-  <div><b>Адрес полигона:</b> {{ req.polygon.address or '—' }}</div>
-  <div><b>Диспетчер / контакт полигона:</b> {{ req.polygon.contact or '—' }}</div>
-  <div><b>Телефон диспетчера:</b> {% if req.polygon.phone %}<a class="link" href="tel:{{ req.polygon.phone }}">{{ req.polygon.phone }}</a>{% else %}—{% endif %}</div>
-  <div><b>Навигация:</b> {% if req.polygon.navigator_url %}<a class="btn btn-primary btn-sm" href="{{ req.polygon.navigator_url }}" target="_blank" rel="noopener noreferrer">Открыть в навигаторе</a>{% else %}—{% endif %}</div>
-  {% endif %}
-  <div><b>Комментарий:</b> {{ req.comment or '—' }}</div>
-  <div><b>Контакт на объекте:</b> {{ req.site_contact_name or '—' }}</div>
-  <div><b>Телефон объекта:</b> {% if req.site_contact_phone %}<a class="link" href="tel:{{ req.site_contact_phone }}">{{ req.site_contact_phone }}</a>{% else %}—{% endif %}</div>
-  <div><b>Комментарий к контакту:</b> {{ req.site_contact_comment or '—' }}</div>
+<div class="request-form" style="margin-top:16px">
+  <section class="form-section">
+    <div class="form-section-head"><span class="form-section-index">01</span><h2>Клиент и объект</h2></div>
+    <div class="details" style="margin:0;border:0;border-radius:0;box-shadow:none;background:transparent">
+      <div><b>Заказчик:</b> {{ req.customer.name if req.customer else '—' }}</div>
+      <div><b>Адрес подачи:</b> {{ req.load_address or '—' }}</div>
+      <div><b>Адрес выгрузки:</b> {{ req.unload_address or '—' }}</div>
+      <div><b>Контакт на объекте:</b> {{ req.site_contact_name or '—' }}</div>
+      <div><b>Телефон объекта:</b> {% if req.site_contact_phone %}<a class="link" href="tel:{{ req.site_contact_phone }}">{{ req.site_contact_phone }}</a>{% else %}—{% endif %}</div>
+      <div><b>Комментарий к контакту:</b> {{ req.site_contact_comment or '—' }}</div>
+    </div>
+  </section>
+
+  <section class="form-section">
+    <div class="form-section-head"><span class="form-section-index">02</span><h2>Полигон</h2></div>
+    <div class="details" style="margin:0;border:0;border-radius:0;box-shadow:none;background:transparent">
+      <div><b>Полигон:</b> {{ req.polygon.name if req.polygon else '—' }}</div>
+      <div><b>Адрес полигона:</b> {{ req.polygon.address if req.polygon and req.polygon.address else '—' }}</div>
+      <div><b>Диспетчер / контакт:</b> {{ req.polygon.contact if req.polygon and req.polygon.contact else '—' }}</div>
+      <div><b>Телефон диспетчера:</b> {% if req.polygon and req.polygon.phone %}<a class="link" href="tel:{{ req.polygon.phone }}">{{ req.polygon.phone }}</a>{% else %}—{% endif %}</div>
+      <div><b>Навигация:</b> {% if req.polygon and req.polygon.navigator_url %}<a class="btn btn-primary btn-sm" href="{{ req.polygon.navigator_url }}" target="_blank" rel="noopener noreferrer">Открыть в навигаторе</a>{% else %}—{% endif %}</div>
+    </div>
+  </section>
+
+  <section class="form-section">
+    <div class="form-section-head"><span class="form-section-index">03</span><h2>Рейс и техника</h2></div>
+    <div class="details" style="margin:0;border:0;border-radius:0;box-shadow:none;background:transparent">
+      <div><b>Водитель:</b> {{ req.driver.full_name if req.driver else '—' }}</div>
+      <div><b>Автомобиль:</b> {{ req.vehicle.name if req.vehicle else '—' }}</div>
+      <div><b>Госномер:</b> {{ req.vehicle.plate if req.vehicle else '—' }}</div>
+      <div><b>Маршрут:</b> {{ req.route_name or '—' }}</div>
+      <div><b>Тип груза:</b> {{ req.cargo_type.name if req.cargo_type else '—' }}</div>
+      <div><b>Километраж:</b> {{ req.km }}</div>
+      <div><b>Объём:</b> {{ req.volume }}</div>
+      <div><b>Тоннаж:</b> {{ req.tonnage if req.tonnage is not none else '—' }}{% if req.tonnage is not none %} т{% endif %}</div>
+      <div><b>Рейсов:</b> {{ req.trips_count }}</div>
+      <div><b>Тариф:</b> {{ req.tariff.title if req.tariff else '—' }}</div>
+    </div>
+  </section>
+
+  <section class="form-section">
+    <div class="form-section-head"><span class="form-section-index">04</span><h2>Фактические данные и отметки</h2></div>
+    <div class="details" style="margin:0;border:0;border-radius:0;box-shadow:none;background:transparent">
+      <div><b>Факт. км:</b> {{ req.actual_km if req.actual_km is not none else '—' }}</div>
+      <div><b>Фактический объём:</b> {{ req.actual_volume if req.actual_volume is not none else '—' }}</div>
+      <div><b>Фактический тоннаж:</b> {{ req.actual_tonnage if req.actual_tonnage is not none else '—' }}{% if req.actual_tonnage is not none %} т{% endif %}</div>
+      <div><b>Холостой прогон:</b> {{ 'Да' if req.is_empty_run else 'Нет' }}{% if req.empty_run_comment %} — {{ req.empty_run_comment }}{% endif %}</div>
+      <div><b>Простой:</b> {% if req.has_downtime %}{{ req.downtime_minutes or 0 }} мин{% if req.downtime_comment %} — {{ req.downtime_comment }}{% endif %}{% else %}Нет{% endif %}</div>
+      <div><b>Комментарий:</b> {{ req.comment or '—' }}</div>
+    </div>
+  </section>
 </div>
 {% if user.role == 'driver' %}
 {% if req.status.value in ['Новая','Назначена водителю'] %}
