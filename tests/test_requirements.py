@@ -975,3 +975,33 @@ def test_admin_day_report_includes_trip_polygon_navigation_and_dispatcher_detail
     assert 'href="https://yandex.ru/maps/?text=report-polygon"' in page.text
     assert "Открыть в навигаторе" in page.text
     db.close()
+
+
+def test_request_form_uses_client_navigation_instead_of_unload_address():
+    db, admin, driver, vt = reset_db()
+    page = client_as(admin).get("/pukhtovoz/new")
+    assert page.status_code == 200
+    assert "Навигация по объекту (Яндекс Карты)" in page.text
+    assert "Адрес выгрузки" not in page.text
+    assert 'name="unload_address"' in page.text
+    db.close()
+
+
+def test_driver_request_shows_clickable_client_yandex_navigation():
+    db, admin, driver, vt = reset_db()
+    vehicle = models.Vehicle(name="Авто объект", plate="К333КК78", type_id=vt.id, is_active=True)
+    db.add(vehicle); db.flush()
+    trip = models.TripRequest(
+        number="П-OBJ-NAV", planned_date=date(2026, 8, 24), driver_id=driver.id,
+        vehicle_id=vehicle.id, kind=models.TripType.PUKHTOVOZ,
+        status=models.RequestStatus.ASSIGNED, load_address="Москва, Объектовая 5",
+        unload_address="https://yandex.ru/maps/?text=client-object",
+    )
+    db.add(trip); db.commit()
+
+    page = client_as(driver).get(f"/requests/{trip.id}")
+    assert page.status_code == 200
+    assert "Навигация по объекту" in page.text
+    assert 'href="https://yandex.ru/maps/?text=client-object"' in page.text
+    assert "Открыть в Яндекс Картах" in page.text
+    db.close()
