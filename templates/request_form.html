@@ -34,7 +34,7 @@
       </label>
       {% if not editing %}<label>Новый заказчик<input id="customer_name_manual" name="customer_name_manual" placeholder="Введите название" /></label>{% endif %}
       <label>Адрес подачи<input name="load_address" value="{{ editing.load_address if editing else '' }}" placeholder="Откуда забрать" /></label>
-      <label>Адрес выгрузки<input name="unload_address" value="{{ editing.unload_address if editing else '' }}" placeholder="Куда доставить" /></label>
+      <label>Навигация по объекту (Яндекс Карты)<input type="url" name="unload_address" value="{{ editing.unload_address if editing else '' }}" placeholder="https://yandex.ru/maps/..." /></label>
       <label>Контакт на объекте<input name="site_contact_name" value="{{ (editing.site_contact_name or '') if editing else '' }}" placeholder="Имя или ФИО" /></label>
       <label>Телефон на объекте<input type="tel" name="site_contact_phone" value="{{ (editing.site_contact_phone or '') if editing else '' }}" placeholder="+7 999 000-00-00" /></label>
       <label class="wide">Комментарий к контакту<input name="site_contact_comment" value="{{ (editing.site_contact_comment or '') if editing else '' }}" placeholder="Например: позвонить за 20 минут" /></label>

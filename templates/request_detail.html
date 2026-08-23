@@ -13,7 +13,13 @@
     <div class="details" style="margin:0;border:0;border-radius:0;box-shadow:none;background:transparent">
       <div><b>Заказчик:</b> {{ req.customer.name if req.customer else '—' }}</div>
       <div><b>Адрес подачи:</b> {{ req.load_address or '—' }}</div>
-      <div><b>Адрес выгрузки:</b> {{ req.unload_address or '—' }}</div>
+      <div><b>Навигация по объекту:</b>
+        {% if req.unload_address and (req.unload_address.startswith('http://') or req.unload_address.startswith('https://')) %}
+        <a class="link" href="{{ req.unload_address }}" target="_blank" rel="noopener noreferrer">Открыть в Яндекс Картах</a>
+        {% elif req.unload_address %}
+        {{ req.unload_address }}
+        {% else %}—{% endif %}
+      </div>
       <div><b>Контакт на объекте:</b> {{ req.site_contact_name or '—' }}</div>
       <div><b>Телефон объекта:</b> {% if req.site_contact_phone %}<a class="link" href="tel:{{ req.site_contact_phone }}">{{ req.site_contact_phone }}</a>{% else %}—{% endif %}</div>
       <div><b>Комментарий к контакту:</b> {{ req.site_contact_comment or '—' }}</div>
