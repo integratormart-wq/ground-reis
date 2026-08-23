@@ -907,3 +907,67 @@ def test_polygon_tariffs_are_visible_in_polygon_settings_and_request_preview():
     assert '"rate": 3570' in request_page.text
     assert "syncPolygonTariff" in request_page.text
     db.close()
+
+
+def test_driver_request_shows_polygon_navigation_and_dispatcher_details():
+    db, admin, driver, vt = reset_db()
+    vehicle = models.Vehicle(name="Авто навигация", plate="Н111НН78", type_id=vt.id, is_active=True)
+    polygon = models.Polygon(
+        name="Полигон Навигация",
+        address="Ленинградская область, Полигонная 15",
+        contact="Диспетчер Сергей",
+        phone="+79995554433",
+        navigator_url="https://yandex.ru/maps/?text=polygon",
+    )
+    db.add_all([vehicle, polygon]); db.flush()
+    trip = models.TripRequest(
+        number="П-NAV", planned_date=date(2026, 8, 24), driver_id=driver.id,
+        vehicle_id=vehicle.id, polygon_id=polygon.id, kind=models.TripType.PUKHTOVOZ,
+        status=models.RequestStatus.ASSIGNED,
+    )
+    db.add(trip); db.commit()
+
+    page = client_as(driver).get(f"/requests/{trip.id}")
+    assert page.status_code == 200
+    assert "Адрес полигона" in page.text
+    assert "Ленинградская область, Полигонная 15" in page.text
+    assert "Диспетчер Сергей" in page.text
+    assert "+79995554433" in page.text
+    assert 'href="tel:+79995554433"' in page.text
+    assert 'href="https://yandex.ru/maps/?text=polygon"' in page.text
+    assert "Открыть в навигаторе" in page.text
+    db.close()
+
+
+def test_admin_day_report_includes_trip_polygon_navigation_and_dispatcher_details():
+    db, admin, driver, vt = reset_db()
+    vehicle = models.Vehicle(name="Авто отчёт", plate="О222ОО78", type_id=vt.id, is_active=True)
+    polygon = models.Polygon(
+        name="Полигон Отчёт",
+        address="Москва, Полигонная 10",
+        contact="Диспетчер Анна",
+        phone="+79990001122",
+        navigator_url="https://yandex.ru/maps/?text=report-polygon",
+    )
+    db.add_all([vehicle, polygon]); db.flush()
+    trip = models.TripRequest(
+        number="П-DAY", planned_date=date(2026, 8, 24), planned_time="12:30",
+        driver_id=driver.id, vehicle_id=vehicle.id, polygon_id=polygon.id,
+        kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.DRIVER_COMPLETED,
+    )
+    report = models.DriverDayReport(
+        report_date=date(2026, 8, 24), driver_id=driver.id, vehicle_id=vehicle.id,
+        total_km=120, odometer=45678, fuel_liters=55, comment="Смена завершена",
+    )
+    db.add_all([trip, report]); db.commit()
+
+    page = client_as(admin).get("/reports/day")
+    assert page.status_code == 200
+    assert "П-DAY" in page.text
+    assert "Полигон Отчёт" in page.text
+    assert "Москва, Полигонная 10" in page.text
+    assert "Диспетчер Анна" in page.text
+    assert "+79990001122" in page.text
+    assert 'href="https://yandex.ru/maps/?text=report-polygon"' in page.text
+    assert "Открыть в навигаторе" in page.text
+    db.close()
