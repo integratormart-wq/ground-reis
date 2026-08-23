@@ -25,6 +25,12 @@
   <div><b>Простой:</b> {% if req.has_downtime %}{{ req.downtime_minutes or 0 }} мин{% if req.downtime_comment %} — {{ req.downtime_comment }}{% endif %}{% else %}Нет{% endif %}</div>
   <div><b>Тариф:</b> {{ req.tariff.title if req.tariff else '—' }}</div>
   <div><b>Полигон:</b> {{ req.polygon.name if req.polygon else '—' }}</div>
+  {% if req.polygon %}
+  <div><b>Адрес полигона:</b> {{ req.polygon.address or '—' }}</div>
+  <div><b>Диспетчер / контакт полигона:</b> {{ req.polygon.contact or '—' }}</div>
+  <div><b>Телефон диспетчера:</b> {% if req.polygon.phone %}<a class="link" href="tel:{{ req.polygon.phone }}">{{ req.polygon.phone }}</a>{% else %}—{% endif %}</div>
+  <div><b>Навигация:</b> {% if req.polygon.navigator_url %}<a class="btn btn-primary btn-sm" href="{{ req.polygon.navigator_url }}" target="_blank" rel="noopener noreferrer">Открыть в навигаторе</a>{% else %}—{% endif %}</div>
+  {% endif %}
   <div><b>Комментарий:</b> {{ req.comment or '—' }}</div>
   <div><b>Контакт на объекте:</b> {{ req.site_contact_name or '—' }}</div>
   <div><b>Телефон объекта:</b> {% if req.site_contact_phone %}<a class="link" href="tel:{{ req.site_contact_phone }}">{{ req.site_contact_phone }}</a>{% else %}—{% endif %}</div>

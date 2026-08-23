@@ -10,7 +10,30 @@
 </form>
 </section>
 <div class="table-wrap" style="margin-top:16px"><table class="table">
-  <thead><tr><th>Дата</th><th>Водитель</th><th>Автомобиль</th><th>Км за смену</th><th>Спидометр</th><th>Топливо</th><th>Комментарий</th></tr></thead>
-  <tbody>{% for row in rows %}<tr><td>{{ row.report_date.strftime('%d.%m.%Y') }}</td><td>{{ row.driver.full_name }}</td><td>{{ row.vehicle.name }} · {{ row.vehicle.plate }}</td><td>{{ row.total_km }}</td><td>{{ row.odometer }}</td><td>{{ row.fuel_liters }} л</td><td>{{ row.comment or '—' }}</td></tr>{% else %}<tr><td colspan="7" class="muted" style="text-align:center">Ничего не найдено</td></tr>{% endfor %}</tbody>
+  <thead><tr><th>Дата</th><th>Водитель</th><th>Автомобиль</th><th>Км за смену</th><th>Спидометр</th><th>Топливо</th><th>Комментарий</th><th>Рейсы за день</th></tr></thead>
+  <tbody>{% for row in rows %}{% set trips = trips_by_report.get(row.id, []) %}<tr>
+    <td>{{ row.report_date.strftime('%d.%m.%Y') }}</td><td>{{ row.driver.full_name }}</td><td>{{ row.vehicle.name }} · {{ row.vehicle.plate }}</td><td>{{ row.total_km }}</td><td>{{ row.odometer }}</td><td>{{ row.fuel_liters }} л</td><td>{{ row.comment or '—' }}</td>
+    <td>
+      {% if trips %}
+      <details>
+        <summary class="link" style="cursor:pointer">{{ trips|length }} {{ 'рейс' if trips|length == 1 else 'рейса' if trips|length in [2,3,4] else 'рейсов' }}</summary>
+        <div style="min-width:300px;margin-top:10px;display:grid;gap:10px">
+          {% for trip in trips %}
+          <div style="padding:12px;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(255,255,255,.025)">
+            <div><a class="link" href="/requests/{{ trip.id }}">{{ trip.number }}</a>{% if trip.planned_time %} · {{ trip.planned_time[:5] }}{% endif %}</div>
+            <div><b>Полигон:</b> {{ trip.polygon.name if trip.polygon else '—' }}</div>
+            {% if trip.polygon %}
+            <div><b>Адрес:</b> {{ trip.polygon.address or '—' }}</div>
+            <div><b>Диспетчер:</b> {{ trip.polygon.contact or '—' }}</div>
+            <div><b>Телефон:</b> {% if trip.polygon.phone %}<a class="link" href="tel:{{ trip.polygon.phone }}">{{ trip.polygon.phone }}</a>{% else %}—{% endif %}</div>
+            <div style="margin-top:8px">{% if trip.polygon.navigator_url %}<a class="btn btn-primary btn-sm" href="{{ trip.polygon.navigator_url }}" target="_blank" rel="noopener noreferrer">Открыть в навигаторе</a>{% else %}<span class="muted">Ссылка на навигатор не указана</span>{% endif %}</div>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      </details>
+      {% else %}<span class="muted">Нет заявок</span>{% endif %}
+    </td>
+  </tr>{% else %}<tr><td colspan="8" class="muted" style="text-align:center">Ничего не найдено</td></tr>{% endfor %}</tbody>
 </table></div>
 {% endblock %}
