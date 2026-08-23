@@ -929,6 +929,10 @@ def test_driver_request_shows_polygon_navigation_and_dispatcher_details():
 
     page = client_as(driver).get(f"/requests/{trip.id}")
     assert page.status_code == 200
+    assert "Клиент и объект" in page.text
+    assert "Полигон" in page.text
+    assert "Рейс и техника" in page.text
+    assert "Фактические данные и отметки" in page.text
     assert "Адрес полигона" in page.text
     assert "Ленинградская область, Полигонная 15" in page.text
     assert "Диспетчер Сергей" in page.text
