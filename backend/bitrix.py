@@ -291,13 +291,22 @@ def _normalize(text) -> str:
     return re.sub(r"[^а-яa-z0-9]+", " ", str(text or "").lower().replace("ё", "е")).strip()
 
 
+def _field_label(info, fallback="") -> str:
+    if not isinstance(info, dict):
+        return str(fallback or "")
+    for key in ("title", "formLabel", "listLabel"):
+        value = info.get(key)
+        if isinstance(value, dict):
+            value = value.get("ru") or value.get("en") or next((v for v in value.values() if v), "")
+        if value not in (None, ""):
+            return str(value)
+    return str(fallback or "")
+
+
 def resolve_field_map(schema: dict) -> dict:
-    """Находит реальные коды пользовательских полей по их русским названиям."""
+    """Находит реальные коды полей по коду или русскому названию, не путая Клиента с companyId/contactIds."""
     resolved = {"number": "title"}
-    normalized_schema = {}
-    for code, info in schema.items():
-        title = info.get("title") or info.get("formLabel") or info.get("listLabel") or code
-        normalized_schema[code] = _normalize(title)
+    normalized_schema = {code: _normalize(_field_label(info, code)) for code, info in schema.items()}
     for logical, configured_code in FIELD_MAP.items():
         if logical == "number":
             continue
@@ -306,6 +315,9 @@ def resolve_field_map(schema: dict) -> dict:
             continue
         aliases = tuple(_normalize(x) for x in FIELD_TITLES.get(logical, ()))
         for code, title in normalized_schema.items():
+            # companyId/contactIds are system client links, not text field "Заказчик".
+            if logical == "customer_name" and code in {"companyId", "contactId", "contactIds"}:
+                continue
             if title in aliases or any(alias and alias in title for alias in aliases):
                 resolved[logical] = code
                 break
@@ -699,6 +711,48 @@ def sync_inbound_attachments(item: dict, trip, db, schema: dict, mapping: dict) 
     return {"ok": True, "count": len(remote_files)}
 
 
+
+
+def sync_customer_from_bitrix_event(db, settings=None, company_id=None, contact_id=None) -> dict:
+    """Обновляет локального заказчика при изменении карточки компании/контакта в Bitrix24."""
+    settings = settings or get_integration_settings(db)
+    if not settings or not settings.is_active or not settings.webhook_url:
+        return {"skipped": True, "reason": "no_active_integration"}
+    customer = None
+    if company_id:
+        customer = db.query(models.Customer).filter(models.Customer.bitrix_company_id == int(company_id)).first()
+    if customer is None and contact_id:
+        customer = db.query(models.Customer).filter(models.Customer.bitrix_contact_id == int(contact_id)).first()
+    if customer is None:
+        return {"ok": True, "skipped": True, "reason": "customer_not_linked"}
+
+    company_item = {}
+    contact_item = {}
+    if company_id or customer.bitrix_company_id:
+        company_item = fetch_item(settings.webhook_url, 4, int(company_id or customer.bitrix_company_id))
+        if "_error" in company_item:
+            return {"error": company_item["_error"], "action": "company_get"}
+    if contact_id or customer.bitrix_contact_id:
+        contact_item = fetch_item(settings.webhook_url, 3, int(contact_id or customer.bitrix_contact_id))
+        if "_error" in contact_item:
+            return {"error": contact_item["_error"], "action": "contact_get"}
+
+    if company_item:
+        new_name = str(company_item.get("title") or "").strip()
+        if new_name:
+            owner = db.query(models.Customer).filter(models.Customer.name == new_name, models.Customer.id != customer.id).first()
+            if not owner:
+                customer.name = new_name
+        customer.address = str(company_item.get("address") or "").strip()
+        customer.phone = _first_phone(company_item)
+    if contact_item:
+        customer.contact = _contact_display_name(contact_item)
+        customer.phone = _first_phone(contact_item)
+    db.add(customer)
+    db.flush()
+    print("BITRIX_CUSTOMER_INBOUND_OK", customer.id, int(company_id or 0), int(contact_id or 0), flush=True)
+    return {"ok": True, "action": "customer_update", "customer_id": customer.id}
+
 def sync_trip(req, db, settings=None) -> dict:
     settings = settings or get_integration_settings(db)
     if not settings or not settings.is_active or not settings.webhook_url:
@@ -1012,6 +1066,7 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
                 setattr(polygon, attr, str(_read_logical(item, logical, mapping) or ""))
         trip.polygon_id = polygon.id
     customer_name = str(_read_logical(item, "customer_name", mapping) or "").strip()
+    client_field_present = any(key in item for key in ("companyId", "contactId", "contactIds"))
     built_in_company_id = _optional_nonnegative_int(item.get("companyId"), "companyId") if item.get("companyId") not in (None, "", 0, "0") else None
     raw_contact_ids = item.get("contactIds") or ([] if item.get("contactId") in (None, "", 0, "0") else [item.get("contactId")])
     if not isinstance(raw_contact_ids, list):
@@ -1030,7 +1085,9 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     if built_in_company_id and "_error" not in company_item:
         customer_name = str(company_item.get("title") or customer_name or "").strip()
         customer_bitrix_id = built_in_company_id
-    if customer_name or customer_bitrix_id is not None or customer_inn or built_in_contact_id:
+    if client_field_present and not built_in_company_id and not built_in_contact_id and not customer_name and not customer_inn:
+        trip.customer_id = None
+    elif customer_name or customer_bitrix_id is not None or customer_inn or built_in_contact_id:
         customer = None
         if customer_bitrix_id is not None:
             customer = db.query(models.Customer).filter(models.Customer.bitrix_company_id == customer_bitrix_id).first()
@@ -1072,19 +1129,11 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         if built_in_contact_id:
             customer.bitrix_contact_id = built_in_contact_id
         if built_in_company_id and "_error" not in company_item:
-            company_address = str(company_item.get("address") or "").strip()
-            company_phone = _first_phone(company_item)
-            if company_address:
-                customer.address = company_address
-            if company_phone and not customer.phone:
-                customer.phone = company_phone
+            customer.address = str(company_item.get("address") or "").strip()
+            customer.phone = _first_phone(company_item)
         if built_in_contact_id and "_error" not in contact_item:
-            contact_name = _contact_display_name(contact_item)
-            contact_phone = _first_phone(contact_item)
-            if contact_name:
-                customer.contact = contact_name
-            if contact_phone:
-                customer.phone = contact_phone
+            customer.contact = _contact_display_name(contact_item)
+            customer.phone = _first_phone(contact_item)
         trip.customer_id = customer.id
         if _has_logical(item, "customer_contact_name", mapping):
             customer.contact = str(_read_logical(item, "customer_contact_name", mapping) or "")
@@ -1111,6 +1160,9 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
 
 def extract_event_identifiers(payload: dict):
     event = str(payload.get("event") or payload.get("EVENT") or "").upper()
+    match = re.match(r"^(ONCRMDYNAMICITEM(?:ADD|UPDATE|DELETE))(?:_\d+)?$", event)
+    if match:
+        event = match.group(1)
     flattened = {str(k).upper(): _scalar(v) for k, v in payload.items()}
     data = payload.get("data") or payload.get("DATA") or {}
     fields = data.get("FIELDS", {}) if isinstance(data, dict) else {}
