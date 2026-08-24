@@ -569,14 +569,8 @@ def create_request(
         raise HTTPException(409, "Заявка с таким номером уже существует")
     db.add(models.StatusHistory(trip_request_id=req.id, user_id=current_user.id, old_status=None, new_status=RequestStatus.ASSIGNED.value))
     _commit_or_conflict(db, "Заявка с таким номером уже существует")
-    global BITRIX_LAST_OUTBOUND
-    try:
-        sync_result = bitrix.sync_trip(req, db)
-        BITRIX_LAST_OUTBOUND = {"attempted": True, "request_id": req.id, "kind": req.kind.value, "result": _safe_bitrix_result(sync_result)}
-        db.commit()
-    except Exception as exc:
-        BITRIX_LAST_OUTBOUND = {"attempted": True, "request_id": req.id, "result": {"error": "bitrix_sync_error"}}
-        print("BITRIX_SYNC_EXCEPTION", type(exc).__name__, flush=True)
+    _sync_trip_outbound(req, db)
+    db.commit()
     return RedirectResponse("/pukhtovoz" if req.kind == TripType.PUKHTOVOZ else "/samosval", status_code=303)
 
 
@@ -696,7 +690,9 @@ def _safe_bitrix_result(result):
             safe[key] = result[key]
     if result.get("action") in {"add", "update", "cancel", "delete"}:
         safe["action"] = result["action"]
-    if result.get("reason") in {"no_active_integration", "foreign_process", "disabled"}:
+    if result.get("reason") in {
+        "no_active_integration", "foreign_process", "disabled", "process_not_found", "final_locked",
+    }:
         safe["reason"] = result["reason"]
     if result.get("error"):
         safe["error"] = "bitrix_sync_error"
@@ -728,6 +724,62 @@ def _sync_from_bitrix_safe(item_id, entity_type_id, db, settings):
     except Exception as exc:
         print("BITRIX_INBOUND_EXCEPTION", type(exc).__name__, flush=True)
         return {"error": "bitrix_sync_error"}
+
+
+def _persist_bitrix_outbound_state(db, state):
+    """Store only safe outbound diagnostics so Render restarts do not erase status."""
+    safe_state = _safe_bitrix_diagnostic(state)
+    try:
+        db.add(models.AuditLog(
+            user_id=None, action="sync", section="bitrix_outbound",
+            record_id=state.get("request_id") if isinstance(state.get("request_id"), int) else None,
+            new_value=json.dumps(safe_state, ensure_ascii=False),
+        ))
+        db.flush()
+    except Exception as exc:
+        print("BITRIX_DIAGNOSTIC_PERSIST_EXCEPTION", type(exc).__name__, flush=True)
+
+
+def _record_bitrix_outbound(req, db, result):
+    global BITRIX_LAST_OUTBOUND
+    state = {
+        "attempted": True,
+        "request_id": req.id,
+        "kind": req.kind.value,
+        "result": result if isinstance(result, dict) else {"error": "bitrix_sync_error"},
+    }
+    BITRIX_LAST_OUTBOUND = state
+    _persist_bitrix_outbound_state(db, state)
+    print(
+        "BITRIX_OUTBOUND_RESULT", req.id, req.kind.value,
+        json.dumps(_safe_bitrix_result(state["result"]), ensure_ascii=False),
+        flush=True,
+    )
+    return state["result"]
+
+
+def _sync_trip_outbound(req, db):
+    try:
+        result = bitrix.sync_trip(req, db)
+    except Exception as exc:
+        print("BITRIX_SYNC_EXCEPTION", type(exc).__name__, flush=True)
+        result = {"error": "bitrix_sync_error"}
+    return _record_bitrix_outbound(req, db, result)
+
+
+def _latest_bitrix_outbound_state(db):
+    row = db.query(models.AuditLog).filter(
+        models.AuditLog.section == "bitrix_outbound",
+        models.AuditLog.action == "sync",
+    ).order_by(models.AuditLog.created_at.desc(), models.AuditLog.id.desc()).first()
+    if row and row.new_value:
+        try:
+            state = json.loads(row.new_value)
+            if isinstance(state, dict):
+                return state
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return BITRIX_LAST_OUTBOUND
 
 
 def _deletable_request_ids(db, rows):
@@ -902,11 +954,8 @@ def edit_request(
     }, ensure_ascii=False)
     db.add(models.AuditLog(user_id=current_user.id, action="edit", section="trip_requests", record_id=req.id, old_value=old_snapshot, new_value=new_snapshot))
     _commit_or_conflict(db, "Не удалось сохранить заявку из-за конфликта данных")
-    try:
-        bitrix.sync_trip(req, db)
-        db.commit()
-    except Exception as exc:
-        print("BITRIX_SYNC_EXCEPTION", type(exc).__name__, flush=True)
+    _sync_trip_outbound(req, db)
+    db.commit()
     return RedirectResponse(f"/requests/{req.id}", status_code=302)
 
 
@@ -1037,10 +1086,8 @@ def accept_trip(req_id: int, current_user: models.User = Depends(get_current_use
     req.status = RequestStatus.ACCEPTED
     db.add(models.StatusHistory(trip_request_id=req.id, user_id=current_user.id, old_status=RequestStatus.ASSIGNED.value, new_status=RequestStatus.ACCEPTED.value))
     db.commit()
-    try:
-        bitrix.sync_trip(req, db); db.commit()
-    except Exception as e:
-        print("BITRIX_SYNC_EXCEPTION", type(e).__name__, flush=True)
+    _sync_trip_outbound(req, db)
+    db.commit()
     return RedirectResponse(f"/requests/{req_id}", status_code=302)
 
 @app.post("/requests/{req_id}/start")
@@ -1061,10 +1108,8 @@ def start_trip(req_id: int, actual_km: Optional[str] = Form(None), actual_volume
     req.actual_km, req.actual_volume = km_value, volume_value
     db.add(models.StatusHistory(trip_request_id=req.id, user_id=current_user.id, old_status=RequestStatus.ACCEPTED.value, new_status=RequestStatus.IN_WORK.value))
     db.commit()
-    try:
-        bitrix.sync_trip(req, db); db.commit()
-    except Exception as e:
-        print("BITRIX_SYNC_EXCEPTION", type(e).__name__, flush=True)
+    _sync_trip_outbound(req, db)
+    db.commit()
     return RedirectResponse(f"/requests/{req_id}", status_code=302)
 
 @app.post("/requests/{req_id}/complete")
@@ -1123,10 +1168,8 @@ def complete_trip(
     req.sum_trip = req.sum_driver
     db.add(models.StatusHistory(trip_request_id=req.id, user_id=current_user.id, old_status=old.value, new_status=RequestStatus.DRIVER_COMPLETED.value))
     _commit_or_conflict(db)
-    try:
-        bitrix.sync_trip(req, db); db.commit()
-    except Exception as e:
-        print("BITRIX_SYNC_EXCEPTION", type(e).__name__, flush=True)
+    _sync_trip_outbound(req, db)
+    db.commit()
     return RedirectResponse(f"/requests/{req_id}", status_code=302)
 
 @app.post("/requests/{req_id}/confirm")
@@ -1147,10 +1190,8 @@ def confirm_trip(req_id: int, current_user: models.User = Depends(require_role(U
     req.status = RequestStatus.LOGIST_CONFIRMED
     db.add(models.StatusHistory(trip_request_id=req.id, user_id=current_user.id, old_status=RequestStatus.DRIVER_COMPLETED.value, new_status=RequestStatus.LOGIST_CONFIRMED.value))
     db.commit()
-    try:
-        bitrix.sync_trip(req, db); db.commit()
-    except Exception as e:
-        print("BITRIX_SYNC_EXCEPTION", type(e).__name__, flush=True)
+    _sync_trip_outbound(req, db)
+    db.commit()
     return RedirectResponse(f"/requests/{req_id}", status_code=302)
 
 
@@ -2120,7 +2161,13 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
     settings = db.query(models.IntegrationSetting).filter(models.IntegrationSetting.provider == "bitrix24").first()
     if not settings or not settings.is_active or not settings.secret:
         raise HTTPException(503, "Активная интеграция и ключ webhook не настроены")
-    supplied_secret = request.query_params.get("token") or payload.get("token") or payload.get("auth[application_token]")
+    nested_auth = payload.get("auth") if isinstance(payload.get("auth"), dict) else {}
+    supplied_secret = (
+        request.query_params.get("token")
+        or payload.get("token")
+        or payload.get("auth[application_token]")
+        or nested_auth.get("application_token")
+    )
     if supplied_secret != settings.secret:
         raise HTTPException(403, "Неверный ключ интеграции")
 
@@ -2159,7 +2206,10 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
 
     old_status = trip.status if trip else None
     if old_status in {RequestStatus.LOGIST_CONFIRMED, RequestStatus.CANCELLED}:
-        raise HTTPException(409, "Финальную заявку нельзя изменять через webhook")
+        safe_result = {"ok": True, "skipped": True, "reason": "final_locked", "trip_id": trip.id}
+        BITRIX_LAST_EVENT["result"] = safe_result
+        print("BITRIX_INBOUND_SKIP final_locked", entity_type_id, item_id, trip.id, flush=True)
+        return JSONResponse(safe_result)
     old_salary_values = None
     salary_locked = False
     if trip:
@@ -2180,7 +2230,10 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
             raise HTTPException(502, "Bitrix не вернул локальную заявку")
         old_status = trip.status
         if old_status in {RequestStatus.LOGIST_CONFIRMED, RequestStatus.CANCELLED}:
-            raise HTTPException(409, "Финальную заявку нельзя изменять через webhook")
+            safe_result = {"ok": True, "skipped": True, "reason": "final_locked", "trip_id": trip.id}
+            BITRIX_LAST_EVENT["result"] = safe_result
+            print("BITRIX_INBOUND_SKIP final_locked", entity_type_id, item_id, trip.id, flush=True)
+            return JSONResponse(safe_result)
         old_salary_values = _salary_sensitive_values(trip)
         salary_locked = bool(db.query(models.SalaryCalcItem).filter_by(trip_request_id=trip.id).first())
         result = _sync_from_bitrix_safe(item_id, entity_type_id, db, settings)
@@ -2243,9 +2296,14 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
     return JSONResponse(safe_result)
 
 @app.get("/settings/bitrix/status")
-def bitrix24_status(current_user: models.User = Depends(require_role(UserRole.ADMIN))):
+def bitrix24_status(current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
     # Только безопасные метаданные без webhook URL и токенов.
-    return JSONResponse({"inbound": _safe_bitrix_diagnostic(BITRIX_LAST_EVENT), "outbound": _safe_bitrix_diagnostic(BITRIX_LAST_OUTBOUND)})
+    # Последний исходящий результат хранится в audit_logs и переживает restart/deploy Render.
+    outbound_state = _latest_bitrix_outbound_state(db)
+    return JSONResponse({
+        "inbound": _safe_bitrix_diagnostic(BITRIX_LAST_EVENT),
+        "outbound": _safe_bitrix_diagnostic(outbound_state),
+    })
 
 @app.post("/requests/{req_id}/delete")
 def delete_request(req_id: int, current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db)):
