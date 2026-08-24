@@ -1029,18 +1029,24 @@ def test_bitrix_status_uses_persisted_outbound_after_runtime_reset():
     db.close()
 
 
-def test_bitrix_final_echo_is_acknowledged_without_mutating_locked_trip(monkeypatch):
+def test_bitrix_final_trip_still_pulls_descriptive_fields_but_keeps_final_status(monkeypatch):
     db, admin, driver, vt = reset_db()
     trip = models.TripRequest(
         number="П-FINAL-ECHO", planned_date=date(2026, 8, 12),
         kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.LOGIST_CONFIRMED,
-        bitrix_element_id=777, bitrix_entity_type_id=1088,
+        bitrix_element_id=777, bitrix_entity_type_id=1088, comment="старый комментарий",
     )
     settings = models.IntegrationSetting(
         provider="bitrix24", webhook_url="https://example/rest/1/token/",
         secret="hook-secret", is_active=True,
     )
     db.add_all([trip, settings]); db.commit()
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_kinds", lambda url: {"1088": models.TripType.PUKHTOVOZ})
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: {})
+    monkeypatch.setattr(app_module.bitrix, "status_from_stage", lambda *args: models.RequestStatus.ACCEPTED)
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda *args: {
+        "id": 777, "title": "П-FINAL-ECHO", "ufComment": "новый комментарий",
+    })
     payload = {
         "event": "ONCRMDYNAMICITEMUPDATE",
         "data[FIELDS][ID]": "777",
@@ -1048,13 +1054,45 @@ def test_bitrix_final_echo_is_acknowledged_without_mutating_locked_trip(monkeypa
     }
     response = TestClient(app_module.app).post("/webhook/bitrix24?token=hook-secret", json=payload)
     assert response.status_code == 200
-    assert response.json() == {
-        "ok": True, "skipped": True, "reason": "final_locked", "trip_id": trip.id,
-    }
     db.expire_all()
-    assert db.query(models.TripRequest).filter_by(id=trip.id).one().status == models.RequestStatus.LOGIST_CONFIRMED
+    saved = db.query(models.TripRequest).filter_by(id=trip.id).one()
+    assert saved.status == models.RequestStatus.LOGIST_CONFIRMED
+    assert saved.comment == "новый комментарий"
     db.close()
 
+
+def test_bitrix_stale_stage_does_not_rollback_regular_field_update(monkeypatch):
+    db, admin, driver, vt = reset_db()
+    trip = models.TripRequest(
+        number="П-STALE-STAGE", planned_date=date(2026, 8, 24),
+        kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.IN_WORK,
+        bitrix_element_id=778, bitrix_entity_type_id=1088, load_address="старый адрес",
+    )
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/",
+        secret="hook-secret", is_active=True,
+    )
+    db.add_all([trip, settings]); db.commit()
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_kinds", lambda url: {"1088": models.TripType.PUKHTOVOZ})
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: {})
+    monkeypatch.setattr(app_module.bitrix, "status_from_stage", lambda *args: models.RequestStatus.ACCEPTED)
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda *args: {
+        "id": 778, "title": "П-STALE-STAGE", "ufLoadAddr": "новый адрес из Bitrix",
+    })
+    response = TestClient(app_module.app).post(
+        "/webhook/bitrix24?token=hook-secret",
+        json={
+            "event": "ONCRMDYNAMICITEMUPDATE",
+            "data[FIELDS][ID]": "778",
+            "data[FIELDS][ENTITY_TYPE_ID]": "1088",
+        },
+    )
+    assert response.status_code == 200
+    db.expire_all()
+    saved = db.query(models.TripRequest).filter_by(id=trip.id).one()
+    assert saved.load_address == "новый адрес из Bitrix"
+    assert saved.status == models.RequestStatus.IN_WORK
+    db.close()
 
 def test_outbound_wrapper_records_all_sync_attempts(monkeypatch):
     db, admin, driver, vt = reset_db()
@@ -1383,3 +1421,115 @@ def test_bitrix_inbound_client_company_and_contact_fill_local_customer(monkeypat
     assert customer.phone == "+79990000000"
     assert customer.address == "Екатеринбург, Ленина 1"
     db.close()
+
+
+def test_bitrix_company_update_event_refreshes_linked_local_customer(monkeypatch):
+    db, admin, *_ = reset_db()
+    customer = models.Customer(
+        name="ООО Старое", address="старый адрес", phone="+70000000000", bitrix_company_id=321,
+    )
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/",
+        secret="hook-secret", is_active=True,
+    )
+    db.add_all([customer, settings]); db.commit()
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda url, entity, item: {
+        "id": 321, "title": "ООО Новое", "address": "Екатеринбург, Ленина 10",
+        "fm": [{"typeId": "PHONE", "valueType": "WORK", "value": "+73431234567"}],
+    })
+    response = TestClient(app_module.app).post(
+        "/webhook/bitrix24?token=hook-secret",
+        json={"event": "ONCRMCOMPANYUPDATE", "data": {"FIELDS": {"ID": "321"}}},
+    )
+    assert response.status_code == 200
+    db.expire_all()
+    saved = db.query(models.Customer).filter_by(id=customer.id).one()
+    assert saved.name == "ООО Новое"
+    assert saved.address == "Екатеринбург, Ленина 10"
+    assert saved.phone == "+73431234567"
+    db.close()
+
+
+def test_bitrix_contact_update_event_refreshes_linked_local_customer(monkeypatch):
+    db, admin, *_ = reset_db()
+    customer = models.Customer(
+        name="ООО Клиент", contact="Старый контакт", phone="+70000000000", bitrix_contact_id=654,
+    )
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/",
+        secret="hook-secret", is_active=True,
+    )
+    db.add_all([customer, settings]); db.commit()
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda url, entity, item: {
+        "id": 654, "name": "Иван", "lastName": "Петров",
+        "fm": [{"typeId": "PHONE", "valueType": "MOBILE", "value": "+79995554433"}],
+    })
+    response = TestClient(app_module.app).post(
+        "/webhook/bitrix24?token=hook-secret",
+        json={"event": "ONCRMCONTACTUPDATE", "data": {"FIELDS": {"ID": "654"}}},
+    )
+    assert response.status_code == 200
+    db.expire_all()
+    saved = db.query(models.Customer).filter_by(id=customer.id).one()
+    assert saved.contact == "Петров Иван"
+    assert saved.phone == "+79995554433"
+    db.close()
+
+
+def test_bitrix_dynamic_event_with_entity_suffix_is_accepted(monkeypatch):
+    db, admin, *_ = reset_db()
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/",
+        secret="hook-secret", is_active=True,
+    )
+    db.add(settings); db.commit()
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_kinds", lambda url: {"1088": models.TripType.PUKHTOVOZ})
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: {})
+    monkeypatch.setattr(app_module.bitrix, "status_from_stage", lambda *args: None)
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda *args: {
+        "id": 900, "title": "П-SUFFIX",
+    })
+    response = TestClient(app_module.app).post(
+        "/webhook/bitrix24?token=hook-secret",
+        json={
+            "event": "ONCRMDYNAMICITEMUPDATE_1088",
+            "data": {"FIELDS": {"ID": "900", "ENTITY_TYPE_ID": "1088"}},
+        },
+    )
+    assert response.status_code == 200
+    assert db.query(models.TripRequest).filter_by(bitrix_element_id=900, bitrix_entity_type_id=1088).one()
+    db.close()
+
+
+def test_bitrix_client_link_removal_clears_customer_from_trip(monkeypatch):
+    db, admin, *_ = reset_db()
+    customer = models.Customer(name="ООО Клиент", bitrix_company_id=321)
+    trip = models.TripRequest(
+        number="П-CLIENT-CLEAR", planned_date=date(2026, 8, 24),
+        kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.NEW,
+        bitrix_element_id=901, bitrix_entity_type_id=1088, customer=customer,
+    )
+    settings = models.IntegrationSetting(provider="bitrix24", webhook_url="https://example/rest/1/token/", is_active=True)
+    db.add_all([customer, trip, settings]); db.commit()
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_kinds", lambda url: {"1088": models.TripType.PUKHTOVOZ})
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: {
+        "title": {"title": "Название"}, "companyId": {"title": "Компания"}, "contactIds": {"title": "Контакты"},
+    })
+    monkeypatch.setattr(app_module.bitrix, "status_from_stage", lambda *args: None)
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda *args: {
+        "id": 901, "title": "П-CLIENT-CLEAR", "companyId": 0, "contactIds": [],
+    })
+    result = app_module.bitrix.sync_from_bitrix(901, 1088, db, settings=settings)
+    db.commit(); db.refresh(trip)
+    assert result["ok"] is True
+    assert trip.customer_id is None
+    db.close()
+
+
+def test_bitrix_field_mapping_does_not_treat_system_company_id_as_customer_name():
+    mapping = app_module.bitrix.resolve_field_map({
+        "title": {"title": "Название"},
+        "companyId": {"title": "Компания"},
+        "contactIds": {"title": "Контакты"},
+    })
+    assert mapping.get("customer_name") is None

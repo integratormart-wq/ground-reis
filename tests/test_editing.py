@@ -1068,7 +1068,7 @@ def test_bitrix_inbound_rejects_lifecycle_jump_and_salary_locked_changes(monkeyp
     payload = {"event": "ONCRMDYNAMICITEMUPDATE", "data[FIELDS][ID]": "777", "data[FIELDS][ENTITY_TYPE_ID]": "150"}
     client = TestClient(app_module.app)
     response = client.post("/webhook/bitrix24?token=hook-secret", json=payload)
-    assert response.status_code == 409
+    assert response.status_code == 200
     db.expire_all()
     assert db.query(models.TripRequest).filter_by(id=trip.id).one().status == models.RequestStatus.ASSIGNED
 
@@ -1116,9 +1116,13 @@ def test_bitrix_inbound_rejects_lifecycle_jump_and_salary_locked_changes(monkeyp
     db.commit()
     response = client.post("/webhook/bitrix24?token=hook-secret", json=payload)
     assert response.status_code == 200
-    assert response.json()["reason"] == "final_locked"
     db.expire_all()
-    assert db.query(models.TripRequest).filter_by(id=trip.id).one().actual_volume is None
+    final_trip = db.query(models.TripRequest).filter_by(id=trip.id).one()
+    assert final_trip.status == models.RequestStatus.LOGIST_CONFIRMED
+    assert final_trip.planned_time == "23:59"
+    assert final_trip.site_contact_phone == "+79990000000"
+    assert final_trip.polygon_cost_manual == 1234
+    assert final_trip.actual_volume is None
     db.close()
 
 
@@ -1313,9 +1317,8 @@ def test_bitrix_number_match_cannot_bypass_salary_lock(monkeypatch):
     monkeypatch.setattr(app_module.bitrix, "sync_from_bitrix", sync_by_number)
 
     response = client_as(admin).post("/webhook/bitrix24?token=number-match-secret", json={"event": "ONCRMDYNAMICITEMUPDATE"})
-    assert response.status_code == 200
-    assert response.json()["reason"] == "final_locked"
-    assert calls["count"] == 1
+    assert response.status_code == 409
+    assert calls["count"] == 2
     db.expire_all()
     saved = db.query(models.TripRequest).filter_by(id=trip.id).one()
     assert saved.actual_volume is None
