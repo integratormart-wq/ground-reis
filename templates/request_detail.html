@@ -66,17 +66,18 @@
   </section>
 </div>
 {% if user.role == 'driver' %}
-{% if req.status.value in ['Новая','Назначена водителю'] %}
+{% set started_but_status_behind = req.started_at is not none and req.status.value in ['Новая','Назначена водителю','Принята водителем'] %}
+{% if req.status.value in ['Новая','Назначена водителю'] and not started_but_status_behind %}
 <form method="post" action="/requests/{{ req.id }}/accept"><button class="btn btn-primary">Принять заявку</button></form>
 {% endif %}
-{% if req.status.value == 'Принята водителем' %}
+{% if req.status.value == 'Принята водителем' and not started_but_status_behind %}
 <form method="post" action="/requests/{{ req.id }}/start" class="form-row">
   <input type="number" step="any" name="actual_km" placeholder="Фактический километраж" value="{{ req.km or 0 }}" />
   <input type="number" step="any" name="actual_volume" placeholder="Фактический объём" value="{{ req.volume or 0 }}" />
   <button class="btn btn-primary" type="submit">Начать рейс</button>
 </form>
 {% endif %}
-{% if req.status.value == 'В работе' %}
+{% if req.status.value == 'В работе' or started_but_status_behind %}
 <form method="post" action="/requests/{{ req.id }}/complete" class="form-row">
   <input type="number" step="any" name="actual_km" placeholder="Фактический километраж" value="{{ req.actual_km if req.actual_km is not none else (req.km or 0) }}" />
   <input type="number" step="any" name="actual_volume" placeholder="Фактический объём" value="{{ req.actual_volume if req.actual_volume is not none else (req.volume or 0) }}" />

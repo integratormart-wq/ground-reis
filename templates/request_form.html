@@ -34,11 +34,11 @@
       </label>
       {% if not editing %}<label>Новый заказчик<input id="customer_name_manual" name="customer_name_manual" placeholder="Введите название" /></label>{% endif %}
       <label>Адрес подачи<input name="load_address" value="{{ editing.load_address if editing else '' }}" placeholder="Откуда забрать" /></label>
-      <label>Навигация по объекту (Яндекс Карты)
-        <input id="object_navigation_address" list="object_address_suggestions" autocomplete="off" placeholder="Начните вводить адрес, например: Первоуральск, Комсомольская 5А" />
-        <datalist id="object_address_suggestions"></datalist>
+      <label class="address-suggest-field">Навигация по объекту (Яндекс Карты)
+        <input id="object_navigation_address" autocomplete="off" placeholder="Начните вводить адрес, например: Первоуральск, Комсомольская 5А" aria-autocomplete="list" aria-controls="object_address_suggestions" aria-expanded="false" />
+        <div id="object_address_suggestions" class="address-suggestions" role="listbox" hidden></div>
         <input type="hidden" id="unload_address" name="unload_address" value="{{ editing.unload_address if editing else '' }}" />
-        <small class="muted">Выберите адрес из подсказок — ссылка для Яндекс Карт сформируется автоматически.</small>
+        <small class="muted">Начните вводить улицу или город. Выберите подходящий вариант — ссылка для Яндекс Карт сформируется автоматически.</small>
       </label>
       <label>Контакт на объекте<input name="site_contact_name" value="{{ (editing.site_contact_name or '') if editing else '' }}" placeholder="Имя или ФИО" /></label>
       <label>Телефон на объекте<input type="tel" name="site_contact_phone" value="{{ (editing.site_contact_phone or '') if editing else '' }}" placeholder="+7 999 000-00-00" /></label>
@@ -124,12 +124,23 @@
   </div>
 </form>
 
+<style>
+.address-suggest-field{position:relative}
+.address-suggestions{position:absolute;left:0;right:0;top:calc(100% - 28px);z-index:60;max-height:280px;overflow:auto;border:1px solid var(--border);border-radius:12px;background:#171b21;box-shadow:0 16px 38px rgba(0,0,0,.42);padding:6px}
+.address-suggestions[hidden]{display:none}
+.address-suggestion-option{display:block;width:100%;border:0;border-radius:8px;background:transparent;color:#eef0f4;text-align:left;padding:10px 12px;font:inherit;cursor:pointer;line-height:1.35}
+.address-suggestion-option:hover,.address-suggestion-option.is-active{background:rgba(255,199,44,.12);color:#fff}
+.address-suggestion-empty{padding:10px 12px;color:#aeb4bf;font-size:12px;line-height:1.45}
+@media(max-width:700px){.address-suggestions{position:fixed;left:12px;right:12px;top:auto;bottom:12px;max-height:45vh}}
+</style>
+
 <script>
 const navigationAddressEl = document.getElementById('object_navigation_address');
 const navigationUrlEl = document.getElementById('unload_address');
 const navigationSuggestionsEl = document.getElementById('object_address_suggestions');
 let navigationSuggestTimer = null;
 let navigationSuggestController = null;
+let navigationSuggestionIndex = -1;
 
 function yandexSearchUrl(address){
   const value = String(address || '').trim();
@@ -153,11 +164,51 @@ function addressFromStoredNavigation(value){
 
 navigationAddressEl.value = addressFromStoredNavigation(navigationUrlEl.value);
 
+function closeAddressSuggestions(){
+  navigationSuggestionsEl.hidden = true;
+  navigationAddressEl.setAttribute('aria-expanded', 'false');
+  navigationSuggestionIndex = -1;
+}
+
+function chooseAddressSuggestion(value){
+  navigationAddressEl.value = value;
+  navigationUrlEl.value = yandexSearchUrl(value);
+  closeAddressSuggestions();
+  navigationAddressEl.focus();
+}
+
+function renderAddressSuggestions(items, query){
+  navigationSuggestionsEl.replaceChildren();
+  navigationSuggestionIndex = -1;
+  const cleanItems = Array.from(new Set((items || []).map(v => String(v || '').trim()).filter(Boolean)));
+  if (!cleanItems.length) {
+    const empty = document.createElement('div');
+    empty.className = 'address-suggestion-empty';
+    empty.textContent = 'Адрес не найден. Добавьте город или область, например: Первоуральск, Комсомольская 5А';
+    navigationSuggestionsEl.appendChild(empty);
+  } else {
+    cleanItems.forEach(value => {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.className = 'address-suggestion-option';
+      option.setAttribute('role', 'option');
+      option.dataset.address = value;
+      option.textContent = value;
+      option.addEventListener('mousedown', event => event.preventDefault());
+      option.addEventListener('click', () => chooseAddressSuggestion(value));
+      navigationSuggestionsEl.appendChild(option);
+    });
+  }
+  navigationSuggestionsEl.hidden = false;
+  navigationAddressEl.setAttribute('aria-expanded', 'true');
+}
+
 async function loadAddressSuggestions(){
   const query = navigationAddressEl.value.trim();
   navigationUrlEl.value = yandexSearchUrl(query);
   if (query.length < 3 || /^https?:\/\//i.test(query)) {
     navigationSuggestionsEl.replaceChildren();
+    closeAddressSuggestions();
     return;
   }
   if (navigationSuggestController) navigationSuggestController.abort();
@@ -167,23 +218,47 @@ async function loadAddressSuggestions(){
       signal: navigationSuggestController.signal,
       headers: {'Accept': 'application/json'}
     });
-    if (!response.ok) return;
+    if (!response.ok) {
+      renderAddressSuggestions([], query);
+      return;
+    }
     const data = await response.json();
-    navigationSuggestionsEl.replaceChildren();
-    (data.items || []).forEach(value => {
-      const option = document.createElement('option');
-      option.value = value;
-      navigationSuggestionsEl.appendChild(option);
-    });
+    renderAddressSuggestions(data.items || [], query);
   } catch (error) {
-    if (error.name !== 'AbortError') navigationSuggestionsEl.replaceChildren();
+    if (error.name !== 'AbortError') renderAddressSuggestions([], query);
   }
 }
 
 navigationAddressEl.addEventListener('input', () => {
   navigationUrlEl.value = yandexSearchUrl(navigationAddressEl.value);
   clearTimeout(navigationSuggestTimer);
-  navigationSuggestTimer = setTimeout(loadAddressSuggestions, 450);
+  navigationSuggestTimer = setTimeout(loadAddressSuggestions, 350);
+});
+navigationAddressEl.addEventListener('focus', () => {
+  if (navigationSuggestionsEl.children.length) {
+    navigationSuggestionsEl.hidden = false;
+    navigationAddressEl.setAttribute('aria-expanded', 'true');
+  }
+});
+navigationAddressEl.addEventListener('keydown', event => {
+  const options = Array.from(navigationSuggestionsEl.querySelectorAll('.address-suggestion-option'));
+  if (!options.length || navigationSuggestionsEl.hidden) return;
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    navigationSuggestionIndex = event.key === 'ArrowDown'
+      ? Math.min(navigationSuggestionIndex + 1, options.length - 1)
+      : Math.max(navigationSuggestionIndex - 1, 0);
+    options.forEach((option, index) => option.classList.toggle('is-active', index === navigationSuggestionIndex));
+    options[navigationSuggestionIndex].scrollIntoView({block:'nearest'});
+  } else if (event.key === 'Enter' && navigationSuggestionIndex >= 0) {
+    event.preventDefault();
+    chooseAddressSuggestion(options[navigationSuggestionIndex].dataset.address);
+  } else if (event.key === 'Escape') {
+    closeAddressSuggestions();
+  }
+});
+document.addEventListener('click', event => {
+  if (!navigationAddressEl.closest('.address-suggest-field').contains(event.target)) closeAddressSuggestions();
 });
 navigationAddressEl.addEventListener('change', () => {
   navigationUrlEl.value = yandexSearchUrl(navigationAddressEl.value);
