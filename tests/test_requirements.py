@@ -1156,9 +1156,14 @@ def test_request_form_builds_yandex_navigation_from_address_and_has_suggestions(
     assert page.status_code == 200
     assert 'id="object_navigation_address"' in page.text
     assert 'id="object_address_suggestions"' in page.text
+    assert '<datalist' not in page.text
+    assert 'class="address-suggestions"' in page.text
+    assert 'address-suggestion-option' in page.text
+    assert 'aria-expanded="false"' in page.text
     assert 'type="hidden" id="unload_address" name="unload_address"' in page.text
     assert 'https://yandex.ru/maps/?text=' in page.text
     assert '/api/address-suggest?q=' in page.text
+    assert 'Адрес не найден. Добавьте город или область' in page.text
     db.close()
 
 

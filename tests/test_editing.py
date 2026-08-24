@@ -716,6 +716,53 @@ def test_complete_trip_uses_same_tariff_formula():
     db.close()
 
 
+
+
+def test_driver_can_complete_started_trip_if_status_was_rolled_back_by_bitrix_echo():
+    db, _, _, driver, _, _, _, _, _, _, trip = reset_db()
+    from datetime import datetime
+    trip.status = models.RequestStatus.ACCEPTED
+    trip.started_at = datetime(2026, 8, 11, 9, 0)
+    db.commit()
+
+    client = client_as(driver)
+    detail = client.get(f"/requests/{trip.id}")
+    assert detail.status_code == 200
+    assert "Завершить рейс" in detail.text
+    assert "Начать рейс" not in detail.text
+
+    response = client.post(
+        f"/requests/{trip.id}/complete",
+        data={"actual_km": "10", "actual_volume": "5", "comment": ""},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    db.expire_all()
+    saved = db.query(models.TripRequest).filter_by(id=trip.id).one()
+    assert saved.status == models.RequestStatus.DRIVER_COMPLETED
+    transitions = [
+        (row.old_status, row.new_status)
+        for row in db.query(models.StatusHistory).filter_by(trip_request_id=trip.id).order_by(models.StatusHistory.id).all()
+    ]
+    assert (models.RequestStatus.ACCEPTED.value, models.RequestStatus.IN_WORK.value) in transitions
+    assert (models.RequestStatus.IN_WORK.value, models.RequestStatus.DRIVER_COMPLETED.value) in transitions
+    db.close()
+
+
+def test_driver_cannot_complete_unstarted_accepted_trip():
+    db, _, _, driver, _, _, _, _, _, _, trip = reset_db()
+    trip.status = models.RequestStatus.ACCEPTED
+    trip.started_at = None
+    db.commit()
+    response = client_as(driver).post(
+        f"/requests/{trip.id}/complete",
+        data={"actual_km": "10", "actual_volume": "5", "comment": ""},
+        follow_redirects=False,
+    )
+    assert response.status_code == 409
+    assert "Завершить можно только начатую заявку" in response.text
+    db.close()
+
 def test_final_review_tariff_completion_and_salary_guards():
     db, admin, _, driver, vt, vehicle, customer, cargo, polygon, tariff, trip = reset_db()
     client = client_as(admin)
