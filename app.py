@@ -309,34 +309,43 @@ def address_suggest(
         return result[:7]
 
     def photon_items():
-        params = urllib.parse.urlencode({"q": text_query, "lang": "ru", "limit": 7})
-        req = urllib.request.Request(
-            f"https://photon.komoot.io/api/?{params}",
-            headers={"User-Agent": "ground-reis/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=5) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        # У публичного Photon нет гарантии полноты по короткому запросу без города.
+        # Поэтому делаем максимум два лёгких запроса: как ввёл пользователь и с уточнением страны.
+        # Это по-прежнему только подсказки; в БД ничего не пишется.
         result = []
-        for feature in payload.get("features", []):
-            props = feature.get("properties") or {}
-            street = str(props.get("street") or "").strip()
-            house = str(props.get("housenumber") or "").strip()
-            name = str(props.get("name") or "").strip()
-            street_house = " ".join(x for x in (street, house) if x).strip()
-            locality = str(props.get("city") or props.get("town") or props.get("village") or props.get("locality") or "").strip()
-            district = str(props.get("district") or props.get("county") or "").strip()
-            state = str(props.get("state") or "").strip()
-            country = str(props.get("country") or "").strip()
-            parts = []
-            seen = set()
-            for value in (street_house, name, locality, district, state, country):
-                key = value.lower()
-                if value and key not in seen:
-                    seen.add(key)
-                    parts.append(value)
-            value = ", ".join(parts)
-            if value and value not in result:
-                result.append(value)
+        queries = [text_query]
+        if "россия" not in text_query.lower():
+            queries.append(f"{text_query}, Россия")
+        for candidate_query in queries:
+            params = urllib.parse.urlencode({"q": candidate_query, "lang": "ru", "limit": 10})
+            req = urllib.request.Request(
+                f"https://photon.komoot.io/api/?{params}",
+                headers={"User-Agent": "ground-reis/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            for feature in payload.get("features", []):
+                props = feature.get("properties") or {}
+                street = str(props.get("street") or "").strip()
+                house = str(props.get("housenumber") or "").strip()
+                name = str(props.get("name") or "").strip()
+                street_house = " ".join(x for x in (street, house) if x).strip()
+                locality = str(props.get("city") or props.get("town") or props.get("village") or props.get("locality") or "").strip()
+                district = str(props.get("district") or props.get("county") or "").strip()
+                state = str(props.get("state") or "").strip()
+                country = str(props.get("country") or "").strip()
+                parts = []
+                seen = set()
+                for value in (street_house, name, locality, district, state, country):
+                    key = value.lower()
+                    if value and key not in seen:
+                        seen.add(key)
+                        parts.append(value)
+                value = ", ".join(parts)
+                if value and value not in result:
+                    result.append(value)
+                if len(result) >= 7:
+                    return result[:7]
         return result[:7]
 
     try:
@@ -1205,8 +1214,23 @@ def complete_trip(
     req = db.query(models.TripRequest).filter(models.TripRequest.id == req_id).first()
     if not req or req.driver_id != current_user.id:
         raise HTTPException(403)
+    # Если водитель уже нажал «Начать рейс», started_at является надёжным признаком старта.
+    # Bitrix может прислать запоздавшее эхо предыдущего этапа и временно вернуть локальный
+    # статус назад в NEW/ASSIGNED/ACCEPTED. Не блокируем водителя из-за такой рассинхронизации.
     if req.status != RequestStatus.IN_WORK:
-        raise HTTPException(409, "Завершить можно только заявку в работе")
+        recoverable = req.started_at is not None and req.status in {
+            RequestStatus.NEW, RequestStatus.ASSIGNED, RequestStatus.ACCEPTED,
+        }
+        if not recoverable:
+            print("DRIVER_COMPLETE_STATUS_MISMATCH", req.id, req.status.value, bool(req.started_at), flush=True)
+            raise HTTPException(409, "Завершить можно только начатую заявку")
+        previous_status = req.status
+        req.status = RequestStatus.IN_WORK
+        db.add(models.StatusHistory(
+            trip_request_id=req.id, user_id=current_user.id,
+            old_status=previous_status.value, new_status=RequestStatus.IN_WORK.value,
+        ))
+        print("DRIVER_COMPLETE_STATUS_RECOVERED", req.id, previous_status.value, flush=True)
     km_value = _finite_float(actual_km, "Фактический километраж", nullable=True)
     volume_value = _finite_float(actual_volume, "Фактический объём", nullable=True)
     tonnage_value = _finite_float(actual_tonnage, "Фактический тоннаж", nullable=True)
