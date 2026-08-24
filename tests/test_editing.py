@@ -818,13 +818,14 @@ def test_final_review_vehicle_retype_and_salary_lock():
     db.close()
 
 
-def test_final_requests_and_salary_linked_requests_cannot_be_deleted():
+def test_final_request_can_be_deleted_when_not_in_salary(monkeypatch):
     db, admin, _, _, _, _, _, _, _, _, trip = reset_db()
     client = client_as(admin)
     trip.status = models.RequestStatus.LOGIST_CONFIRMED
     db.commit()
-    assert client.post(f"/requests/{trip.id}/delete", follow_redirects=False).status_code == 409
-    assert db.query(models.TripRequest).filter_by(id=trip.id).first() is not None
+    monkeypatch.setattr(app_module.bitrix, "delete_trip", lambda req, session: {"skipped": True})
+    assert client.post(f"/requests/{trip.id}/delete", follow_redirects=False).status_code == 302
+    assert db.query(models.TripRequest).filter_by(id=trip.id).first() is None
     assert client.post("/requests/999999/delete", follow_redirects=False).status_code == 404
     db.close()
 
@@ -1163,6 +1164,61 @@ def test_delete_request_rolls_back_when_bitrix_delete_fails(tmp_path, monkeypatc
     assert db.query(models.TripRequest).filter_by(id=trip.id).one()
     assert db.query(models.Attachment).filter_by(id=attachment.id).one()
     assert stored.exists()
+    db.close()
+
+
+def test_delete_completed_or_cancelled_request_is_allowed_when_not_in_salary(monkeypatch):
+    db, admin, _, _, _, _, _, _, _, _, trip = reset_db()
+    trip.status = models.RequestStatus.LOGIST_CONFIRMED
+    db.commit()
+    monkeypatch.setattr(app_module.bitrix, "delete_trip", lambda req, session: {"skipped": True})
+
+    response = client_as(admin).post(f"/requests/{trip.id}/delete", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert db.query(models.TripRequest).filter_by(id=trip.id).first() is None
+    db.close()
+
+
+def test_delete_request_still_protects_salary_history(monkeypatch):
+    db, admin, _, driver, _, _, _, _, _, _, trip = reset_db()
+    calc = models.SalaryCalc(
+        driver_id=driver.id, date_from=date.today(), date_to=date.today(), status=models.CalcStatus.DRAFT,
+    )
+    db.add(calc); db.flush()
+    db.add(models.SalaryCalcItem(salary_calc_id=calc.id, trip_request_id=trip.id, sum=0))
+    db.commit()
+    monkeypatch.setattr(app_module.bitrix, "delete_trip", lambda req, session: {"ok": True})
+
+    response = client_as(admin).post(f"/requests/{trip.id}/delete", follow_redirects=False)
+
+    assert response.status_code == 409
+    assert db.query(models.TripRequest).filter_by(id=trip.id).one()
+    db.close()
+
+
+def test_bitrix_delete_uses_request_entity_id_and_treats_already_missing_as_success(monkeypatch):
+    db, admin, _, _, _, _, _, _, _, _, trip = reset_db()
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/", is_active=True,
+    )
+    trip.bitrix_element_id = 444
+    trip.bitrix_entity_type_id = 1092
+    db.add(settings); db.commit()
+    monkeypatch.setattr(
+        app_module.bitrix, "resolve_process_entity",
+        lambda *args: (_ for _ in ()).throw(AssertionError("stored entity id must be used")),
+    )
+    calls = []
+    def fake_post(url, method, payload):
+        calls.append((method, payload))
+        return {"error": "ERROR_NOT_FOUND: item not found"}
+    monkeypatch.setattr(app_module.bitrix, "_http_post", fake_post)
+
+    result = app_module.bitrix.delete_trip(trip, db, settings=settings)
+
+    assert result["ok"] is True and result["already_missing"] is True
+    assert calls == [("crm.item.delete", {"entityTypeId": 1092, "id": 444})]
     db.close()
 
 

@@ -349,7 +349,7 @@ def test_bitrix_customer_falls_back_to_inn_without_duplicate(monkeypatch):
     db.close()
 
 
-def test_bitrix_customer_identity_rejects_normalized_name_conflict(monkeypatch):
+def test_bitrix_customer_identity_conflict_does_not_block_trip_sync(monkeypatch):
     db, admin, driver, vt = reset_db()
     id_owner = models.Customer(name="Клиент по ID", bitrix_company_id=4455)
     name_owner = models.Customer(name="ООО Ромашка")
@@ -363,8 +363,10 @@ def test_bitrix_customer_identity_rejects_normalized_name_conflict(monkeypatch):
         "ufCustomerBitrixId": "4455",
     })
     result = app_module.bitrix.sync_from_bitrix(992, 150, db, settings=settings)
-    assert result == {"error": "customer_identity_conflict"}
-    db.rollback(); db.expire_all()
+    assert result["ok"] is True
+    db.commit(); db.expire_all()
+    saved_trip = db.query(models.TripRequest).filter_by(bitrix_element_id=992, bitrix_entity_type_id=150).one()
+    assert saved_trip.customer_id == id_owner.id
     assert db.query(models.Customer).filter_by(id=id_owner.id).one().name == "Клиент по ID"
     db.close()
 
@@ -638,8 +640,8 @@ def test_bitrix_cannot_override_driver_payment_and_rejects_zero_trip_count(monke
     monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda *_: {
         "id": 501, "title": "П-PAYMENT-GUARD", "ufTripsCount": 0,
     })
-    rejected = app_module.bitrix.sync_from_bitrix(501, 77, db, settings)
-    assert rejected == {"error": "invalid trips_count"}
+    accepted = app_module.bitrix.sync_from_bitrix(501, 77, db, settings)
+    assert accepted["ok"] is True
     db.refresh(trip)
     assert trip.trips_count == 2
     db.close()
@@ -1498,6 +1500,130 @@ def test_bitrix_dynamic_event_with_entity_suffix_is_accepted(monkeypatch):
     )
     assert response.status_code == 200
     assert db.query(models.TripRequest).filter_by(bitrix_element_id=900, bitrix_entity_type_id=1088).one()
+    db.close()
+
+
+def test_bitrix_dynamic_event_suffix_supplies_entity_id_when_payload_omits_it(monkeypatch):
+    event, item_id, entity_id = app_module.bitrix.extract_event_identifiers({
+        "event": "ONCRMDYNAMICITEMADD_1092",
+        "data": {"FIELDS": {"ID": "77"}},
+    })
+    assert (event, item_id, entity_id) == ("ONCRMDYNAMICITEMADD", 77, 1092)
+
+
+def test_bitrix_dynamic_event_accepts_lowercase_json_shape():
+    event, item_id, entity_id = app_module.bitrix.extract_event_identifiers({
+        "event": "ONCRMDYNAMICITEMUPDATE",
+        "data": {"fields": {"id": "88", "entityTypeId": "1088"}},
+    })
+    assert (event, item_id, entity_id) == ("ONCRMDYNAMICITEMUPDATE", 88, 1088)
+
+
+def test_bitrix_reconcile_pulls_recent_items_for_both_trip_processes(monkeypatch):
+    db, admin, *_ = reset_db()
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/", is_active=True,
+    )
+    db.add(settings); db.commit()
+    monkeypatch.setattr(
+        app_module.bitrix, "list_recent_trip_ids",
+        lambda url, entity_type_id, limit=10: [1] if int(entity_type_id) == 1088 else [2],
+    )
+    calls = []
+    def fake_sync(item_id, entity_type_id, session, settings=None):
+        calls.append((item_id, entity_type_id))
+        return {"ok": True, "action": "add", "trip_id": item_id}
+    monkeypatch.setattr(app_module.bitrix, "sync_from_bitrix", fake_sync)
+    result = app_module.bitrix.pull_recent_trips(db, settings=settings, limit_per_process=10)
+    assert result == {"ok": True, "checked": 2, "synced": 2, "errors": 0}
+    assert calls == [(1, 1088), (2, 1092)]
+    db.close()
+
+
+def test_bitrix_new_remote_item_with_duplicate_title_creates_separate_local_trip(monkeypatch):
+    db, admin, *_ = reset_db()
+    existing = models.TripRequest(
+        number="Повторяющийся рейс", planned_date=date(2026, 8, 25),
+        kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.NEW,
+        bitrix_element_id=10, bitrix_entity_type_id=1088,
+    )
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/", is_active=True,
+    )
+    db.add_all([existing, settings]); db.commit()
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_kinds", lambda url: {"1088": models.TripType.PUKHTOVOZ})
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda *args: {})
+    monkeypatch.setattr(app_module.bitrix, "status_from_stage", lambda *args: None)
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda *args: {
+        "id": 11, "title": "Повторяющийся рейс",
+    })
+
+    result = app_module.bitrix.sync_from_bitrix(11, 1088, db, settings=settings)
+    db.commit()
+
+    assert result["ok"] is True and result["action"] == "add"
+    rows = db.query(models.TripRequest).order_by(models.TripRequest.id).all()
+    assert len(rows) == 2
+    assert rows[0].bitrix_element_id == 10
+    assert rows[1].bitrix_element_id == 11
+    assert rows[1].number.startswith("Повторяющийся рейс [Б24-1088-11]")
+    db.close()
+
+
+def test_bitrix_delete_event_removes_unsalaried_local_trip():
+    db, admin, driver, vt = reset_db()
+    trip = models.TripRequest(
+        number="П-DELETE-FROM-B24", planned_date=date(2026, 8, 25),
+        kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.LOGIST_CONFIRMED,
+        bitrix_element_id=777, bitrix_entity_type_id=1088,
+    )
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/",
+        secret="delete-secret", is_active=True,
+    )
+    db.add_all([trip, settings]); db.commit()
+
+    response = TestClient(app_module.app).post(
+        "/webhook/bitrix24?token=delete-secret",
+        json={"event": "ONCRMDYNAMICITEMDELETE_1088", "data": {"FIELDS": {"ID": "777"}}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["action"] == "delete"
+    assert db.query(models.TripRequest).filter_by(id=trip.id).first() is None
+    db.close()
+
+
+def test_bitrix_delete_event_keeps_salary_linked_trip_as_history():
+    db, admin, driver, vt = reset_db()
+    trip = models.TripRequest(
+        number="П-DELETE-SALARY", planned_date=date(2026, 8, 25),
+        driver_id=driver.id, kind=models.TripType.PUKHTOVOZ,
+        status=models.RequestStatus.LOGIST_CONFIRMED,
+        bitrix_element_id=778, bitrix_entity_type_id=1088,
+    )
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/",
+        secret="salary-delete-secret", is_active=True,
+    )
+    db.add_all([trip, settings]); db.flush()
+    calc = models.SalaryCalc(
+        driver_id=driver.id, date_from=date(2026, 8, 1), date_to=date(2026, 8, 31),
+        status=models.CalcStatus.DRAFT,
+    )
+    db.add(calc); db.flush()
+    db.add(models.SalaryCalcItem(salary_calc_id=calc.id, trip_request_id=trip.id, sum=0))
+    db.commit()
+
+    response = TestClient(app_module.app).post(
+        "/webhook/bitrix24?token=salary-delete-secret",
+        json={"event": "ONCRMDYNAMICITEMDELETE_1088", "data": {"FIELDS": {"ID": "778"}}},
+    )
+
+    assert response.status_code == 200
+    db.expire_all()
+    saved = db.query(models.TripRequest).filter_by(id=trip.id).one()
+    assert saved.status == models.RequestStatus.CANCELLED
     db.close()
 
 
