@@ -1,5 +1,6 @@
 import os
 import json
+import base64
 from datetime import date
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_requirements.db")
@@ -1200,4 +1201,185 @@ def test_address_suggest_returns_city_context_without_writing_to_db(monkeypatch)
     assert response.json() == {
         "items": ["Комсомольская улица 5А, Первоуральск, Свердловская область, Россия"]
     }
+    db.close()
+
+
+
+def test_driver_json_attachment_upload_survives_reverse_proxy(tmp_path, monkeypatch):
+    db, admin, driver, _ = reset_db()
+    trip = models.TripRequest(
+        number="П-JSON-FILE", planned_date=date(2026, 8, 24), driver_id=driver.id,
+        kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.IN_WORK,
+    )
+    db.add(trip); db.commit(); db.refresh(trip)
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", str(tmp_path))
+    synced = []
+    monkeypatch.setattr(app_module.bitrix, "sync_attachments", lambda req, session: synced.append(req.id) or {"ok": True})
+    content = b"%PDF-1.4\ntrip-file"
+    response = client_as(driver).post(
+        f"/requests/{trip.id}/attachments-json",
+        json={"files": [{
+            "name": "route.pdf", "content_type": "application/pdf",
+            "data": base64.b64encode(content).decode("ascii"),
+        }]},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "count": 1}
+    attachment = db.query(models.Attachment).filter_by(trip_request_id=trip.id).one()
+    assert attachment.filename == "route.pdf"
+    assert attachment.content == content
+    assert synced == [trip.id]
+    db.close()
+
+
+def test_bitrix_attachment_sync_preserves_old_files_and_uploads_new(monkeypatch):
+    db, admin, driver, _ = reset_db()
+    trip = models.TripRequest(
+        number="П-FILE-SYNC", planned_date=date(2026, 8, 24),
+        kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.NEW,
+        bitrix_element_id=55, bitrix_entity_type_id=1088,
+    )
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/", is_active=True,
+    )
+    db.add_all([trip, settings]); db.flush()
+    old = models.Attachment(
+        trip_request_id=trip.id, filename="old.pdf", content_type="application/pdf",
+        size=8, content=b"%PDF-old", path="", bitrix_file_id=10,
+    )
+    new = models.Attachment(
+        trip_request_id=trip.id, filename="new.pdf", content_type="application/pdf",
+        size=8, content=b"%PDF-new", path="",
+    )
+    db.add_all([old, new]); db.commit()
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_entity", lambda url, kind: "1088")
+    monkeypatch.setattr(app_module.bitrix, "ensure_attachment_field", lambda url, entity: (
+        "ufTripFiles", {"ufTripFiles": {"title": "Файлы рейса", "type": "file"}}, {"ok": True, "already": True}
+    ))
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda *args: {
+        "id": 55, "ufTripFiles": [{"id": 10, "urlMachine": "old"}],
+    })
+    calls = []
+    def fake_post(url, method, payload):
+        calls.append((method, payload))
+        assert method == "crm.item.update"
+        sent = payload["fields"]["ufTripFiles"]
+        assert sent[0] == {"id": 10}
+        assert sent[1][0] == "new.pdf"
+        assert base64.b64decode(sent[1][1]) == b"%PDF-new"
+        return {"result": {"item": {"id": 55, "ufTripFiles": [{"id": 10}, {"id": 11}]}}}
+    monkeypatch.setattr(app_module.bitrix, "_http_post", fake_post)
+    result = app_module.bitrix.sync_attachments(trip, db, settings=settings)
+    db.commit(); db.refresh(new)
+    assert result["ok"] is True and result["count"] == 2
+    assert new.bitrix_file_id == 11
+    assert len(calls) == 1
+    db.close()
+
+
+def test_bitrix_inbound_file_field_adds_file_to_local_request(monkeypatch):
+    db, admin, driver, _ = reset_db()
+    trip = models.TripRequest(
+        number="П-FILE-IN", planned_date=date(2026, 8, 24),
+        kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.NEW,
+    )
+    db.add(trip); db.commit()
+    monkeypatch.setattr(app_module.bitrix, "_download_signed_file", lambda url: (
+        "from-bitrix.pdf", "application/pdf", b"%PDF-from-bitrix"
+    ))
+    schema = {"ufTripFiles": {"title": "Файлы рейса", "type": "file"}}
+    mapping = {"attachments": "ufTripFiles"}
+    result = app_module.bitrix.sync_inbound_attachments(
+        {"ufTripFiles": [{"id": 77, "urlMachine": "https://example/file"}]},
+        trip, db, schema, mapping,
+    )
+    db.commit()
+    attachment = db.query(models.Attachment).filter_by(trip_request_id=trip.id).one()
+    assert result == {"ok": True, "count": 1}
+    assert attachment.bitrix_file_id == 77
+    assert attachment.filename == "from-bitrix.pdf"
+    assert attachment.content == b"%PDF-from-bitrix"
+    db.close()
+
+
+def test_bitrix_outbound_binds_company_and_contact_in_spa_client_field(monkeypatch):
+    db, admin, driver, _ = reset_db()
+    customer = models.Customer(
+        name="ООО Клиент", bitrix_company_id=321, bitrix_contact_id=654,
+        contact="Иван Петров", phone="+79990000000",
+    )
+    trip = models.TripRequest(
+        number="П-CLIENT-OUT", planned_date=date(2026, 8, 24), customer=customer,
+        kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.NEW,
+    )
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/", is_active=True,
+    )
+    db.add_all([customer, trip, settings]); db.commit()
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_entity", lambda url, kind: "1088")
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: {
+        "title": {"title": "Название"},
+        "companyId": {"title": "Компания"},
+        "contactIds": {"title": "Контакты"},
+    })
+    calls = []
+    def fake_post(url, method, payload):
+        calls.append((method, payload))
+        return {"result": {"item": {"id": 88}}}
+    monkeypatch.setattr(app_module.bitrix, "_http_post", fake_post)
+    result = app_module.bitrix.sync_trip(trip, db, settings=settings)
+    assert result["ok"] is True
+    assert calls == [("crm.item.add", calls[0][1])]
+    fields = calls[0][1]["fields"]
+    assert fields["companyId"] == 321
+    assert fields["contactIds"] == [654]
+    db.close()
+
+
+def test_bitrix_client_field_can_be_enabled_for_smart_process(monkeypatch):
+    monkeypatch.setattr(app_module.bitrix, "_type_info_by_entity", lambda url, entity: {
+        "id": 7, "entityTypeId": entity, "isClientEnabled": "N",
+    })
+    calls = []
+    monkeypatch.setattr(app_module.bitrix, "_http_post", lambda url, method, payload: calls.append((method, payload)) or {"result": {}})
+    result = app_module.bitrix.ensure_client_field_enabled("https://example/rest/1/token/", 1088)
+    assert result == {"ok": True, "already": False}
+    assert calls == [("crm.type.update", {"id": 7, "fields": {"isClientEnabled": "Y"}})]
+
+
+def test_bitrix_inbound_client_company_and_contact_fill_local_customer(monkeypatch):
+    db, admin, driver, _ = reset_db()
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/", is_active=True,
+    )
+    db.add(settings); db.commit()
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_kinds", lambda url: {"1092": models.TripType.SAMOSVAL})
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: {"title": {"title": "Название"}})
+    monkeypatch.setattr(app_module.bitrix, "status_from_stage", lambda *args: None)
+    def fake_fetch(url, entity, item):
+        if int(entity) == 1092:
+            return {"id": 6, "title": "С-CLIENT-IN", "companyId": 321, "contactIds": [654]}
+        if int(entity) == 4:
+            return {
+                "id": 321, "title": "ООО Заказчик", "address": "Екатеринбург, Ленина 1",
+                "fm": [{"typeId": "PHONE", "valueType": "WORK", "value": "+73430000000"}],
+            }
+        if int(entity) == 3:
+            return {
+                "id": 654, "name": "Иван", "lastName": "Петров",
+                "fm": [{"typeId": "PHONE", "valueType": "MOBILE", "value": "+79990000000"}],
+            }
+        return {"_error": "unexpected"}
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", fake_fetch)
+    result = app_module.bitrix.sync_from_bitrix(6, 1092, db, settings=settings)
+    db.commit()
+    trip = db.query(models.TripRequest).filter_by(bitrix_element_id=6, bitrix_entity_type_id=1092).one()
+    customer = db.query(models.Customer).filter_by(id=trip.customer_id).one()
+    assert result["ok"] is True
+    assert customer.name == "ООО Заказчик"
+    assert customer.bitrix_company_id == 321
+    assert customer.bitrix_contact_id == 654
+    assert customer.contact == "Петров Иван"
+    assert customer.phone == "+79990000000"
+    assert customer.address == "Екатеринбург, Ленина 1"
     db.close()
