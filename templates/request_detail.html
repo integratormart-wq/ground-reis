@@ -117,10 +117,11 @@
   </div>
   {% else %}<p class="muted">Файлов пока нет</p>{% endif %}
   {% if attachments|length < 5 %}
-  <form method="post" action="/requests/{{ req.id }}/attachments" enctype="multipart/form-data" class="form-row" style="margin-top:10px">
-    <input type="file" name="files" accept="image/jpeg,image/png,image/webp,application/pdf" multiple required />
-    <button class="btn btn-ghost" type="submit">Прикрепить файлы</button>
+  <form id="attachment-upload-form" method="post" action="/requests/{{ req.id }}/attachments" enctype="multipart/form-data" class="form-row" style="margin-top:10px">
+    <input id="attachment-files" type="file" name="files" accept="image/jpeg,image/png,image/webp,application/pdf" multiple required />
+    <button id="attachment-submit" class="btn btn-ghost" type="submit">Прикрепить файлы</button>
   </form>
+  <p id="attachment-error" class="muted" style="display:none;color:#ff8b8b"></p>
   <p class="muted">До 5 файлов, по 10 МБ. JPG, PNG, WEBP или PDF.</p>
   {% endif %}
 </section>
@@ -133,4 +134,68 @@
   {% endfor %}
   </tbody>
 </table>
+
+<script>
+(function () {
+  const form = document.getElementById('attachment-upload-form');
+  if (!form || !window.fetch || !window.FileReader) return;
+  const input = document.getElementById('attachment-files');
+  const button = document.getElementById('attachment-submit');
+  const errorBox = document.getElementById('attachment-error');
+
+  function toBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('Не удалось прочитать файл'));
+      reader.onload = () => {
+        const value = String(reader.result || '');
+        const comma = value.indexOf(',');
+        resolve(comma >= 0 ? value.slice(comma + 1) : value);
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    errorBox.style.display = 'none';
+    const selected = Array.from(input.files || []);
+    if (!selected.length) return;
+    if (selected.length > 5) {
+      errorBox.textContent = 'За один раз можно выбрать не больше 5 файлов.';
+      errorBox.style.display = 'block';
+      return;
+    }
+    button.disabled = true;
+    button.textContent = 'Загрузка...';
+    try {
+      const files = [];
+      for (const file of selected) {
+        if (file.size > 10 * 1024 * 1024) throw new Error('Размер одного файла не должен превышать 10 МБ');
+        files.push({name: file.name, content_type: file.type, data: await toBase64(file)});
+      }
+      const response = await fetch('/requests/{{ req.id }}/attachments-json', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({files})
+      });
+      if (!response.ok) {
+        let message = 'Не удалось прикрепить файлы';
+        try {
+          const body = await response.json();
+          if (body && body.detail) message = body.detail;
+        } catch (_) {}
+        throw new Error(message);
+      }
+      window.location.reload();
+    } catch (error) {
+      errorBox.textContent = error.message || 'Не удалось прикрепить файлы';
+      errorBox.style.display = 'block';
+      button.disabled = false;
+      button.textContent = 'Прикрепить файлы';
+    }
+  });
+})();
+</script>
 {% endblock %}

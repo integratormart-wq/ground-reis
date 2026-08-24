@@ -29,6 +29,7 @@
       <label>Название<input name="name" value="{{ row.name }}" required /></label>
       <label>ИНН<input name="inn" inputmode="numeric" value="{{ row.inn or '' }}" /></label>
       <label>Bitrix ID компании<input name="bitrix_company_id" type="number" min="1" value="{{ row.bitrix_company_id or '' }}" /></label>
+      <label>Bitrix ID контакта<input name="bitrix_contact_id" type="number" min="1" value="{{ row.bitrix_contact_id or '' }}" /></label>
       <label>Адрес<input name="address" value="{{ row.address or '' }}" /></label>
       <label>Контакт<input name="contact" value="{{ row.contact or '' }}" /></label>
       <label>Телефон<input name="phone" value="{{ row.phone or '' }}" /></label>
