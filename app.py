@@ -1,4 +1,4 @@
-import os, io, csv, sys, math, json, threading, uuid
+import os, io, csv, sys, math, json, threading, uuid, urllib.parse, urllib.request
 from datetime import datetime, timedelta, date
 from typing import Optional, List
 from dotenv import load_dotenv
@@ -271,6 +271,81 @@ def require_role(*allowed_roles):
             raise HTTPException(status_code=403, detail="Доступ запрещен")
         return current_user
     return checker
+
+
+@app.get("/api/address-suggest")
+def address_suggest(
+    q: str = Query("", max_length=200),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Адресный автокомплит. Ничего не пишет в БД."""
+    text_query = " ".join((q or "").split()).strip()
+    if len(text_query) < 3:
+        return JSONResponse({"items": []})
+
+    def yandex_items(api_key: str):
+        params = urllib.parse.urlencode({
+            "apikey": api_key,
+            "text": text_query,
+            "lang": "ru",
+            "results": 7,
+            "print_address": 1,
+            "types": "geo",
+        })
+        req = urllib.request.Request(
+            f"https://suggest-maps.yandex.ru/v1/suggest?{params}",
+            headers={"User-Agent": "ground-reis/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        result = []
+        for row in payload.get("results", []):
+            address = ((row.get("address") or {}).get("formatted_address") or "").strip()
+            title = ((row.get("title") or {}).get("text") or "").strip()
+            subtitle = ((row.get("subtitle") or {}).get("text") or "").strip()
+            value = address or ", ".join(x for x in (title, subtitle) if x)
+            if value and value not in result:
+                result.append(value)
+        return result[:7]
+
+    def photon_items():
+        params = urllib.parse.urlencode({"q": text_query, "lang": "ru", "limit": 7})
+        req = urllib.request.Request(
+            f"https://photon.komoot.io/api/?{params}",
+            headers={"User-Agent": "ground-reis/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        result = []
+        for feature in payload.get("features", []):
+            props = feature.get("properties") or {}
+            street = str(props.get("street") or "").strip()
+            house = str(props.get("housenumber") or "").strip()
+            name = str(props.get("name") or "").strip()
+            street_house = " ".join(x for x in (street, house) if x).strip()
+            locality = str(props.get("city") or props.get("town") or props.get("village") or props.get("locality") or "").strip()
+            district = str(props.get("district") or props.get("county") or "").strip()
+            state = str(props.get("state") or "").strip()
+            country = str(props.get("country") or "").strip()
+            parts = []
+            seen = set()
+            for value in (street_house, name, locality, district, state, country):
+                key = value.lower()
+                if value and key not in seen:
+                    seen.add(key)
+                    parts.append(value)
+            value = ", ".join(parts)
+            if value and value not in result:
+                result.append(value)
+        return result[:7]
+
+    try:
+        api_key = (os.getenv("YANDEX_SUGGEST_API_KEY") or "").strip()
+        items = yandex_items(api_key) if api_key else photon_items()
+    except Exception as exc:
+        print("ADDRESS_SUGGEST_ERROR", type(exc).__name__, flush=True)
+        items = []
+    return JSONResponse({"items": items})
 
 def calc_sum(req: models.TripRequest, tariff: Optional[models.Tariff]) -> float:
     return _tariff_amount(tariff, req.actual_km if req.actual_km is not None else (req.km or 0), req.actual_volume if req.actual_volume is not None else (req.volume or 0), req.trips_count if req.trips_count is not None else 1)
@@ -1081,10 +1156,16 @@ def accept_trip(req_id: int, current_user: models.User = Depends(get_current_use
     req = db.query(models.TripRequest).filter(models.TripRequest.id == req_id).first()
     if not req or req.driver_id != current_user.id:
         raise HTTPException(403)
-    if req.status != RequestStatus.ASSIGNED:
-        raise HTTPException(409, "Принять можно только назначенную заявку")
+    # Bitrix может создать локальную заявку в статусе NEW, но уже с назначенным водителем.
+    # Для самого назначенного водителя такая заявка должна быть принимаемой так же, как ASSIGNED.
+    if req.status not in {RequestStatus.NEW, RequestStatus.ASSIGNED}:
+        raise HTTPException(409, "Принять можно только новую или назначенную заявку")
+    old_status = req.status
     req.status = RequestStatus.ACCEPTED
-    db.add(models.StatusHistory(trip_request_id=req.id, user_id=current_user.id, old_status=RequestStatus.ASSIGNED.value, new_status=RequestStatus.ACCEPTED.value))
+    db.add(models.StatusHistory(
+        trip_request_id=req.id, user_id=current_user.id,
+        old_status=old_status.value, new_status=RequestStatus.ACCEPTED.value,
+    ))
     db.commit()
     _sync_trip_outbound(req, db)
     db.commit()
