@@ -822,11 +822,22 @@ def delete_trip(req, db, settings=None) -> dict:
     settings = settings or get_integration_settings(db)
     if not settings or not settings.is_active or not settings.webhook_url or not req.bitrix_element_id:
         return {"skipped": True}
-    entity_id = resolve_process_entity(settings.webhook_url, req.kind)
+    # У синхронизированной заявки уже хранится точный смарт-процесс Bitrix24.
+    # Используем его первым: повторное автоопределение по названию процесса может
+    # вернуть не тот entityTypeId после переименования/дублирования процесса.
+    entity_id = req.bitrix_entity_type_id or resolve_process_entity(settings.webhook_url, req.kind)
     if not entity_id:
         return {"skipped": True, "reason": "process_not_found"}
     response = _http_post(settings.webhook_url, "crm.item.delete", {"entityTypeId": int(entity_id), "id": int(req.bitrix_element_id)})
-    return {"ok": True} if "error" not in response else {"error": response["error"]}
+    if "error" not in response:
+        return {"ok": True, "action": "delete"}
+    error_text = str(response.get("error") or "")
+    # Если элемент уже удалён в Bitrix, локальное удаление можно безопасно
+    # завершить: системы после этого как раз становятся одинаковыми.
+    normalized = error_text.lower()
+    if any(marker in normalized for marker in ("not found", "not_found", "notfound", "does not exist", "не найден")):
+        return {"ok": True, "action": "delete", "already_missing": True}
+    return {"error": error_text}
 
 
 def _scalar(value):
@@ -926,6 +937,61 @@ def _find_by_name(db, model, field, value):
     return db.query(model).filter(field.ilike(value)).first()
 
 
+def list_recent_trip_ids(webhook_base: str, entity_type_id: int, limit: int = 10) -> list[int]:
+    """Возвращает последние изменённые элементы смарт-процесса для страховочной сверки."""
+    safe_limit = max(1, min(int(limit or 10), 50))
+    response = _http_post(webhook_base, "crm.item.list", {
+        "entityTypeId": int(entity_type_id),
+        "order": {"updatedTime": "DESC"},
+        "select": ["id"],
+        "start": 0,
+    })
+    if "error" in response:
+        return []
+    result = []
+    for item in _list_result_items(response):
+        try:
+            item_id = int(item.get("id"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if item_id > 0:
+            result.append(item_id)
+        if len(result) >= safe_limit:
+            break
+    return result
+
+
+def pull_recent_trips(db, settings=None, limit_per_process: int = 10) -> dict:
+    """Best-effort сверка последних рейсов Bitrix → приложение.
+
+    Webhook остаётся основным каналом. Эта сверка страхует от пропущенного события
+    Bitrix/прокси и не должна откатывать остальные элементы из-за одной плохой карточки.
+    """
+    settings = settings or get_integration_settings(db)
+    if not settings or not settings.is_active or not settings.webhook_url:
+        return {"skipped": True, "reason": "no_active_integration"}
+    summary = {"ok": True, "checked": 0, "synced": 0, "errors": 0}
+    for entity_id in (int(PUKHTOVOZ_ENTITY_TYPE_ID), int(SAMOSVAL_ENTITY_TYPE_ID)):
+        for item_id in list_recent_trip_ids(settings.webhook_url, entity_id, limit=limit_per_process):
+            summary["checked"] += 1
+            savepoint = db.begin_nested()
+            try:
+                result = sync_from_bitrix(item_id, entity_id, db, settings=settings)
+                if result.get("error"):
+                    savepoint.rollback()
+                    summary["errors"] += 1
+                    print("BITRIX_RECONCILE_ITEM_ERROR", entity_id, item_id, flush=True)
+                    continue
+                savepoint.commit()
+                if result.get("ok"):
+                    summary["synced"] += 1
+            except Exception as exc:
+                savepoint.rollback()
+                summary["errors"] += 1
+                print("BITRIX_RECONCILE_EXCEPTION", entity_id, item_id, type(exc).__name__, flush=True)
+    return summary
+
+
 def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> dict:
     """Создаёт или обновляет локальную заявку после события смарт-процесса."""
     settings = settings or get_integration_settings(db)
@@ -947,9 +1013,29 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         models.TripRequest.bitrix_entity_type_id == int(entity_type_id),
     ).first()
     if not trip:
-        trip = db.query(models.TripRequest).filter(models.TripRequest.number == number, models.TripRequest.kind == kind).first()
+        number_match = db.query(models.TripRequest).filter(
+            models.TripRequest.number == number,
+            models.TripRequest.kind == kind,
+        ).first()
+        # По номеру связываем только ещё не привязанную локальную заявку
+        # (обычный echo после создания из приложения). Если этот номер уже
+        # принадлежит другому элементу Bitrix, это отдельный рейс.
+        if number_match and (
+            not number_match.bitrix_element_id
+            or (
+                int(number_match.bitrix_element_id) == int(item_id)
+                and int(number_match.bitrix_entity_type_id or entity_type_id) == int(entity_type_id)
+            )
+        ):
+            trip = number_match
     created = trip is None
     if created:
+        # В Bitrix названия элементов могут повторяться, а локальный number
+        # уникален. Не теряем новый рейс из-за UNIQUE constraint.
+        if db.query(models.TripRequest).filter(models.TripRequest.number == number).first():
+            suffix = f"Б24-{entity_type_id}-{item_id}"
+            base = number[: max(1, 255 - len(suffix) - 3)]
+            number = f"{base} [{suffix}]"
         trip = models.TripRequest(
             number=number,
             planned_date=date.today(),
@@ -976,26 +1062,37 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         if _has_logical(item, logical, mapping):
             value = str(_read_logical(item, logical, mapping) or "")
             setattr(trip, attr, value[:limit] if limit else value)
-    try:
-        km = _optional_nonnegative_float(_read_logical(item, "km", mapping), "km")
-        volume = _optional_nonnegative_float(_read_logical(item, "volume", mapping), "volume")
-        tonnage = _optional_nonnegative_float(_read_logical(item, "tonnage", mapping), "tonnage")
-        actual_km = _optional_nonnegative_float(_read_logical(item, "actual_km", mapping), "actual_km")
-        actual_volume = _optional_nonnegative_float(_read_logical(item, "actual_volume", mapping), "actual_volume")
-        actual_tonnage = _optional_nonnegative_float(_read_logical(item, "actual_tonnage", mapping), "actual_tonnage")
-        trips_count = _optional_nonnegative_int(_read_logical(item, "trips_count", mapping), "trips_count")
-        waste_bin_count = _optional_nonnegative_int(_read_logical(item, "waste_bin_count", mapping), "waste_bin_count")
-        started_at = _optional_datetime(_read_logical(item, "started_at", mapping), "started_at")
-        finished_at = _optional_datetime(_read_logical(item, "finished_at", mapping), "finished_at")
-        customer_bitrix_id = _optional_nonnegative_int(_read_logical(item, "customer_bitrix_id", mapping), "customer_bitrix_id")
-        customer_inn = _optional_inn(_read_logical(item, "customer_inn", mapping))
-        is_empty_run = _optional_bool(_read_logical(item, "is_empty_run", mapping), "is_empty_run")
-        has_downtime = _optional_bool(_read_logical(item, "has_downtime", mapping), "has_downtime")
-        downtime_minutes = _optional_nonnegative_int(_read_logical(item, "downtime_minutes", mapping), "downtime_minutes")
-    except ValueError as exc:
-        return {"error": str(exc)}
+    def inbound_value(parser, logical, field):
+        """Плохое одно поле Bitrix не должно отменять создание/обновление всего рейса."""
+        raw = _read_logical(item, logical, mapping)
+        try:
+            return parser(raw, field) if field is not None else parser(raw)
+        except ValueError:
+            print("BITRIX_INBOUND_FIELD_SKIPPED", logical, entity_type_id, item_id, flush=True)
+            return None
+
+    km = inbound_value(_optional_nonnegative_float, "km", "km")
+    volume = inbound_value(_optional_nonnegative_float, "volume", "volume")
+    tonnage = inbound_value(_optional_nonnegative_float, "tonnage", "tonnage")
+    actual_km = inbound_value(_optional_nonnegative_float, "actual_km", "actual_km")
+    actual_volume = inbound_value(_optional_nonnegative_float, "actual_volume", "actual_volume")
+    actual_tonnage = inbound_value(_optional_nonnegative_float, "actual_tonnage", "actual_tonnage")
+    trips_count = inbound_value(_optional_nonnegative_int, "trips_count", "trips_count")
+    waste_bin_count = inbound_value(_optional_nonnegative_int, "waste_bin_count", "waste_bin_count")
+    started_at = inbound_value(_optional_datetime, "started_at", "started_at")
+    finished_at = inbound_value(_optional_datetime, "finished_at", "finished_at")
+    customer_bitrix_id = inbound_value(_optional_nonnegative_int, "customer_bitrix_id", "customer_bitrix_id")
+    customer_inn = inbound_value(_optional_inn, "customer_inn", None)
+    is_empty_run = inbound_value(_optional_bool, "is_empty_run", "is_empty_run")
+    has_downtime = inbound_value(_optional_bool, "has_downtime", "has_downtime")
+    downtime_minutes = inbound_value(_optional_nonnegative_int, "downtime_minutes", "downtime_minutes")
+
+    # Пустая карточка Bitrix часто отдаёт числовые поля как 0. Для количества
+    # рейсов это не повод откатывать весь webhook: оставляем старое значение,
+    # а для нового рейса используем безопасный минимум 1.
     if trips_count is not None and trips_count < 1:
-        return {"error": "invalid trips_count"}
+        print("BITRIX_INBOUND_FIELD_SKIPPED trips_count_zero", entity_type_id, item_id, flush=True)
+        trips_count = None
 
     for logical, value in {
         "km": km, "volume": volume, "tonnage": tonnage, "actual_km": actual_km,
@@ -1003,7 +1100,7 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         "trips_count": trips_count,
         "waste_bin_count": waste_bin_count,
     }.items():
-        if _has_logical(item, logical, mapping):
+        if _has_logical(item, logical, mapping) and not (logical == "trips_count" and value is None):
             setattr(trip, logical, value)
     if created:
         trip.km = 0 if km is None else km
@@ -1097,50 +1194,62 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
             normalized_name = _normalize(customer_name)
             customer = next((row for row in db.query(models.Customer).all() if _normalize(row.name) == normalized_name), None)
         if not customer:
+            # Если Bitrix прислал только ссылку на компанию, а текущий REST-вебхук
+            # не имеет доступа прочитать её карточку, рейс всё равно должен появиться.
+            # Клиента дотянем следующим событием/ручной сверкой, когда данные доступны.
             if not customer_name:
-                return {"error": "customer_name_required"}
-            customer = models.Customer(name=customer_name); db.add(customer); db.flush()
-        id_owner = db.query(models.Customer).filter(
-            models.Customer.bitrix_company_id == customer_bitrix_id,
-            models.Customer.id != customer.id,
-        ).first() if customer_bitrix_id is not None else None
-        inn_owner = db.query(models.Customer).filter(
-            models.Customer.inn == customer_inn,
-            models.Customer.id != customer.id,
-        ).first() if customer_inn else None
-        normalized_name_owner = None
-        if customer_name:
-            normalized_name = _normalize(customer_name)
-            normalized_name_owner = next(
-                (
-                    row for row in db.query(models.Customer).filter(models.Customer.id != customer.id).all()
-                    if _normalize(row.name) == normalized_name
-                ),
-                None,
-            )
-        if id_owner or inn_owner or normalized_name_owner:
-            return {"error": "customer_identity_conflict"}
-        if customer_name:
-            customer.name = customer_name
-        if customer_bitrix_id is not None:
-            customer.bitrix_company_id = customer_bitrix_id
-        if customer_inn:
-            customer.inn = customer_inn
-        if built_in_contact_id:
-            customer.bitrix_contact_id = built_in_contact_id
-        if built_in_company_id and "_error" not in company_item:
-            customer.address = str(company_item.get("address") or "").strip()
-            customer.phone = _first_phone(company_item)
-        if built_in_contact_id and "_error" not in contact_item:
-            customer.contact = _contact_display_name(contact_item)
-            customer.phone = _first_phone(contact_item)
-        trip.customer_id = customer.id
-        if _has_logical(item, "customer_contact_name", mapping):
-            customer.contact = str(_read_logical(item, "customer_contact_name", mapping) or "")
-        if _has_logical(item, "customer_contact_phone", mapping):
-            customer.phone = str(_read_logical(item, "customer_contact_phone", mapping) or "")
-        if _has_logical(item, "customer_address", mapping):
-            customer.address = str(_read_logical(item, "customer_address", mapping) or "")
+                customer = None
+            else:
+                customer = models.Customer(name=customer_name); db.add(customer); db.flush()
+
+        if customer:
+            # При конфликте идентичностей приоритет у явного Bitrix companyId, затем ИНН.
+            # Конфликт названий больше не отменяет синхронизацию всего рейса.
+            id_owner = db.query(models.Customer).filter(
+                models.Customer.bitrix_company_id == customer_bitrix_id,
+                models.Customer.id != customer.id,
+            ).first() if customer_bitrix_id is not None else None
+            inn_owner = db.query(models.Customer).filter(
+                models.Customer.inn == customer_inn,
+                models.Customer.id != customer.id,
+            ).first() if customer_inn else None
+            if id_owner:
+                customer = id_owner
+            elif inn_owner:
+                customer = inn_owner
+        if customer:
+            # Не переименовываем запись в имя, уже занятое другим локальным заказчиком:
+            # это сохраняет уникальность справочника, но не блокирует сам рейс.
+            name_conflict = False
+            if customer_name:
+                normalized_name = _normalize(customer_name)
+                name_conflict = any(
+                    _normalize(row.name) == normalized_name
+                    for row in db.query(models.Customer).filter(models.Customer.id != customer.id).all()
+                )
+            if customer_name and not name_conflict:
+                customer.name = customer_name
+            if customer_bitrix_id is not None:
+                customer.bitrix_company_id = customer_bitrix_id
+            if customer_inn and not (inn_owner and inn_owner.id != customer.id):
+                customer.inn = customer_inn
+            elif customer_inn and inn_owner and inn_owner.id != customer.id:
+                print("BITRIX_INBOUND_CUSTOMER_INN_PRESERVED", entity_type_id, item_id, flush=True)
+            if built_in_contact_id:
+                customer.bitrix_contact_id = built_in_contact_id
+            if built_in_company_id and "_error" not in company_item:
+                customer.address = str(company_item.get("address") or "").strip()
+                customer.phone = _first_phone(company_item)
+            if built_in_contact_id and "_error" not in contact_item:
+                customer.contact = _contact_display_name(contact_item)
+                customer.phone = _first_phone(contact_item)
+            trip.customer_id = customer.id
+            if _has_logical(item, "customer_contact_name", mapping):
+                customer.contact = str(_read_logical(item, "customer_contact_name", mapping) or "")
+            if _has_logical(item, "customer_contact_phone", mapping):
+                customer.phone = str(_read_logical(item, "customer_contact_phone", mapping) or "")
+            if _has_logical(item, "customer_address", mapping):
+                customer.address = str(_read_logical(item, "customer_address", mapping) or "")
     cargo_name = str(_read_logical(item, "cargo_type_name", mapping) or "").strip()
     if cargo_name:
         cargo = _find_by_name(db, models.CargoType, models.CargoType.name, cargo_name)
@@ -1159,15 +1268,51 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
 
 
 def extract_event_identifiers(payload: dict):
-    event = str(payload.get("event") or payload.get("EVENT") or "").upper()
-    match = re.match(r"^(ONCRMDYNAMICITEM(?:ADD|UPDATE|DELETE))(?:_\d+)?$", event)
+    raw_event = str(payload.get("event") or payload.get("EVENT") or "").upper()
+    event = raw_event
+    event_entity_id = None
+    match = re.match(r"^(ONCRMDYNAMICITEM(?:ADD|UPDATE|DELETE))(?:_(\d+))?$", raw_event)
     if match:
         event = match.group(1)
+        event_entity_id = match.group(2)
+
     flattened = {str(k).upper(): _scalar(v) for k, v in payload.items()}
     data = payload.get("data") or payload.get("DATA") or {}
-    fields = data.get("FIELDS", {}) if isinstance(data, dict) else {}
-    item_id = fields.get("ID") or data.get("ID") if isinstance(data, dict) else None
-    entity_id = fields.get("ENTITY_TYPE_ID") or fields.get("ENTITYTYPEID") if isinstance(fields, dict) else None
+    fields = {}
+    if isinstance(data, dict):
+        fields = data.get("FIELDS") or data.get("fields") or {}
+    if not isinstance(fields, dict):
+        fields = {}
+
+    def first(mapping, *keys):
+        if not isinstance(mapping, dict):
+            return None
+        lowered = {str(key).lower(): value for key, value in mapping.items()}
+        for key in keys:
+            value = lowered.get(str(key).lower())
+            if value not in (None, ""):
+                return _scalar(value)
+        return None
+
+    item_id = first(fields, "ID", "id") or first(data, "ID", "id")
+    entity_id = first(fields, "ENTITY_TYPE_ID", "ENTITYTYPEID", "entityTypeId", "entity_type_id")
+    entity_id = entity_id or first(data, "ENTITY_TYPE_ID", "ENTITYTYPEID", "entityTypeId", "entity_type_id")
     item_id = item_id or flattened.get("DATA[FIELDS][ID]") or flattened.get("DATA[ID]")
-    entity_id = entity_id or flattened.get("DATA[FIELDS][ENTITY_TYPE_ID]") or flattened.get("DATA[FIELDS][ENTITYTYPEID]") or flattened.get("DATA[ENTITY_TYPE_ID]")
-    return event, int(item_id) if item_id else None, int(entity_id) if entity_id else None
+    entity_id = (
+        entity_id
+        or flattened.get("DATA[FIELDS][ENTITY_TYPE_ID]")
+        or flattened.get("DATA[FIELDS][ENTITYTYPEID]")
+        or flattened.get("DATA[FIELDS][ENTITYTYPEID]")
+        or flattened.get("DATA[ENTITY_TYPE_ID]")
+        or flattened.get("DATA[ENTITYTYPEID]")
+        or event_entity_id
+    )
+    try:
+        item_id = int(item_id) if item_id not in (None, "") else None
+    except (TypeError, ValueError):
+        item_id = None
+    try:
+        entity_id = int(entity_id) if entity_id not in (None, "") else None
+    except (TypeError, ValueError):
+        entity_id = None
+    return event, item_id, entity_id
