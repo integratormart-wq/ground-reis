@@ -35,8 +35,7 @@ STATUS_STAGE_TITLES = {
 # полями смарт-процесса по коду или русскому названию поля.
 FIELD_MAP = {
     "number": "title",
-    "planned_date": "ufReisDate",
-    "planned_time": "ufReisTime",
+    "planned_at": "ufReisDate",
     "driver_name": "ufDriver",
     "vehicle_name": "ufVehicle",
     "load_address": "ufLoadAddr",
@@ -82,8 +81,7 @@ FIELD_MAP = {
 }
 
 FIELD_TITLES = {
-    "planned_date": ("дата рейса", "плановая дата", "дата"),
-    "planned_time": ("время рейса", "плановое время", "время"),
+    "planned_at": ("дата и время", "дата рейса", "плановая дата и время", "дата/время рейса", "подача машины", "дата"),
     "driver_name": ("водитель", "фио водителя"),
     "vehicle_name": ("автомобиль", "машина", "транспорт"),
     "load_address": ("адрес загрузки", "адрес подачи", "загрузка"),
@@ -332,11 +330,23 @@ def _as_bitrix_value(value):
     return "" if value is None else value
 
 
+
+
+def _planned_at_value(req):
+    if not getattr(req, "planned_date", None):
+        return ""
+    raw_time = str(getattr(req, "planned_time", "") or "").strip()[:5]
+    if not raw_time:
+        raw_time = "00:00"
+    try:
+        return datetime.combine(req.planned_date, datetime.strptime(raw_time, "%H:%M").time()).isoformat(timespec="minutes")
+    except ValueError:
+        return f"{req.planned_date.isoformat()}T{raw_time}"
+
 def _trip_values(req) -> dict:
     return {
         "number": req.number or "",
-        "planned_date": _as_bitrix_value(req.planned_date),
-        "planned_time": req.planned_time or "",
+        "planned_at": _planned_at_value(req),
         "driver_name": req.driver.full_name if req.driver else "",
         "vehicle_name": (f"{req.vehicle.name} {req.vehicle.plate}" if req.vehicle else ""),
         "load_address": req.load_address or "",
@@ -449,11 +459,102 @@ def _find_company_by_name(webhook_base: str, name: str):
     return None
 
 
+def _company_requisite_inn(webhook_base: str, company_id: int) -> str:
+    response = _http_post(webhook_base, "crm.requisite.list", {
+        "filter": {"ENTITY_TYPE_ID": 4, "ENTITY_ID": int(company_id)},
+        "select": ["ID", "ENTITY_ID", "RQ_INN"],
+    })
+    if "error" in response:
+        return ""
+    rows = response.get("result") or []
+    if isinstance(rows, dict):
+        rows = rows.get("items") or rows.get("requisites") or []
+    for row in rows if isinstance(rows, list) else []:
+        inn = re.sub(r"\D", "", str((row or {}).get("RQ_INN") or ""))
+        if len(inn) in {10, 12}:
+            return inn
+    return ""
+
+
+def _find_company_by_inn(webhook_base: str, inn: str):
+    clean = re.sub(r"\D", "", str(inn or ""))
+    if len(clean) not in {10, 12}:
+        return None
+    response = _http_post(webhook_base, "crm.requisite.list", {
+        "filter": {"RQ_INN": clean},
+        "select": ["ID", "ENTITY_ID", "RQ_INN"],
+    })
+    if "error" in response:
+        return None
+    rows = response.get("result") or []
+    if isinstance(rows, dict):
+        rows = rows.get("items") or rows.get("requisites") or []
+    for row in rows if isinstance(rows, list) else []:
+        entity_id = (row or {}).get("ENTITY_ID")
+        if entity_id:
+            try:
+                return int(entity_id)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _ensure_company_inn(webhook_base: str, company_id: int, company_name: str, inn: str):
+    clean = re.sub(r"\D", "", str(inn or ""))
+    if len(clean) not in {10, 12}:
+        return
+    existing = _http_post(webhook_base, "crm.requisite.list", {
+        "filter": {"ENTITY_TYPE_ID": 4, "ENTITY_ID": int(company_id)},
+        "select": ["ID", "ENTITY_ID", "PRESET_ID", "RQ_INN", "NAME"],
+    })
+    rows = existing.get("result") or [] if "error" not in existing else []
+    if isinstance(rows, dict):
+        rows = rows.get("items") or rows.get("requisites") or []
+    rows = rows if isinstance(rows, list) else []
+    for row in rows:
+        req_id = (row or {}).get("ID")
+        current_inn = re.sub(r"\D", "", str((row or {}).get("RQ_INN") or ""))
+        if current_inn == clean:
+            return
+        if req_id and not current_inn:
+            _http_post(webhook_base, "crm.requisite.update", {"id": int(req_id), "fields": {"RQ_INN": clean}})
+            return
+    presets = _http_post(webhook_base, "crm.requisite.preset.list", {
+        "filter": {"ENTITY_TYPE_ID": 4},
+        "select": ["ID", "NAME", "ENTITY_TYPE_ID", "COUNTRY_ID"],
+    })
+    preset_rows = presets.get("result") or [] if "error" not in presets else []
+    if isinstance(preset_rows, dict):
+        preset_rows = preset_rows.get("items") or preset_rows.get("presets") or []
+    preset_id = None
+    for row in preset_rows if isinstance(preset_rows, list) else []:
+        raw = (row or {}).get("ID")
+        if raw:
+            try:
+                preset_id = int(raw)
+                break
+            except (TypeError, ValueError):
+                pass
+    if preset_id:
+        _http_post(webhook_base, "crm.requisite.add", {
+            "fields": {
+                "ENTITY_TYPE_ID": 4,
+                "ENTITY_ID": int(company_id),
+                "PRESET_ID": preset_id,
+                "NAME": company_name or "Реквизиты",
+                "ACTIVE": "Y",
+                "RQ_INN": clean,
+            }
+        })
+
+
 def _ensure_bitrix_customer(customer, webhook_base: str):
     """Создаёт/находит CRM-компанию и контакт только когда локальному заказчику не хватает ID."""
     if not customer:
         return None, None
     company_id = customer.bitrix_company_id
+    if not company_id and customer.inn:
+        company_id = _find_company_by_inn(webhook_base, customer.inn)
     if not company_id and customer.name:
         company_id = _find_company_by_name(webhook_base, customer.name)
         if not company_id:
@@ -469,6 +570,8 @@ def _ensure_bitrix_customer(customer, webhook_base: str):
                 company_id = result.get("id") or result.get("item", {}).get("id")
         if company_id:
             customer.bitrix_company_id = int(company_id)
+    if company_id and customer.inn:
+        _ensure_company_inn(webhook_base, int(company_id), customer.name, customer.inn)
 
     contact_id = getattr(customer, "bitrix_contact_id", None)
     if not contact_id and company_id:
@@ -745,6 +848,9 @@ def sync_customer_from_bitrix_event(db, settings=None, company_id=None, contact_
                 customer.name = new_name
         customer.address = str(company_item.get("address") or "").strip()
         customer.phone = _first_phone(company_item)
+        company_inn = _company_requisite_inn(settings.webhook_url, int(company_id or customer.bitrix_company_id))
+        if company_inn:
+            customer.inn = company_inn
     if contact_item:
         customer.contact = _contact_display_name(contact_item)
         customer.phone = _first_phone(contact_item)
@@ -752,6 +858,24 @@ def sync_customer_from_bitrix_event(db, settings=None, company_id=None, contact_
     db.flush()
     print("BITRIX_CUSTOMER_INBOUND_OK", customer.id, int(company_id or 0), int(contact_id or 0), flush=True)
     return {"ok": True, "action": "customer_update", "customer_id": customer.id}
+
+
+def sync_customer_from_requisite_event(db, requisite_id: int, settings=None) -> dict:
+    settings = settings or get_integration_settings(db)
+    if not settings or not settings.webhook_url:
+        return {"skipped": True, "reason": "no_active_integration"}
+    response = _http_post(settings.webhook_url, "crm.requisite.get", {"id": int(requisite_id)})
+    if "error" in response:
+        return {"error": response["error"], "action": "customer_update"}
+    row = response.get("result") or {}
+    try:
+        entity_type_id = int(row.get("ENTITY_TYPE_ID") or 0)
+        company_id = int(row.get("ENTITY_ID") or 0)
+    except (TypeError, ValueError):
+        return {"skipped": True, "reason": "customer_not_linked"}
+    if entity_type_id != 4 or not company_id:
+        return {"skipped": True, "reason": "customer_not_linked"}
+    return sync_customer_from_bitrix_event(db, settings=settings, company_id=company_id)
 
 def sync_trip(req, db, settings=None) -> dict:
     settings = settings or get_integration_settings(db)
@@ -1046,15 +1170,20 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         )
         db.add(trip)
 
-    raw_date = _read_logical(item, "planned_date", mapping)
-    if raw_date:
+    raw_planned_at = _read_logical(item, "planned_at", mapping)
+    if raw_planned_at:
+        raw_text = str(_scalar(raw_planned_at) or "").strip()
         try:
-            trip.planned_date = date.fromisoformat(str(raw_date)[:10])
+            parsed = datetime.fromisoformat(raw_text.replace("Z", "+00:00"))
+            trip.planned_date = parsed.date()
+            trip.planned_time = parsed.strftime("%H:%M")
         except ValueError:
-            pass
+            try:
+                trip.planned_date = date.fromisoformat(raw_text[:10])
+            except ValueError:
+                pass
     trip.number = number
     for logical, attr, limit in (
-        ("planned_time", "planned_time", 50),
         ("load_address", "load_address", None),
         ("unload_address", "unload_address", None),
         ("route_name", "route_name", None),
@@ -1182,6 +1311,8 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     if built_in_company_id and "_error" not in company_item:
         customer_name = str(company_item.get("title") or customer_name or "").strip()
         customer_bitrix_id = built_in_company_id
+        if not customer_inn:
+            customer_inn = _company_requisite_inn(settings.webhook_url, built_in_company_id)
     if client_field_present and not built_in_company_id and not built_in_contact_id and not customer_name and not customer_inn:
         trip.customer_id = None
     elif customer_name or customer_bitrix_id is not None or customer_inn or built_in_contact_id:
