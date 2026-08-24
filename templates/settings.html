@@ -300,7 +300,12 @@
   <input type="hidden" name="provider" value="bitrix24" />
   <button class="btn" type="submit">Сохранить</button>
 </form>
-<p><a class="btn btn-ghost" href="/settings/bitrix/test" target="_blank">Проверить подключение и показать смарт-процессы</a></p>
+<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px">
+  <a class="btn btn-ghost" href="/settings/bitrix/test" target="_blank">Проверить подключение и показать смарт-процессы</a>
+  <form method="post" action="/settings/bitrix/sync-now">
+    <button class="btn btn-ghost" type="submit">Подтянуть последние рейсы из Bitrix</button>
+  </form>
+</div>
 {% endif %}
 
 <script>
