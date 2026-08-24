@@ -1,4 +1,5 @@
 """Двусторонняя синхронизация рейсов со смарт-процессами Bitrix24."""
+import base64
 import json
 import math
 import os
@@ -6,6 +7,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from email.message import Message
 from datetime import date, datetime, timezone
 from typing import Optional
 
@@ -53,7 +55,15 @@ FIELD_MAP = {
     "customer_name": "ufCustomer",
     "customer_bitrix_id": "ufCustomerBitrixId",
     "customer_inn": "ufCustomerInn",
+    "customer_contact_name": "ufCustomerContact",
+    "customer_contact_phone": "ufCustomerPhone",
+    "customer_address": "ufCustomerAddress",
     "polygon_name": "ufPolygon",
+    "polygon_address": "ufPolygonAddress",
+    "polygon_contact": "ufPolygonContact",
+    "polygon_phone": "ufPolygonPhone",
+    "polygon_navigator_url": "ufPolygonNavigator",
+    "attachments": "ufTripFiles",
     "sum_trip": "ufSumTrip",
     "sum_driver": "ufSumDriver",
     "started_at": "ufStartedAt",
@@ -92,7 +102,15 @@ FIELD_TITLES = {
     "customer_name": ("заказчик", "клиент", "компания"),
     "customer_bitrix_id": ("id компании битрикс", "bitrix id клиента", "id клиента битрикс"),
     "customer_inn": ("инн заказчика", "инн клиента", "инн"),
+    "customer_contact_name": ("контакт заказчика", "контакт клиента", "контактное лицо заказчика"),
+    "customer_contact_phone": ("телефон заказчика", "телефон клиента", "телефон компании"),
+    "customer_address": ("адрес заказчика", "адрес клиента", "адрес компании"),
     "polygon_name": ("полигон",),
+    "polygon_address": ("адрес полигона",),
+    "polygon_contact": ("контакт полигона", "диспетчер полигона"),
+    "polygon_phone": ("телефон полигона", "телефон диспетчера полигона"),
+    "polygon_navigator_url": ("навигация полигона", "ссылка навигатора полигона", "яндекс навигация полигона"),
+    "attachments": ("файлы рейса", "фото и файлы", "файлы водителя", "вложения рейса", "файлы"),
     "sum_trip": ("сумма рейса", "стоимость рейса"),
     "sum_driver": ("сумма водителю", "зарплата водителя", "начисление водителю"),
     "started_at": ("начало рейса", "время начала рейса"),
@@ -325,7 +343,14 @@ def _trip_values(req) -> dict:
         "customer_name": req.customer.name if req.customer else "",
         "customer_bitrix_id": req.customer.bitrix_company_id if req.customer and req.customer.bitrix_company_id is not None else "",
         "customer_inn": req.customer.inn if req.customer else "",
+        "customer_contact_name": req.customer.contact if req.customer else "",
+        "customer_contact_phone": req.customer.phone if req.customer else "",
+        "customer_address": req.customer.address if req.customer else "",
         "polygon_name": req.polygon.name if req.polygon else "",
+        "polygon_address": req.polygon.address if req.polygon else "",
+        "polygon_contact": req.polygon.contact if req.polygon else "",
+        "polygon_phone": req.polygon.phone if req.polygon else "",
+        "polygon_navigator_url": req.polygon.navigator_url if req.polygon else "",
         "sum_trip": req.sum_trip if req.sum_trip is not None else "",
         "sum_driver": req.sum_driver or 0,
         "started_at": _as_bitrix_value(req.started_at),
@@ -350,6 +375,330 @@ def build_fields(req, field_map=None) -> dict:
     return {code: values[logical] for logical, code in mapping.items() if logical in values}
 
 
+
+def _field_type(info: dict) -> str:
+    data = info.get("data") if isinstance(info, dict) else None
+    return str(
+        (info or {}).get("type")
+        or (info or {}).get("userTypeId")
+        or (data or {}).get("userTypeId")
+        or (data or {}).get("type")
+        or ""
+    ).lower()
+
+
+def _attachment_field(schema: dict, mapping: dict):
+    code = mapping.get("attachments")
+    if code and code in schema and _field_type(schema.get(code, {})) == "file":
+        return code
+    aliases = tuple(_normalize(x) for x in FIELD_TITLES["attachments"])
+    for field_code, info in schema.items():
+        if _field_type(info) != "file":
+            continue
+        title = _normalize(info.get("title") or info.get("formLabel") or info.get("listLabel") or field_code)
+        if title in aliases or any(alias and alias in title for alias in aliases):
+            return field_code
+    return None
+
+
+def _list_result_items(response: dict):
+    result = response.get("result", {}) if isinstance(response, dict) else {}
+    if isinstance(result, list):
+        return result
+    return result.get("items") or result.get("types") or []
+
+
+def _first_phone(item: dict) -> str:
+    for row in item.get("fm") or []:
+        if isinstance(row, dict) and str(row.get("typeId") or "").upper() == "PHONE":
+            value = str(row.get("value") or "").strip()
+            if value:
+                return value
+    for key in ("phoneWork", "phoneMobile", "phone"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _contact_display_name(item: dict) -> str:
+    parts = [str(item.get(key) or "").strip() for key in ("lastName", "name", "secondName")]
+    value = " ".join(part for part in parts if part).strip()
+    return value or str(item.get("title") or "").strip()
+
+
+def _find_company_by_name(webhook_base: str, name: str):
+    response = _http_post(webhook_base, "crm.item.list", {
+        "entityTypeId": 4, "filter": {"title": name}, "select": ["id", "title"],
+    })
+    for item in _list_result_items(response):
+        if _normalize(item.get("title")) == _normalize(name):
+            return int(item.get("id"))
+    return None
+
+
+def _ensure_bitrix_customer(customer, webhook_base: str):
+    """Создаёт/находит CRM-компанию и контакт только когда локальному заказчику не хватает ID."""
+    if not customer:
+        return None, None
+    company_id = customer.bitrix_company_id
+    if not company_id and customer.name:
+        company_id = _find_company_by_name(webhook_base, customer.name)
+        if not company_id:
+            fields = {"title": customer.name}
+            company_schema = get_element_fields(webhook_base, "4")
+            if customer.address and "address" in company_schema:
+                fields["address"] = customer.address
+            if customer.phone:
+                fields["fm"] = [{"typeId": "PHONE", "valueType": "WORK", "value": customer.phone}]
+            response = _http_post(webhook_base, "crm.item.add", {"entityTypeId": 4, "fields": fields})
+            if "error" not in response:
+                result = response.get("result", {})
+                company_id = result.get("id") or result.get("item", {}).get("id")
+        if company_id:
+            customer.bitrix_company_id = int(company_id)
+
+    contact_id = getattr(customer, "bitrix_contact_id", None)
+    if not contact_id and company_id:
+        links = _http_post(webhook_base, "crm.company.contact.items.get", {"id": int(company_id)})
+        candidates = links.get("result", []) if "error" not in links else []
+        if isinstance(candidates, list) and candidates:
+            primary = next((row for row in candidates if row.get("IS_PRIMARY") == "Y"), candidates[0])
+            raw_contact_id = primary.get("CONTACT_ID")
+            if raw_contact_id:
+                contact_id = int(raw_contact_id)
+                customer.bitrix_contact_id = contact_id
+
+    if not contact_id and (customer.contact or customer.phone):
+        clean_name = (customer.contact or customer.name or "Контакт").strip()
+        parts = clean_name.split(maxsplit=1)
+        fields = {"name": parts[0] if parts else clean_name}
+        if len(parts) > 1:
+            fields["lastName"] = parts[1]
+        if customer.phone:
+            fields["fm"] = [{"typeId": "PHONE", "valueType": "WORK", "value": customer.phone}]
+        response = _http_post(webhook_base, "crm.item.add", {"entityTypeId": 3, "fields": fields})
+        if "error" not in response:
+            result = response.get("result", {})
+            contact_id = result.get("id") or result.get("item", {}).get("id")
+            if contact_id:
+                contact_id = int(contact_id)
+                customer.bitrix_contact_id = contact_id
+                if company_id:
+                    _http_post(webhook_base, "crm.company.contact.add", {
+                        "id": int(company_id), "fields": {"CONTACT_ID": contact_id, "IS_PRIMARY": "Y"},
+                    })
+    return int(company_id) if company_id else None, int(contact_id) if contact_id else None
+
+
+def _type_info_by_entity(webhook_base: str, entity_id: int):
+    response = _http_post(webhook_base, "crm.type.getByEntityTypeId", {"entityTypeId": int(entity_id)})
+    if "error" in response:
+        return {}
+    return response.get("result", {}).get("type", {})
+
+
+def ensure_client_field_enabled(webhook_base: str, entity_id: int) -> dict:
+    """Безопасно включает системное поле «Клиент» в SPA, если webhook имеет права администратора CRM."""
+    info = _type_info_by_entity(webhook_base, int(entity_id))
+    if not info:
+        return {"skipped": True, "reason": "type_info_unavailable"}
+    if info.get("isClientEnabled") in ("Y", True, 1, "1"):
+        return {"ok": True, "already": True}
+    type_id = info.get("id")
+    if not type_id:
+        return {"skipped": True, "reason": "type_id_missing"}
+    response = _http_post(webhook_base, "crm.type.update", {"id": int(type_id), "fields": {"isClientEnabled": "Y"}})
+    if "error" in response:
+        return {"error": response["error"]}
+    print("BITRIX_CLIENT_ENABLED", entity_id, flush=True)
+    return {"ok": True, "already": False}
+
+
+def _attachment_bytes(attachment):
+    if attachment.content:
+        return bytes(attachment.content)
+    path = str(attachment.path or "")
+    if path and os.path.isfile(path):
+        with open(path, "rb") as fh:
+            return fh.read()
+    return b""
+
+
+def _remote_file_list(value):
+    if not value:
+        return []
+    if isinstance(value, dict) and "id" in value:
+        return [value]
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict) and row.get("id")]
+    return []
+
+
+def ensure_attachment_field(webhook_base: str, entity_id: int):
+    schema = get_element_fields(webhook_base, str(entity_id))
+    if "_error" not in schema:
+        mapping = resolve_field_map(schema)
+        existing = _attachment_field(schema, mapping)
+        if existing:
+            return existing, schema, {"ok": True, "already": True}
+    info = _type_info_by_entity(webhook_base, int(entity_id))
+    type_id = info.get("id") if info else None
+    if not type_id:
+        return None, schema, {"skipped": True, "reason": "type_id_missing"}
+    field_name = f"UF_CRM_{int(type_id)}_GROUND_TRIP_FILES"
+    response = _http_post(webhook_base, "userfieldconfig.add", {
+        "moduleId": "crm",
+        "field": {
+            "entityId": f"CRM_{int(type_id)}",
+            "fieldName": field_name,
+            "userTypeId": "file",
+            "multiple": "Y",
+            "mandatory": "N",
+            "editFormLabel": {"ru": "Файлы рейса", "en": "Trip files"},
+            "settings": {"EXTENSIONS": ["jpg", "jpeg", "png", "webp", "pdf"]},
+        },
+    })
+    if "error" in response:
+        return None, schema, {"error": response["error"], "reason": "file_field_create_failed"}
+    schema = get_element_fields(webhook_base, str(entity_id))
+    if "_error" in schema:
+        return None, schema, {"error": schema["_error"], "reason": "fields_refresh_failed"}
+    field_code = _attachment_field(schema, resolve_field_map(schema))
+    if field_code:
+        print("BITRIX_ATTACHMENT_FIELD_CREATED", entity_id, flush=True)
+        return field_code, schema, {"ok": True, "already": False}
+    return None, schema, {"error": "bitrix_attachment_field_missing_after_create"}
+
+
+def sync_attachments(req, db, settings=None) -> dict:
+    settings = settings or get_integration_settings(db)
+    if not settings or not settings.is_active or not settings.webhook_url:
+        return {"skipped": True, "reason": "no_active_integration"}
+    entity_id = resolve_process_entity(settings.webhook_url, req.kind)
+    if not entity_id:
+        return {"skipped": True, "reason": "process_not_found"}
+    if not req.bitrix_element_id:
+        trip_result = sync_trip(req, db, settings=settings)
+        if not trip_result.get("ok"):
+            return trip_result
+    field_code, schema, field_state = ensure_attachment_field(settings.webhook_url, int(entity_id))
+    if not field_code:
+        print("BITRIX_ATTACHMENT_SYNC_SKIP", field_state.get("reason") or "file_field_not_found", entity_id, req.id, flush=True)
+        return field_state
+    mapping = resolve_field_map(schema)
+    remote_item = fetch_item(settings.webhook_url, int(entity_id), int(req.bitrix_element_id))
+    if "_error" in remote_item:
+        return {"error": remote_item["_error"], "action": "get"}
+    remote_files = _remote_file_list(remote_item.get(field_code))
+    remote_ids = {int(row["id"]) for row in remote_files if row.get("id")}
+    local_files = db.query(models.Attachment).filter(models.Attachment.trip_request_id == req.id).order_by(models.Attachment.id).all()
+    for attachment in local_files:
+        if attachment.bitrix_file_id and int(attachment.bitrix_file_id) not in remote_ids:
+            attachment.bitrix_file_id = None
+    unsynced = [row for row in local_files if not row.bitrix_file_id]
+    if not unsynced:
+        return {"ok": True, "action": "attachments", "count": len(remote_files)}
+    values = [{"id": int(row["id"])} for row in remote_files]
+    uploadable = []
+    for attachment in unsynced:
+        content = _attachment_bytes(attachment)
+        if not content:
+            continue
+        values.append([attachment.filename or "file", base64.b64encode(content).decode("ascii")])
+        uploadable.append(attachment)
+    if not uploadable:
+        return {"skipped": True, "reason": "attachment_content_missing"}
+    response = _http_post(settings.webhook_url, "crm.item.update", {
+        "entityTypeId": int(entity_id), "id": int(req.bitrix_element_id), "fields": {field_code: values},
+    })
+    if "error" in response:
+        return {"error": response["error"], "action": "attachments"}
+    result_item = response.get("result", {}).get("item") or fetch_item(settings.webhook_url, int(entity_id), int(req.bitrix_element_id))
+    final_files = _remote_file_list(result_item.get(field_code) if isinstance(result_item, dict) else None)
+    new_ids = [int(row["id"]) for row in final_files if int(row.get("id") or 0) not in remote_ids]
+    for attachment, remote_id in zip(uploadable, new_ids):
+        attachment.bitrix_file_id = remote_id
+        db.add(attachment)
+    print("BITRIX_ATTACHMENT_SYNC_OK", entity_id, req.bitrix_element_id, req.id, len(uploadable), flush=True)
+    return {"ok": True, "action": "attachments", "count": len(final_files)}
+
+
+def _download_signed_file(url: str):
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "ground-reis/1.0", "Accept": "*/*", "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+        "Referer": "https://ground-reis.ru/",
+    })
+    with urllib.request.urlopen(req, timeout=BITRIX_TIMEOUT) as resp:
+        content = resp.read(10 * 1024 * 1024 + 1)
+        if len(content) > 10 * 1024 * 1024:
+            raise ValueError("bitrix_attachment_too_large")
+        content_type = str(resp.headers.get_content_type() or "application/octet-stream").lower()
+        filename = "bitrix-file"
+        disposition = resp.headers.get("Content-Disposition")
+        if disposition:
+            msg = Message(); msg["Content-Disposition"] = disposition
+            value = msg.get_filename()
+            if value:
+                filename = value
+        return filename, content_type, content
+
+
+def _guess_allowed_content_type(filename: str, content_type: str, content: bytes):
+    value = str(content_type or "").split(";", 1)[0].lower()
+    signatures = {
+        "image/jpeg": content.startswith(b"\xff\xd8\xff"),
+        "image/png": content.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/webp": len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP",
+        "application/pdf": content.startswith(b"%PDF-"),
+    }
+    if value in signatures and signatures[value]:
+        return value
+    lower_name = str(filename or "").lower()
+    for suffix, guessed in ((".jpg", "image/jpeg"), (".jpeg", "image/jpeg"), (".png", "image/png"), (".webp", "image/webp"), (".pdf", "application/pdf")):
+        if lower_name.endswith(suffix) and signatures[guessed]:
+            return guessed
+    return None
+
+
+def sync_inbound_attachments(item: dict, trip, db, schema: dict, mapping: dict) -> dict:
+    field_code = _attachment_field(schema, mapping)
+    if not field_code or field_code not in item:
+        return {"skipped": True}
+    remote_files = _remote_file_list(item.get(field_code))
+    remote_ids = {int(row["id"]) for row in remote_files if row.get("id")}
+    local_remote = db.query(models.Attachment).filter(
+        models.Attachment.trip_request_id == trip.id,
+        models.Attachment.bitrix_file_id.isnot(None),
+    ).all()
+    for attachment in local_remote:
+        if int(attachment.bitrix_file_id) not in remote_ids:
+            db.delete(attachment)
+    existing_ids = {int(row.bitrix_file_id) for row in local_remote if row.bitrix_file_id in remote_ids}
+    current_count = db.query(models.Attachment).filter(models.Attachment.trip_request_id == trip.id).count()
+    for remote in remote_files:
+        remote_id = int(remote.get("id") or 0)
+        if not remote_id or remote_id in existing_ids or current_count >= 5:
+            continue
+        url = str(remote.get("urlMachine") or "")
+        if not url:
+            continue
+        try:
+            filename, content_type, content = _download_signed_file(url)
+            allowed_type = _guess_allowed_content_type(filename, content_type, content)
+            if not allowed_type:
+                continue
+        except Exception as exc:
+            print("BITRIX_ATTACHMENT_IMPORT_ERROR", trip.id, remote_id, type(exc).__name__, flush=True)
+            continue
+        db.add(models.Attachment(
+            trip_request_id=trip.id, filename=filename[:512], content_type=allowed_type,
+            size=len(content), path="", content=content, bitrix_file_id=remote_id,
+        ))
+        current_count += 1
+    return {"ok": True, "count": len(remote_files)}
+
+
 def sync_trip(req, db, settings=None) -> dict:
     settings = settings or get_integration_settings(db)
     if not settings or not settings.is_active or not settings.webhook_url:
@@ -363,7 +712,22 @@ def sync_trip(req, db, settings=None) -> dict:
     if "_error" in schema:
         print("BITRIX_SYNC_ERROR", "fields", entity_id, req.id, flush=True)
         return {"error": schema["_error"], "action": "fields"}
-    fields = build_fields(req, resolve_field_map(schema))
+    resolved_map = resolve_field_map(schema)
+    fields = build_fields(req, resolved_map)
+    # Системное поле «Клиент» нужно только для заявок, где действительно выбран заказчик.
+    # Не делаем лишние административные REST-вызовы для рейсов без клиента.
+    if req.customer and "companyId" not in schema and "contactIds" not in schema:
+        ensure_client_field_enabled(settings.webhook_url, int(entity_id))
+        refreshed_schema = get_element_fields(settings.webhook_url, entity_id)
+        if "_error" not in refreshed_schema:
+            schema = refreshed_schema
+            resolved_map = resolve_field_map(schema)
+            fields = build_fields(req, resolved_map)
+    company_id, contact_id = _ensure_bitrix_customer(req.customer, settings.webhook_url) if req.customer else (None, None)
+    if company_id and "companyId" in schema:
+        fields["companyId"] = company_id
+    if contact_id and "contactIds" in schema:
+        fields["contactIds"] = [contact_id]
     target_stage = STATUS_STAGE_TITLES.get(req.status)
     if target_stage:
         stage_id, category_id = resolve_stage(
@@ -643,9 +1007,30 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         polygon = _find_by_name(db, models.Polygon, models.Polygon.name, polygon_name)
         if not polygon:
             polygon = models.Polygon(name=polygon_name); db.add(polygon); db.flush()
+        for logical, attr in (("polygon_address", "address"), ("polygon_contact", "contact"), ("polygon_phone", "phone"), ("polygon_navigator_url", "navigator_url")):
+            if _has_logical(item, logical, mapping):
+                setattr(polygon, attr, str(_read_logical(item, logical, mapping) or ""))
         trip.polygon_id = polygon.id
     customer_name = str(_read_logical(item, "customer_name", mapping) or "").strip()
-    if customer_name or customer_bitrix_id is not None or customer_inn:
+    built_in_company_id = _optional_nonnegative_int(item.get("companyId"), "companyId") if item.get("companyId") not in (None, "", 0, "0") else None
+    raw_contact_ids = item.get("contactIds") or ([] if item.get("contactId") in (None, "", 0, "0") else [item.get("contactId")])
+    if not isinstance(raw_contact_ids, list):
+        raw_contact_ids = [raw_contact_ids]
+    built_in_contact_id = None
+    for raw_contact_id in raw_contact_ids:
+        try:
+            candidate = int(raw_contact_id)
+        except (TypeError, ValueError):
+            continue
+        if candidate > 0:
+            built_in_contact_id = candidate
+            break
+    company_item = fetch_item(settings.webhook_url, 4, built_in_company_id) if built_in_company_id else {}
+    contact_item = fetch_item(settings.webhook_url, 3, built_in_contact_id) if built_in_contact_id else {}
+    if built_in_company_id and "_error" not in company_item:
+        customer_name = str(company_item.get("title") or customer_name or "").strip()
+        customer_bitrix_id = built_in_company_id
+    if customer_name or customer_bitrix_id is not None or customer_inn or built_in_contact_id:
         customer = None
         if customer_bitrix_id is not None:
             customer = db.query(models.Customer).filter(models.Customer.bitrix_company_id == customer_bitrix_id).first()
@@ -684,7 +1069,29 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
             customer.bitrix_company_id = customer_bitrix_id
         if customer_inn:
             customer.inn = customer_inn
+        if built_in_contact_id:
+            customer.bitrix_contact_id = built_in_contact_id
+        if built_in_company_id and "_error" not in company_item:
+            company_address = str(company_item.get("address") or "").strip()
+            company_phone = _first_phone(company_item)
+            if company_address:
+                customer.address = company_address
+            if company_phone and not customer.phone:
+                customer.phone = company_phone
+        if built_in_contact_id and "_error" not in contact_item:
+            contact_name = _contact_display_name(contact_item)
+            contact_phone = _first_phone(contact_item)
+            if contact_name:
+                customer.contact = contact_name
+            if contact_phone:
+                customer.phone = contact_phone
         trip.customer_id = customer.id
+        if _has_logical(item, "customer_contact_name", mapping):
+            customer.contact = str(_read_logical(item, "customer_contact_name", mapping) or "")
+        if _has_logical(item, "customer_contact_phone", mapping):
+            customer.phone = str(_read_logical(item, "customer_contact_phone", mapping) or "")
+        if _has_logical(item, "customer_address", mapping):
+            customer.address = str(_read_logical(item, "customer_address", mapping) or "")
     cargo_name = str(_read_logical(item, "cargo_type_name", mapping) or "").strip()
     if cargo_name:
         cargo = _find_by_name(db, models.CargoType, models.CargoType.name, cargo_name)
@@ -696,6 +1103,8 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         if tariff and tariff.kind == kind:
             trip.tariff_id = tariff.id
     db.flush()
+    if "_error" not in schema:
+        sync_inbound_attachments(item, trip, db, schema, mapping)
     print("BITRIX_INBOUND_OK", "add" if created else "update", entity_type_id, item_id, trip.id, flush=True)
     return {"ok": True, "action": "add" if created else "update", "trip_id": trip.id}
 

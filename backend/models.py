@@ -88,6 +88,7 @@ class Customer(Base):
     name = Column(String(255), unique=True, nullable=False)
     inn = Column(String(12), nullable=True, index=True)
     bitrix_company_id = Column(Integer, nullable=True, unique=True, index=True)
+    bitrix_contact_id = Column(Integer, nullable=True, index=True)
     contact = Column(String(255))
     phone = Column(String(50))
     address = Column(Text)
@@ -277,6 +278,7 @@ class Attachment(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     path = Column(String(1024))
     content = Column(LargeBinary, nullable=True)
+    bitrix_file_id = Column(Integer, nullable=True, index=True)
     trip_request = relationship("TripRequest")
 
 
