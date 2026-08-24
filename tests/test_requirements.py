@@ -1005,3 +1005,124 @@ def test_driver_request_shows_clickable_client_yandex_navigation():
     assert 'href="https://yandex.ru/maps/?text=client-object"' in page.text
     assert "Открыть в Яндекс Картах" in page.text
     db.close()
+
+
+def test_bitrix_status_uses_persisted_outbound_after_runtime_reset():
+    db, admin, *_ = reset_db()
+    persisted = {
+        "attempted": True,
+        "request_id": 321,
+        "kind": models.TripType.PUKHTOVOZ.value,
+        "result": {"ok": True, "action": "add", "element_id": 654},
+    }
+    db.add(models.AuditLog(
+        action="sync", section="bitrix_outbound", record_id=321,
+        new_value=app_module.json.dumps(persisted, ensure_ascii=False),
+    ))
+    db.commit()
+    app_module.BITRIX_LAST_OUTBOUND = {"attempted": False}
+    response = client_as(admin).get("/settings/bitrix/status")
+    assert response.status_code == 200
+    assert response.json()["outbound"] == persisted
+    db.close()
+
+
+def test_bitrix_final_echo_is_acknowledged_without_mutating_locked_trip(monkeypatch):
+    db, admin, driver, vt = reset_db()
+    trip = models.TripRequest(
+        number="П-FINAL-ECHO", planned_date=date(2026, 8, 12),
+        kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.LOGIST_CONFIRMED,
+        bitrix_element_id=777, bitrix_entity_type_id=1088,
+    )
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/",
+        secret="hook-secret", is_active=True,
+    )
+    db.add_all([trip, settings]); db.commit()
+    payload = {
+        "event": "ONCRMDYNAMICITEMUPDATE",
+        "data[FIELDS][ID]": "777",
+        "data[FIELDS][ENTITY_TYPE_ID]": "1088",
+    }
+    response = TestClient(app_module.app).post("/webhook/bitrix24?token=hook-secret", json=payload)
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True, "skipped": True, "reason": "final_locked", "trip_id": trip.id,
+    }
+    db.expire_all()
+    assert db.query(models.TripRequest).filter_by(id=trip.id).one().status == models.RequestStatus.LOGIST_CONFIRMED
+    db.close()
+
+
+def test_outbound_wrapper_records_all_sync_attempts(monkeypatch):
+    db, admin, driver, vt = reset_db()
+    trip = models.TripRequest(
+        number="П-DIAG", planned_date=date(2026, 8, 12),
+        kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.ASSIGNED,
+    )
+    db.add(trip); db.commit()
+    monkeypatch.setattr(app_module.bitrix, "sync_trip", lambda req, db: {"skipped": True, "reason": "process_not_found"})
+    result = app_module._sync_trip_outbound(trip, db)
+    db.commit()
+    assert result == {"skipped": True, "reason": "process_not_found"}
+    row = db.query(models.AuditLog).filter_by(section="bitrix_outbound", record_id=trip.id).one()
+    saved = app_module.json.loads(row.new_value)
+    assert saved["attempted"] is True
+    assert saved["result"]["skipped"] is True
+    assert saved["result"]["reason"] == "process_not_found"
+    db.close()
+
+
+def test_bitrix_webhook_accepts_nested_json_application_token():
+    db, admin, *_ = reset_db()
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/",
+        secret="nested-secret", is_active=True,
+    )
+    db.add(settings); db.commit()
+    payload = {
+        "event": "PING",
+        "auth": {"application_token": "nested-secret"},
+    }
+    response = TestClient(app_module.app).post("/webhook/bitrix24", json=payload)
+    assert response.status_code == 200
+    assert response.json()["skipped"] == "unsupported_event"
+
+    denied = TestClient(app_module.app).post(
+        "/webhook/bitrix24",
+        json={"event": "PING", "auth": {"application_token": "wrong-secret"}},
+    )
+    assert denied.status_code == 403
+    db.close()
+
+
+def test_samosval_outbound_uses_process_1092(monkeypatch):
+    db, admin, *_ = reset_db()
+    trip = models.TripRequest(
+        number="С-BITRIX-1092", planned_date=date(2026, 8, 24),
+        kind=models.TripType.SAMOSVAL, status=models.RequestStatus.ASSIGNED,
+    )
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/",
+        secret="hook-secret", is_active=True,
+    )
+    db.add_all([trip, settings]); db.commit()
+
+    monkeypatch.setattr(app_module.bitrix, "find_smart_process_ids", lambda url: {})
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: {"title": {"title": "Название"}})
+    calls = []
+
+    def fake_post(url, method, payload):
+        calls.append((method, payload))
+        return {"result": {"item": {"id": 606}}}
+
+    monkeypatch.setattr(app_module.bitrix, "_http_post", fake_post)
+    result = app_module.bitrix.sync_trip(trip, db, settings=settings)
+    db.commit()
+
+    assert result == {"ok": True, "action": "add", "element_id": 606}
+    assert calls and calls[0][0] == "crm.item.add"
+    assert calls[0][1]["entityTypeId"] == 1092
+    assert trip.bitrix_entity_type_id == 1092
+    assert trip.bitrix_element_id == 606
+    db.close()
