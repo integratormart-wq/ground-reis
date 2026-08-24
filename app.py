@@ -1,4 +1,4 @@
-import os, io, csv, sys, math, json, threading, uuid, urllib.parse, urllib.request
+import os, io, csv, sys, math, json, threading, uuid, base64, binascii, urllib.parse, urllib.request
 from datetime import datetime, timedelta, date
 from typing import Optional, List
 from dotenv import load_dotenv
@@ -132,6 +132,10 @@ def _initialize_database():
                 binary_type = "BYTEA" if engine.dialect.name == "postgresql" else "BLOB"
                 conn.execute(text(f"ALTER TABLE attachments ADD COLUMN content {binary_type}"))
                 print("BOOT migrated: added attachments.content", flush=True)
+            if "bitrix_file_id" not in attachment_cols:
+                conn.execute(text("ALTER TABLE attachments ADD COLUMN bitrix_file_id INTEGER"))
+                print("BOOT migrated: added attachments.bitrix_file_id", flush=True)
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_attachments_bitrix_file_id ON attachments(bitrix_file_id)"))
             polygon_cols = [c["name"] for c in insp.get_columns("polygons")]
             polygon_column_migrations = {
                 "entry_notes": "TEXT", "navigator_url": "VARCHAR(1024)",
@@ -144,7 +148,7 @@ def _initialize_database():
                     conn.execute(text(f"ALTER TABLE polygons ADD COLUMN {column_name} {column_type}"))
                     print(f"BOOT migrated polygons: added {column_name}", flush=True)
             customer_cols = [c["name"] for c in insp.get_columns("customers")]
-            for column_name, column_type in {"inn": "VARCHAR(12)", "bitrix_company_id": "INTEGER"}.items():
+            for column_name, column_type in {"inn": "VARCHAR(12)", "bitrix_company_id": "INTEGER", "bitrix_contact_id": "INTEGER"}.items():
                 if column_name not in customer_cols:
                     conn.execute(text(f"ALTER TABLE customers ADD COLUMN {column_name} {column_type}"))
                     print(f"BOOT migrated customers: added {column_name}", flush=True)
@@ -161,6 +165,7 @@ def _initialize_database():
             conn.execute(text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_customers_bitrix_company_id ON customers(bitrix_company_id)"
             ))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customers_bitrix_contact_id ON customers(bitrix_contact_id)"))
             duplicate_numbers = conn.execute(text("SELECT number FROM trip_requests GROUP BY number HAVING COUNT(*) > 1 LIMIT 1")).first()
             if duplicate_numbers:
                 raise RuntimeError("Найдены дубли номеров заявок; уникальный индекс не создан")
@@ -851,6 +856,26 @@ def _sync_trip_outbound(req, db):
     return _record_bitrix_outbound(req, db, result)
 
 
+def _sync_linked_reference_trips(section, row, db):
+    filters = {
+        "customers": models.TripRequest.customer_id == row.id if section == "customers" else None,
+        "polygons": models.TripRequest.polygon_id == row.id if section == "polygons" else None,
+        "cargo-types": models.TripRequest.cargo_type_id == row.id if section == "cargo-types" else None,
+        "vehicles": models.TripRequest.vehicle_id == row.id if section == "vehicles" else None,
+        "tariffs": models.TripRequest.tariff_id == row.id if section == "tariffs" else None,
+    }
+    condition = filters.get(section)
+    if condition is None:
+        return
+    trips = db.query(models.TripRequest).filter(
+        condition, models.TripRequest.bitrix_element_id.isnot(None),
+    ).all()
+    for trip in trips:
+        _sync_trip_outbound(trip, db)
+    if trips:
+        db.commit()
+
+
 def _latest_bitrix_outbound_state(db):
     row = db.query(models.AuditLog).filter(
         models.AuditLog.section == "bitrix_outbound",
@@ -1086,43 +1111,30 @@ def _lock_attachment_parent(db: Session, req_id: int):
     return query.first()
 
 
-@app.post("/requests/{req_id}/attachments")
-async def upload_attachments(
-    req_id: int, files: List[UploadFile] = File(...),
-    current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db),
-):
-    trip = _lock_attachment_parent(db, req_id)
-    if not trip or not _can_access_trip(current_user, trip):
-        raise HTTPException(403)
-    existing_count = db.query(models.Attachment).filter(models.Attachment.trip_request_id == req_id).count()
-    if not files or existing_count + len(files) > MAX_ATTACHMENTS_PER_TRIP:
+def _save_attachment_payloads(trip, payloads, db: Session):
+    existing_count = db.query(models.Attachment).filter(models.Attachment.trip_request_id == trip.id).count()
+    if not payloads or existing_count + len(payloads) > MAX_ATTACHMENTS_PER_TRIP:
         raise HTTPException(400, "К одной заявке можно прикрепить не больше 5 файлов")
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     saved_paths = []
     try:
-        for uploaded in files:
-            original_name = os.path.basename(uploaded.filename or "file")[:512]
-            content_type = (uploaded.content_type or "").lower()
+        for original_name, content_type, content in payloads:
+            original_name = os.path.basename(original_name or "file")[:512]
+            content_type = str(content_type or "").lower()
             if content_type not in ALLOWED_ATTACHMENT_TYPES:
                 raise HTTPException(400, "Разрешены только JPG, PNG, WEBP и PDF")
-            extension = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "application/pdf": ".pdf"}[content_type]
-            chunks = []
-            total = 0
-            while chunk := await uploaded.read(1024 * 1024):
-                total += len(chunk)
-                if total > MAX_ATTACHMENT_SIZE:
-                    raise HTTPException(400, "Размер одного файла не должен превышать 10 МБ")
-                chunks.append(chunk)
-            content = b"".join(chunks)
-            if not content or not _attachment_signature_matches(content_type, content):
+            if not content or len(content) > MAX_ATTACHMENT_SIZE:
+                raise HTTPException(400, "Размер одного файла должен быть от 1 байта до 10 МБ")
+            if not _attachment_signature_matches(content_type, content):
                 raise HTTPException(400, "Содержимое файла не соответствует его типу")
+            extension = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "application/pdf": ".pdf"}[content_type]
             stored_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}{extension}")
             with open(stored_path, "wb") as output:
                 output.write(content)
             saved_paths.append(stored_path)
             db.add(models.Attachment(
-                trip_request_id=req_id, filename=original_name, content_type=content_type,
-                size=total, path=stored_path, content=content,
+                trip_request_id=trip.id, filename=original_name, content_type=content_type,
+                size=len(content), path=stored_path, content=content,
             ))
         db.commit()
     except Exception:
@@ -1133,7 +1145,68 @@ async def upload_attachments(
             except OSError:
                 pass
         raise
+    try:
+        bitrix_result = bitrix.sync_attachments(trip, db)
+        if isinstance(bitrix_result, dict) and bitrix_result.get("error"):
+            print("BITRIX_ATTACHMENT_SYNC_ERROR", trip.id, bitrix_result.get("action") or bitrix_result.get("reason") or "remote", flush=True)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print("BITRIX_ATTACHMENT_SYNC_EXCEPTION", trip.id, type(exc).__name__, flush=True)
+
+
+@app.post("/requests/{req_id}/attachments")
+async def upload_attachments(
+    req_id: int, files: List[UploadFile] = File(...),
+    current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    trip = _lock_attachment_parent(db, req_id)
+    if not trip or not _can_access_trip(current_user, trip):
+        raise HTTPException(403)
+    payloads = []
+    for uploaded in files:
+        chunks = []
+        total = 0
+        while chunk := await uploaded.read(1024 * 1024):
+            total += len(chunk)
+            if total > MAX_ATTACHMENT_SIZE:
+                raise HTTPException(400, "Размер одного файла не должен превышать 10 МБ")
+            chunks.append(chunk)
+        payloads.append((uploaded.filename or "file", uploaded.content_type or "", b"".join(chunks)))
+    _save_attachment_payloads(trip, payloads, db)
     return RedirectResponse(f"/requests/{req_id}", status_code=302)
+
+
+@app.post("/requests/{req_id}/attachments-json")
+async def upload_attachments_json(
+    req_id: int, request: Request,
+    current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """JSON-вариант загрузки нужен для reverse proxy: multipart PHP может разобрать до проксирования."""
+    trip = _lock_attachment_parent(db, req_id)
+    if not trip or not _can_access_trip(current_user, trip):
+        raise HTTPException(403)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Не удалось прочитать файлы")
+    raw_files = payload.get("files") if isinstance(payload, dict) else None
+    if not isinstance(raw_files, list):
+        raise HTTPException(400, "Не переданы файлы")
+    payloads = []
+    for raw in raw_files:
+        if not isinstance(raw, dict):
+            raise HTTPException(400, "Некорректный файл")
+        encoded = str(raw.get("data") or "")
+        if len(encoded) > (MAX_ATTACHMENT_SIZE * 4 // 3) + 4096:
+            raise HTTPException(400, "Размер одного файла не должен превышать 10 МБ")
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(400, "Файл поврежден при передаче")
+        payloads.append((raw.get("name") or "file", raw.get("content_type") or "", content))
+    _save_attachment_payloads(trip, payloads, db)
+    return JSONResponse({"ok": True, "count": len(payloads)})
 
 
 @app.get("/attachments/{attachment_id}")
@@ -1831,7 +1904,7 @@ def add_settings_polygon(name: str = Form(...), address: str = Form(""), contact
     return RedirectResponse("/settings#polygons", status_code=302)
 
 @app.post("/settings/customers")
-def add_customer(name: str = Form(...), address: str = Form(""), inn: str = Form(""), bitrix_company_id: str = Form(""), current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
+def add_customer(name: str = Form(...), address: str = Form(""), contact: str = Form(""), phone: str = Form(""), inn: str = Form(""), bitrix_company_id: str = Form(""), bitrix_contact_id: str = Form(""), current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
     clean_name = name.strip()
     normalized_name = bitrix._normalize(clean_name)
     duplicate_name = next(
@@ -1847,7 +1920,16 @@ def add_customer(name: str = Form(...), address: str = Form(""), inn: str = Form
         ).first() if clean_inn or bitrix_id is not None else None
         if duplicate:
             raise HTTPException(409, "Заказчик с таким ИНН или Bitrix ID уже существует")
-        db.add(models.Customer(name=clean_name, address=address.strip(), inn=clean_inn, bitrix_company_id=bitrix_id))
+        try:
+            bitrix_contact_value = int(bitrix_contact_id) if str(bitrix_contact_id or "").strip() else None
+        except ValueError:
+            raise HTTPException(400, "Bitrix ID контакта должен быть числом")
+        if bitrix_contact_value is not None and bitrix_contact_value <= 0:
+            raise HTTPException(400, "Bitrix ID контакта должен быть больше нуля")
+        db.add(models.Customer(
+            name=clean_name, address=address.strip(), contact=contact.strip(), phone=phone.strip(),
+            inn=clean_inn, bitrix_company_id=bitrix_id, bitrix_contact_id=bitrix_contact_value,
+        ))
         _commit_or_conflict(db)
     return RedirectResponse("/settings#customers", status_code=302)
 
@@ -2015,7 +2097,7 @@ def edit_setting_record(
     section: str, record_id: int, name: Optional[str] = Form(None), title: Optional[str] = Form(None),
     plate: Optional[str] = Form(None), type_id: Optional[str] = Form(None), capacity: Optional[str] = Form(None),
     address: str = Form(""), contact: str = Form(""), phone: str = Form(""), comment: str = Form(""),
-    inn: str = Form(""), bitrix_company_id: str = Form(""),
+    inn: str = Form(""), bitrix_company_id: str = Form(""), bitrix_contact_id: str = Form(""),
     description: str = Form(""), load_address: str = Form(""), unload_address: str = Form(""), distance: str = Form("0"),
     customer_id: Optional[str] = Form(None), unit: str = Form("м³"), kind: Optional[str] = Form(None), vehicle_type_id: Optional[str] = Form(None),
     formula: str = Form("trip"), trip_price: str = Form("0"), km_price: str = Form("0"),
@@ -2112,8 +2194,14 @@ def edit_setting_record(
         ).first() if clean_inn or bitrix_id is not None else None
         if duplicate_identity:
             raise HTTPException(409, "Заказчик с таким ИНН или Bitrix ID уже существует")
+        try:
+            bitrix_contact_value = int(bitrix_contact_id) if str(bitrix_contact_id or "").strip() else None
+        except ValueError:
+            raise HTTPException(400, "Bitrix ID контакта должен быть числом")
+        if bitrix_contact_value is not None and bitrix_contact_value <= 0:
+            raise HTTPException(400, "Bitrix ID контакта должен быть больше нуля")
         row.name = clean_name
-        row.inn, row.bitrix_company_id = clean_inn, bitrix_id
+        row.inn, row.bitrix_company_id, row.bitrix_contact_id = clean_inn, bitrix_id, bitrix_contact_value
         row.address, row.contact, row.phone, row.comment = address.strip(), contact.strip(), phone.strip(), comment.strip()
     elif section == "cargo-types":
         clean_name = (name or "").strip()
@@ -2191,6 +2279,7 @@ def edit_setting_record(
         row.is_active = is_active is not None
     _add_audit(db, current_user.id, f"settings:{section}", row.id, old_value, _model_snapshot(row))
     _commit_or_conflict(db)
+    _sync_linked_reference_trips(section, row, db)
     return RedirectResponse(f"/settings#{anchor}", status_code=302)
 
 
