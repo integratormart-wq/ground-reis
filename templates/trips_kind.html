@@ -53,7 +53,7 @@
       {% for r in reqs %}
       <tr>
         <td>{{ r.number }}</td>
-        <td>{{ r.customer.name if r.customer else (r.route_name or '—') }}</td>
+        <td>{{ r.customer.name if r.customer else (r.route_name or '—') }}{% if r.customer and r.customer.inn %}<br><span class="muted">ИНН {{ r.customer.inn }}</span>{% endif %}</td>
         <td>{{ r.load_address or '—' }}</td>
         <td>{{ r.planned_date.strftime('%d.%m.%Y') }}{% if r.planned_time %}, {{ r.planned_time[:5] }}{% endif %}</td>
         <td>{{ r.driver.full_name if r.driver else '—' }}</td>

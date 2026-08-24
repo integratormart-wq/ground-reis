@@ -12,6 +12,7 @@
     <div class="form-section-head"><span class="form-section-index">01</span><h2>Клиент и объект</h2></div>
     <div class="details" style="margin:0;border:0;border-radius:0;box-shadow:none;background:transparent">
       <div><b>Заказчик:</b> {{ req.customer.name if req.customer else '—' }}</div>
+      <div><b>ИНН компании:</b> {{ req.customer.inn if req.customer and req.customer.inn else '—' }}</div>
       <div><b>Адрес подачи:</b> {{ req.load_address or '—' }}</div>
       <div><b>Навигация по объекту:</b>
         {% if req.unload_address and (req.unload_address.startswith('http://') or req.unload_address.startswith('https://')) %}

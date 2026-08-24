@@ -306,6 +306,17 @@
     <button class="btn btn-ghost" type="submit">Подтянуть последние рейсы из Bitrix</button>
   </form>
 </div>
+
+<form method="post" action="/settings/integrations" class="filters" style="margin-top:18px">
+  <label>DaData API-ключ
+    <input type="password" name="secret" value="" autocomplete="new-password" placeholder="{% if integrations.get('dadata') and integrations.get('dadata').secret %}Ключ сохранён — оставьте пустым без изменений{% else %}Ключ для поиска компаний и адресов{% endif %}" />
+  </label>
+  <input type="hidden" name="provider" value="dadata" />
+  <input type="hidden" name="webhook_url" value="" />
+  <input type="hidden" name="responsible_id" value="" />
+  <button class="btn" type="submit">Сохранить DaData</button>
+</form>
+<p class="muted" style="margin-top:8px">DaData используется для подсказок российских адресов и поиска компании по ИНН. Сам маршрут водителя по-прежнему открывается в Яндекс Картах.</p>
 {% endif %}
 
 <script>

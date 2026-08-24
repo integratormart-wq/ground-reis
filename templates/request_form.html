@@ -12,8 +12,7 @@
     <div class="form-section-head"><span class="form-section-index">01</span><h2>Основная информация</h2></div>
     <div class="form-grid">
       <label>Номер заявки<input name="number" value="{{ editing.number if editing else '' }}" placeholder="{{ next_number_hint or 'П-1' }}" required /></label>
-      <label>Дата<input type="date" id="planned_date" name="planned_date" value="{{ editing.planned_date.isoformat() if editing else '' }}" required /></label>
-      <label>Время<input type="time" name="planned_time" value="{{ editing.planned_time if editing else '' }}" /></label>
+      <label>Дата и время<input type="datetime-local" id="planned_at" name="planned_at" value="{{ editing.planned_date.isoformat() ~ 'T' ~ ((editing.planned_time or '00:00')[:5]) if editing else '' }}" required /></label>
       <label>Направление
         <select name="kind" id="kind" required>
           <option value="пухтовоз" {% if kind=='пухтовоз' %}selected{% endif %}>Пухтовоз</option>
@@ -29,10 +28,17 @@
       <label>Заказчик
         <select id="customer_id" name="customer_id">
           <option value="">— выберите —</option>
-          {% for c in customers %}<option value="{{ c.id }}" {% if editing and editing.customer_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
+          {% for c in customers %}<option value="{{ c.id }}" data-inn="{{ c.inn or '' }}" data-address="{{ c.address or '' }}" {% if editing and editing.customer_id == c.id %}selected{% endif %}>{{ c.name }}{% if c.inn %} — ИНН {{ c.inn }}{% endif %}</option>{% endfor %}
         </select>
       </label>
-      {% if not editing %}<label>Новый заказчик<input id="customer_name_manual" name="customer_name_manual" placeholder="Введите название" /></label>{% endif %}
+      <label class="company-suggest-field">ИНН заказчика
+        <input id="customer_inn_lookup" inputmode="numeric" autocomplete="off" value="{{ (editing.customer.inn or '') if editing and editing.customer else '' }}" placeholder="Введите ИНН компании" aria-autocomplete="list" aria-controls="company_suggestions" aria-expanded="false" />
+        <div id="company_suggestions" class="address-suggestions company-suggestions" role="listbox" hidden></div>
+        <input type="hidden" id="customer_inn_manual" name="customer_inn_manual" value="{{ (editing.customer.inn or '') if editing and editing.customer else '' }}" />
+        <input type="hidden" id="customer_address_manual" name="customer_address_manual" value="" />
+        <small class="muted">По ИНН можно выбрать компанию даже если её ещё нет в приложении или Bitrix.</small>
+      </label>
+      <label>Название компании (если новая)<input id="customer_name_manual" name="customer_name_manual" value="" placeholder="Заполнится после выбора по ИНН или можно ввести вручную" /></label>
       <label>Адрес подачи<input name="load_address" value="{{ editing.load_address if editing else '' }}" placeholder="Откуда забрать" /></label>
       <label class="address-suggest-field">Навигация по объекту (Яндекс Карты)
         <input id="object_navigation_address" autocomplete="off" placeholder="Начните вводить адрес, например: Первоуральск, Комсомольская 5А" aria-autocomplete="list" aria-controls="object_address_suggestions" aria-expanded="false" />
@@ -125,7 +131,7 @@
 </form>
 
 <style>
-.address-suggest-field{position:relative}
+.address-suggest-field,.company-suggest-field{position:relative}
 .address-suggestions{position:absolute;left:0;right:0;top:calc(100% - 28px);z-index:60;max-height:280px;overflow:auto;border:1px solid var(--border);border-radius:12px;background:#171b21;box-shadow:0 16px 38px rgba(0,0,0,.42);padding:6px}
 .address-suggestions[hidden]{display:none}
 .address-suggestion-option{display:block;width:100%;border:0;border-radius:8px;background:transparent;color:#eef0f4;text-align:left;padding:10px 12px;font:inherit;cursor:pointer;line-height:1.35}
@@ -177,14 +183,14 @@ function chooseAddressSuggestion(value){
   navigationAddressEl.focus();
 }
 
-function renderAddressSuggestions(items, query){
+function renderAddressSuggestions(items, query, externalConfigured){
   navigationSuggestionsEl.replaceChildren();
   navigationSuggestionIndex = -1;
   const cleanItems = Array.from(new Set((items || []).map(v => String(v || '').trim()).filter(Boolean)));
   if (!cleanItems.length) {
     const empty = document.createElement('div');
     empty.className = 'address-suggestion-empty';
-    empty.textContent = 'Адрес не найден. Добавьте город или область, например: Первоуральск, Комсомольская 5А';
+    empty.textContent = externalConfigured === false ? 'Точные подсказки адресов не настроены. Добавьте ключ DaData в Настройки → Интеграции.' : 'Адрес не найден. Добавьте город или область, например: Первоуральск, Комсомольская 5А';
     navigationSuggestionsEl.appendChild(empty);
   } else {
     cleanItems.forEach(value => {
@@ -219,13 +225,13 @@ async function loadAddressSuggestions(){
       headers: {'Accept': 'application/json'}
     });
     if (!response.ok) {
-      renderAddressSuggestions([], query);
+      renderAddressSuggestions([], query, true);
       return;
     }
     const data = await response.json();
-    renderAddressSuggestions(data.items || [], query);
+    renderAddressSuggestions(data.items || [], query, data.external_configured);
   } catch (error) {
-    if (error.name !== 'AbortError') renderAddressSuggestions([], query);
+    if (error.name !== 'AbortError') renderAddressSuggestions([], query, true);
   }
 }
 
@@ -265,6 +271,95 @@ navigationAddressEl.addEventListener('change', () => {
 });
 navigationAddressEl.closest('form').addEventListener('submit', () => {
   navigationUrlEl.value = yandexSearchUrl(navigationAddressEl.value);
+});
+
+const customerSelectEl = document.getElementById('customer_id');
+const customerInnLookupEl = document.getElementById('customer_inn_lookup');
+const customerNameManualEl = document.getElementById('customer_name_manual');
+const customerInnManualEl = document.getElementById('customer_inn_manual');
+const customerAddressManualEl = document.getElementById('customer_address_manual');
+const companySuggestionsEl = document.getElementById('company_suggestions');
+let companySuggestTimer = null;
+let companySuggestController = null;
+
+function closeCompanySuggestions(){
+  companySuggestionsEl.hidden = true;
+  customerInnLookupEl.setAttribute('aria-expanded', 'false');
+}
+function chooseCompanySuggestion(item){
+  customerInnLookupEl.value = item.inn || '';
+  customerInnManualEl.value = item.inn || '';
+  customerNameManualEl.value = item.name || '';
+  customerAddressManualEl.value = item.address || '';
+  const existingId = String(item.customer_id || '');
+  customerSelectEl.value = existingId;
+  closeCompanySuggestions();
+  customerInnLookupEl.focus();
+}
+function renderCompanySuggestions(items, externalConfigured){
+  companySuggestionsEl.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'address-suggestion-empty';
+    empty.textContent = externalConfigured === false
+      ? 'Поиск новых компаний по ИНН не настроен. Добавьте ключ DaData в Настройки → Интеграции.'
+      : 'Компания не найдена. Проверьте ИНН.';
+    companySuggestionsEl.appendChild(empty);
+  } else {
+    items.forEach(item => {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.className = 'address-suggestion-option';
+      option.textContent = `${item.name || 'Компания'}${item.inn ? ` · ИНН ${item.inn}` : ''}${item.address ? ` · ${item.address}` : ''}`;
+      option.addEventListener('mousedown', event => event.preventDefault());
+      option.addEventListener('click', () => chooseCompanySuggestion(item));
+      companySuggestionsEl.appendChild(option);
+    });
+  }
+  companySuggestionsEl.hidden = false;
+  customerInnLookupEl.setAttribute('aria-expanded', 'true');
+}
+async function loadCompanySuggestions(){
+  const query = customerInnLookupEl.value.trim();
+  customerInnManualEl.value = query.replace(/\D/g, '');
+  customerNameManualEl.value = '';
+  customerAddressManualEl.value = '';
+  if (query.length < 3) { closeCompanySuggestions(); return; }
+  if (companySuggestController) companySuggestController.abort();
+  companySuggestController = new AbortController();
+  try {
+    const response = await fetch(`/api/company-suggest?q=${encodeURIComponent(query)}`, {
+      signal: companySuggestController.signal,
+      headers: {'Accept': 'application/json'}
+    });
+    const data = response.ok ? await response.json() : {items: []};
+    const items = data.items || [];
+    const digits = query.replace(/\D/g, '');
+    if ((digits.length === 10 || digits.length === 12) && items.length === 1) {
+      chooseCompanySuggestion(items[0]);
+      return;
+    }
+    renderCompanySuggestions(items, data.external_configured);
+  } catch (error) {
+    if (error.name !== 'AbortError') renderCompanySuggestions([], true);
+  }
+}
+customerInnLookupEl.addEventListener('input', () => {
+  customerSelectEl.value = '';
+  clearTimeout(companySuggestTimer);
+  companySuggestTimer = setTimeout(loadCompanySuggestions, 300);
+});
+customerSelectEl.addEventListener('change', () => {
+  const option = customerSelectEl.options[customerSelectEl.selectedIndex];
+  const inn = option && option.dataset ? (option.dataset.inn || '') : '';
+  customerInnLookupEl.value = inn;
+  customerInnManualEl.value = inn;
+  customerNameManualEl.value = '';
+  customerAddressManualEl.value = option && option.dataset ? (option.dataset.address || '') : '';
+  closeCompanySuggestions();
+});
+document.addEventListener('click', event => {
+  if (!customerInnLookupEl.closest('.company-suggest-field').contains(event.target)) closeCompanySuggestions();
 });
 
 const polygonEl = document.getElementById('polygon_id');
@@ -342,7 +437,7 @@ const kmEl = document.getElementById('km');
 const volEl = document.getElementById('volume');
 const tariffEl = document.getElementById('tariff_id');
 const vehicleEl = document.getElementById('vehicle_id');
-const dateEl = document.getElementById('planned_date');
+const dateEl = document.getElementById('planned_at');
 const sumEl = document.getElementById('sum_driver');
 let tariffManuallySelected = Boolean(tariffEl.value);
 function recalc(){
@@ -350,7 +445,7 @@ function recalc(){
   const km = parseFloat(kmEl.value || 0);
   const vol = parseFloat(volEl.value || 0);
   const previousId = tariffEl.value;
-  const plannedDate = dateEl.value;
+  const plannedDate = (dateEl.value || '').split('T')[0];
   const list = tariffs.filter(t => t.active && t.kind === kind
     && (t.kind === 'пухтовоз' || (
       Number(t.min_km || 0) <= km && (t.max_km === null || km <= Number(t.max_km))
