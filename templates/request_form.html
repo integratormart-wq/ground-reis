@@ -34,7 +34,12 @@
       </label>
       {% if not editing %}<label>Новый заказчик<input id="customer_name_manual" name="customer_name_manual" placeholder="Введите название" /></label>{% endif %}
       <label>Адрес подачи<input name="load_address" value="{{ editing.load_address if editing else '' }}" placeholder="Откуда забрать" /></label>
-      <label>Навигация по объекту (Яндекс Карты)<input type="url" name="unload_address" value="{{ editing.unload_address if editing else '' }}" placeholder="https://yandex.ru/maps/..." /></label>
+      <label>Навигация по объекту (Яндекс Карты)
+        <input id="object_navigation_address" list="object_address_suggestions" autocomplete="off" placeholder="Начните вводить адрес, например: Первоуральск, Комсомольская 5А" />
+        <datalist id="object_address_suggestions"></datalist>
+        <input type="hidden" id="unload_address" name="unload_address" value="{{ editing.unload_address if editing else '' }}" />
+        <small class="muted">Выберите адрес из подсказок — ссылка для Яндекс Карт сформируется автоматически.</small>
+      </label>
       <label>Контакт на объекте<input name="site_contact_name" value="{{ (editing.site_contact_name or '') if editing else '' }}" placeholder="Имя или ФИО" /></label>
       <label>Телефон на объекте<input type="tel" name="site_contact_phone" value="{{ (editing.site_contact_phone or '') if editing else '' }}" placeholder="+7 999 000-00-00" /></label>
       <label class="wide">Комментарий к контакту<input name="site_contact_comment" value="{{ (editing.site_contact_comment or '') if editing else '' }}" placeholder="Например: позвонить за 20 минут" /></label>
@@ -120,6 +125,73 @@
 </form>
 
 <script>
+const navigationAddressEl = document.getElementById('object_navigation_address');
+const navigationUrlEl = document.getElementById('unload_address');
+const navigationSuggestionsEl = document.getElementById('object_address_suggestions');
+let navigationSuggestTimer = null;
+let navigationSuggestController = null;
+
+function yandexSearchUrl(address){
+  const value = String(address || '').trim();
+  if (!value) return '';
+  if (/^https?:\/\//i.test(value)) return value;
+  return `https://yandex.ru/maps/?text=${encodeURIComponent(value)}`;
+}
+
+function addressFromStoredNavigation(value){
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (!/^https?:\/\//i.test(raw)) return raw;
+  try {
+    const url = new URL(raw);
+    const text = url.searchParams.get('text');
+    return text || raw;
+  } catch (_) {
+    return raw;
+  }
+}
+
+navigationAddressEl.value = addressFromStoredNavigation(navigationUrlEl.value);
+
+async function loadAddressSuggestions(){
+  const query = navigationAddressEl.value.trim();
+  navigationUrlEl.value = yandexSearchUrl(query);
+  if (query.length < 3 || /^https?:\/\//i.test(query)) {
+    navigationSuggestionsEl.replaceChildren();
+    return;
+  }
+  if (navigationSuggestController) navigationSuggestController.abort();
+  navigationSuggestController = new AbortController();
+  try {
+    const response = await fetch(`/api/address-suggest?q=${encodeURIComponent(query)}`, {
+      signal: navigationSuggestController.signal,
+      headers: {'Accept': 'application/json'}
+    });
+    if (!response.ok) return;
+    const data = await response.json();
+    navigationSuggestionsEl.replaceChildren();
+    (data.items || []).forEach(value => {
+      const option = document.createElement('option');
+      option.value = value;
+      navigationSuggestionsEl.appendChild(option);
+    });
+  } catch (error) {
+    if (error.name !== 'AbortError') navigationSuggestionsEl.replaceChildren();
+  }
+}
+
+navigationAddressEl.addEventListener('input', () => {
+  navigationUrlEl.value = yandexSearchUrl(navigationAddressEl.value);
+  clearTimeout(navigationSuggestTimer);
+  navigationSuggestTimer = setTimeout(loadAddressSuggestions, 450);
+});
+navigationAddressEl.addEventListener('change', () => {
+  navigationUrlEl.value = yandexSearchUrl(navigationAddressEl.value);
+});
+navigationAddressEl.closest('form').addEventListener('submit', () => {
+  navigationUrlEl.value = yandexSearchUrl(navigationAddressEl.value);
+});
+
 const polygonEl = document.getElementById('polygon_id');
 const polygonAddressEl = document.getElementById('polygon_address');
 const polygonContactEl = document.getElementById('polygon_contact');
