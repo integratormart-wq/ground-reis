@@ -28,6 +28,8 @@ print("BOOT SECRET_KEY_SET=", True, flush=True)
 app = FastAPI(title="GRUND | Рейсы")
 BITRIX_LAST_EVENT = {"received": False}
 BITRIX_LAST_OUTBOUND = {"attempted": False}
+BITRIX_LAST_RECONCILE_AT = None
+BITRIX_RECONCILE_LOCK = threading.Lock()
 
 @app.middleware("http")
 async def reject_cross_origin_writes(request: Request, call_next):
@@ -472,6 +474,8 @@ def dashboard(request: Request, current_user: models.User = Depends(get_current_
 
 @app.get("/requests", response_class=HTMLResponse)
 def requests_list(request: Request, status_f: Optional[str] = None, kind: Optional[str] = None, q: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.role in {UserRole.ADMIN, UserRole.LOGIST}:
+        _maybe_reconcile_bitrix(db)
     rs = db.query(models.TripRequest)
     if current_user.role == UserRole.DRIVER:
         rs = rs.filter(models.TripRequest.driver_id == current_user.id)
@@ -495,6 +499,8 @@ def requests_list(request: Request, status_f: Optional[str] = None, kind: Option
 @app.get("/pukhtovoz", response_class=HTMLResponse)
 def pukhtovoz_list(request: Request, status_f: Optional[str] = None, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, q: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
+    if current_user.role in {UserRole.ADMIN, UserRole.LOGIST}:
+        _maybe_reconcile_bitrix(db)
     rs = db.query(models.TripRequest).filter(models.TripRequest.kind == TripType.PUKHTOVOZ)
     if current_user.role == UserRole.DRIVER:
         rs = rs.filter(models.TripRequest.driver_id == current_user.id)
@@ -518,6 +524,8 @@ def pukhtovoz_list(request: Request, status_f: Optional[str] = None, driver_id: 
 @app.get("/samosval", response_class=HTMLResponse)
 def samosval_list(request: Request, status_f: Optional[str] = None, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, q: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
+    if current_user.role in {UserRole.ADMIN, UserRole.LOGIST}:
+        _maybe_reconcile_bitrix(db)
     rs = db.query(models.TripRequest).filter(models.TripRequest.kind == TripType.SAMOSVAL)
     if current_user.role == UserRole.DRIVER:
         rs = rs.filter(models.TripRequest.driver_id == current_user.id)
@@ -781,7 +789,7 @@ def _safe_bitrix_result(result):
         safe["action"] = result["action"]
     if result.get("reason") in {
         "no_active_integration", "foreign_process", "disabled", "process_not_found", "final_locked",
-        "customer_not_linked", "status_preserved",
+        "customer_not_linked", "status_preserved", "salary_history_preserved",
     }:
         safe["reason"] = result["reason"]
     if result.get("error"):
@@ -860,6 +868,38 @@ def _sync_trip_outbound(req, db):
     return _record_bitrix_outbound(req, db, result)
 
 
+def _maybe_reconcile_bitrix(db, force=False):
+    """Страховочная сверка Bitrix → приложение, если webhook был пропущен."""
+    global BITRIX_LAST_RECONCILE_AT
+    now = datetime.now()
+    if not force and BITRIX_LAST_RECONCILE_AT and (now - BITRIX_LAST_RECONCILE_AT).total_seconds() < 45:
+        return {"skipped": True, "reason": "throttled"}
+    if not BITRIX_RECONCILE_LOCK.acquire(blocking=False):
+        return {"skipped": True, "reason": "already_running"}
+    try:
+        settings = db.query(models.IntegrationSetting).filter(
+            models.IntegrationSetting.provider == "bitrix24",
+            models.IntegrationSetting.is_active == True,
+        ).first()
+        if not settings or not settings.webhook_url:
+            return {"skipped": True, "reason": "no_active_integration"}
+        result = bitrix.pull_recent_trips(db, settings=settings, limit_per_process=10)
+        db.commit()
+        BITRIX_LAST_RECONCILE_AT = now
+        print(
+            "BITRIX_RECONCILE_OK",
+            result.get("checked", 0), result.get("synced", 0), result.get("errors", 0),
+            flush=True,
+        )
+        return result
+    except Exception as exc:
+        db.rollback()
+        print("BITRIX_RECONCILE_EXCEPTION", type(exc).__name__, flush=True)
+        return {"error": "bitrix_sync_error"}
+    finally:
+        BITRIX_RECONCILE_LOCK.release()
+
+
 def _sync_linked_reference_trips(section, row, db):
     filters = {
         "customers": models.TripRequest.customer_id == row.id if section == "customers" else None,
@@ -896,12 +936,35 @@ def _latest_bitrix_outbound_state(db):
 
 
 def _deletable_request_ids(db, rows):
-    final_statuses = {RequestStatus.DRIVER_COMPLETED, RequestStatus.LOGIST_CONFIRMED, RequestStatus.CANCELLED}
-    candidates = {row.id for row in rows if row.status not in final_statuses}
+    # Администратор/логист могут удалить ненужный/тестовый рейс на любом этапе.
+    # Единственная жёсткая защита — рейс, уже вошедший в расчёт зарплаты.
+    candidates = {row.id for row in rows}
     if not candidates:
         return set()
     linked = {item[0] for item in db.query(models.SalaryCalcItem.trip_request_id).filter(models.SalaryCalcItem.trip_request_id.in_(candidates)).all()}
     return candidates - linked
+
+
+def _delete_local_request_rows(db, req):
+    """Удаляет локальную заявку и её дочерние строки; commit делает вызывающий код."""
+    attachments = db.query(models.Attachment).filter(models.Attachment.trip_request_id == req.id).all()
+    attachment_paths = [row.path for row in attachments if row.path]
+    db.query(models.Attachment).filter(models.Attachment.trip_request_id == req.id).delete(
+        synchronize_session=False
+    )
+    db.query(models.StatusHistory).filter(models.StatusHistory.trip_request_id == req.id).delete(
+        synchronize_session=False
+    )
+    db.delete(req)
+    return attachment_paths
+
+
+def _remove_attachment_paths(paths):
+    for path in paths:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 TARIFF_FORMULAS = {"trip", "km", "volume", "fixed"}
@@ -2413,14 +2476,32 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
     ).first()
     if event == "ONCRMDYNAMICITEMDELETE":
         if trip:
-            if trip.status in {RequestStatus.DRIVER_COMPLETED, RequestStatus.LOGIST_CONFIRMED, RequestStatus.CANCELLED} or db.query(models.SalaryCalcItem).filter_by(trip_request_id=trip.id).first():
-                raise HTTPException(409, "Финальную или включенную в зарплату заявку нельзя отменить через webhook")
-            old_status = trip.status
-            trip.status = RequestStatus.CANCELLED
-            db.add(models.StatusHistory(trip_request_id=trip.id, old_status=old_status.value, new_status=RequestStatus.CANCELLED.value))
+            if db.query(models.SalaryCalcItem).filter_by(trip_request_id=trip.id).first():
+                # В Bitrix элемент уже удалён, но запись участвует в зарплате.
+                # Сохраняем её как финансовую историю, не отвечая Bitrix ошибкой.
+                old_status = trip.status
+                if trip.status != RequestStatus.CANCELLED:
+                    trip.status = RequestStatus.CANCELLED
+                    db.add(models.StatusHistory(
+                        trip_request_id=trip.id,
+                        old_status=old_status.value,
+                        new_status=RequestStatus.CANCELLED.value,
+                        note="Элемент удалён в Bitrix24; запись сохранена из-за расчёта зарплаты",
+                    ))
+                db.commit()
+                result = {"ok": True, "action": "cancel", "trip_id": trip.id, "reason": "salary_history_preserved"}
+                BITRIX_LAST_EVENT["result"] = result
+                return JSONResponse(_safe_bitrix_result(result))
+            trip_id = trip.id
+            attachment_paths = _delete_local_request_rows(db, trip)
             db.commit()
-        BITRIX_LAST_EVENT["result"] = "cancel"
-        return JSONResponse({"ok": True, "action": "cancel", "trip_id": trip.id if trip else None})
+            _remove_attachment_paths(attachment_paths)
+            result = {"ok": True, "action": "delete", "trip_id": trip_id}
+            BITRIX_LAST_EVENT["result"] = result
+            return JSONResponse(_safe_bitrix_result(result))
+        result = {"ok": True, "action": "delete"}
+        BITRIX_LAST_EVENT["result"] = result
+        return JSONResponse(_safe_bitrix_result(result))
 
     old_status = trip.status if trip else None
     status_locked = old_status in {RequestStatus.LOGIST_CONFIRMED, RequestStatus.CANCELLED}
@@ -2535,15 +2616,19 @@ def bitrix24_status(current_user: models.User = Depends(require_role(UserRole.AD
         "outbound": _safe_bitrix_diagnostic(outbound_state),
     })
 
+
+@app.post("/settings/bitrix/sync-now")
+def bitrix24_sync_now(current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
+    _maybe_reconcile_bitrix(db, force=True)
+    return RedirectResponse("/settings#integrations", status_code=303)
+
 @app.post("/requests/{req_id}/delete")
 def delete_request(req_id: int, current_user: models.User = Depends(require_role(UserRole.ADMIN, UserRole.LOGIST)), db: Session = Depends(get_db)):
     req = db.query(models.TripRequest).filter(models.TripRequest.id == req_id).first()
     if not req:
         raise HTTPException(404)
-    if req.status in {RequestStatus.DRIVER_COMPLETED, RequestStatus.LOGIST_CONFIRMED, RequestStatus.CANCELLED}:
-        raise HTTPException(409, "Завершенную, подтвержденную или отмененную заявку удалять нельзя")
     if db.query(models.SalaryCalcItem).filter(models.SalaryCalcItem.trip_request_id == req.id).first():
-        raise HTTPException(409, "Заявка включена в расчет зарплаты и не может быть удалена")
+        raise HTTPException(409, "Рейс уже включён в расчёт зарплаты. Сначала удалите его из расчёта зарплаты")
     try:
         delete_result = bitrix.delete_trip(req, db)
     except Exception as exc:
@@ -2553,21 +2638,13 @@ def delete_request(req_id: int, current_user: models.User = Depends(require_role
     if delete_result.get("error"):
         db.rollback()
         raise HTTPException(502, "Bitrix24 не подтвердил удаление заявки")
-    attachments = db.query(models.Attachment).filter(models.Attachment.trip_request_id == req.id).all()
-    attachment_paths = [row.path for row in attachments if row.path]
-    db.query(models.Attachment).filter(models.Attachment.trip_request_id == req.id).delete(
-        synchronize_session=False
-    )
-    db.query(models.StatusHistory).filter(models.StatusHistory.trip_request_id == req.id).delete(
-        synchronize_session=False
-    )
-    db.delete(req)
+    # DELETE webhook от Bitrix мог успеть удалить локальную строку параллельно.
+    req = db.query(models.TripRequest).filter(models.TripRequest.id == req_id).first()
+    if not req:
+        return RedirectResponse("/requests", status_code=302)
+    attachment_paths = _delete_local_request_rows(db, req)
     _commit_or_conflict(db, "Заявка связана с другими данными и не может быть удалена")
-    for path in attachment_paths:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+    _remove_attachment_paths(attachment_paths)
     return RedirectResponse("/requests", status_code=302)
 
 @app.get("/archive", response_class=HTMLResponse)
