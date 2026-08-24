@@ -270,6 +270,8 @@ def test_bitrix_full_trip_contract_includes_operational_and_payment_fields():
     )
     db.add(trip); db.commit()
     fields = app_module.bitrix.build_fields(trip)
+    assert fields["ufReisDate"] == "2026-08-12T10:30"
+    assert "ufReisTime" not in fields
     assert fields["ufTripsCount"] == 3
     assert fields["ufCargoType"] == "Грунт"
     assert fields["ufTariff"] == "Полный тариф"
@@ -581,7 +583,7 @@ def test_bitrix_can_upsert_local_trip_from_smart_process(monkeypatch):
     monkeypatch.setattr(app_module.bitrix, "resolve_process_kinds", lambda url: {"150": models.TripType.PUKHTOVOZ, "151": models.TripType.SAMOSVAL})
     monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: {})
     monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda url, entity, item: {
-        "id": 900, "title": "П-Б24-900", "ufReisDate": "2026-08-10", "ufReisTime": "09:30",
+        "id": 900, "title": "П-Б24-900", "ufReisDate": "2026-08-10T09:30:00",
         "ufDriver": driver.full_name, "ufVehicle": vehicle.name, "ufPolygon": polygon.name,
         "ufVolumePlan": 14, "ufKmPlan": 25, "ufVolumeFact": 0, "ufKmFact": 0, "ufStatus": "Новая",
         "ufTripsCount": 3, "ufCargoType": cargo.name, "ufTariff": tariff.title,
@@ -595,6 +597,7 @@ def test_bitrix_can_upsert_local_trip_from_smart_process(monkeypatch):
     assert trip.number == "П-Б24-900"
     assert trip.kind == models.TripType.PUKHTOVOZ
     assert trip.volume == 14
+    assert trip.planned_date == date(2026, 8, 10) and trip.planned_time == "09:30"
     assert trip.actual_volume == 0
     assert trip.actual_km == 0
     assert trip.driver_id == driver.id
@@ -1659,3 +1662,100 @@ def test_bitrix_field_mapping_does_not_treat_system_company_id_as_customer_name(
         "contactIds": {"title": "Контакты"},
     })
     assert mapping.get("customer_name") is None
+
+
+def test_request_form_uses_one_datetime_field_and_shows_customer_inn_lookup():
+    db, admin, *_ = reset_db()
+    customer = models.Customer(name="ООО Тест ИНН", inn="6671234567")
+    db.add(customer); db.commit()
+    page = client_as(admin).get("/pukhtovoz/new")
+    assert page.status_code == 200
+    assert 'type="datetime-local" id="planned_at" name="planned_at"' in page.text
+    assert 'name="planned_date"' not in page.text
+    assert 'name="planned_time"' not in page.text
+    assert 'id="customer_inn_lookup"' in page.text
+    assert 'ИНН 6671234567' in page.text
+    assert '/api/company-suggest?q=' in page.text
+    db.close()
+
+
+def test_company_suggest_uses_dadata_and_returns_inn_company(monkeypatch):
+    db, admin, *_ = reset_db()
+    db.add(models.IntegrationSetting(provider="dadata", secret="dadata-test", is_active=True))
+    db.commit()
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
+        def read(self):
+            return json.dumps({"suggestions": [{
+                "value": 'ООО "РОМАШКА"',
+                "data": {"inn": "6671234567", "address": {"value": "г Екатеринбург, ул Тестовая, д 1"}},
+            }]}).encode("utf-8")
+
+    def fake_urlopen(request, timeout=0):
+        assert "suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/party" in request.full_url
+        assert request.headers.get("Authorization") == "Token dadata-test"
+        assert timeout == 7
+        return FakeResponse()
+
+    monkeypatch.setattr(app_module.urllib.request, "urlopen", fake_urlopen)
+    response = client_as(admin).get("/api/company-suggest?q=6671234567")
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["name"] == 'ООО "РОМАШКА"'
+    assert item["inn"] == "6671234567"
+    assert "Екатеринбург" in item["address"]
+    db.close()
+
+
+def test_address_suggest_prefers_dadata_when_configured(monkeypatch):
+    db, admin, *_ = reset_db()
+    db.add(models.IntegrationSetting(provider="dadata", secret="dadata-address", is_active=True))
+    db.commit()
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
+        def read(self):
+            return json.dumps({"suggestions": [{"value": "Свердловская обл, г Первоуральск, ул Комсомольская, д 5А"}]}).encode("utf-8")
+
+    def fake_urlopen(request, timeout=0):
+        assert "suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address" in request.full_url
+        assert timeout == 7
+        return FakeResponse()
+
+    monkeypatch.setattr(app_module.urllib.request, "urlopen", fake_urlopen)
+    response = client_as(admin).get("/api/address-suggest?q=Первоуральск%20Комсомольская%205А")
+    assert response.status_code == 200
+    assert response.json()["items"] == ["Свердловская обл, г Первоуральск, ул Комсомольская, д 5А"]
+    assert response.json()["provider"] == "dadata"
+    db.close()
+
+
+def test_bitrix_company_inn_is_read_from_requisite_and_combined_datetime(monkeypatch):
+    db, admin, *_ = reset_db()
+    settings = models.IntegrationSetting(provider="bitrix24", webhook_url="https://example/rest/1/token/", is_active=True)
+    db.add(settings); db.commit()
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_kinds", lambda url: {"1088": models.TripType.PUKHTOVOZ})
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: {})
+    monkeypatch.setattr(app_module.bitrix, "status_from_stage", lambda *args: None)
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda url, entity, item: {
+        "id": 777, "title": "П-ИНН-777", "ufReisDate": "2026-08-25T14:40:00", "companyId": 321,
+    } if int(entity) == 1088 else {"id": 321, "title": "ООО Битрикс Клиент"})
+
+    original_post = app_module.bitrix._http_post
+    def fake_post(url, method, payload):
+        if method == "crm.requisite.list":
+            return {"result": [{"ID": "10", "ENTITY_ID": "321", "RQ_INN": "6671234567"}]}
+        return original_post(url, method, payload)
+    monkeypatch.setattr(app_module.bitrix, "_http_post", fake_post)
+
+    result = app_module.bitrix.sync_from_bitrix(777, 1088, db, settings=settings)
+    db.commit()
+    trip = db.query(models.TripRequest).filter_by(bitrix_element_id=777).one()
+    assert result["ok"] is True
+    assert trip.planned_date == date(2026, 8, 25) and trip.planned_time == "14:40"
+    assert trip.customer is not None and trip.customer.name == "ООО Битрикс Клиент"
+    assert trip.customer.inn == "6671234567"
+    db.close()
