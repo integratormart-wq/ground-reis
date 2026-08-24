@@ -161,21 +161,29 @@ def _initialize_database():
                 "SELECT bitrix_company_id FROM customers WHERE bitrix_company_id IS NOT NULL "
                 "GROUP BY bitrix_company_id HAVING COUNT(*) > 1 LIMIT 1"
             )).first()
-            if duplicate_customer_inn or duplicate_customer_bitrix:
-                raise RuntimeError("Найдены дубли ИНН или Bitrix ID заказчиков; уникальные индексы не созданы")
-            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_customers_inn ON customers(inn)"))
-            conn.execute(text(
-                "CREATE UNIQUE INDEX IF NOT EXISTS uq_customers_bitrix_company_id ON customers(bitrix_company_id)"
-            ))
+            # Existing production data must never make startup fail.
+            # If old duplicates exist, leave them untouched and simply skip the optional unique index.
+            if duplicate_customer_inn:
+                print("BOOT migration warning: duplicate customer INN found; unique INN index skipped", flush=True)
+            else:
+                conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_customers_inn ON customers(inn)"))
+            if duplicate_customer_bitrix:
+                print("BOOT migration warning: duplicate Bitrix company ID found; unique company index skipped", flush=True)
+            else:
+                conn.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_customers_bitrix_company_id ON customers(bitrix_company_id)"
+                ))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_customers_bitrix_contact_id ON customers(bitrix_contact_id)"))
             duplicate_numbers = conn.execute(text("SELECT number FROM trip_requests GROUP BY number HAVING COUNT(*) > 1 LIMIT 1")).first()
             if duplicate_numbers:
-                raise RuntimeError("Найдены дубли номеров заявок; уникальный индекс не создан")
-            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_trip_requests_number ON trip_requests(number)"))
+                print("BOOT migration warning: duplicate trip numbers found; unique trip index skipped", flush=True)
+            else:
+                conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_trip_requests_number ON trip_requests(number)"))
             duplicate_salary_trip = conn.execute(text("SELECT trip_request_id FROM salary_calc_items GROUP BY trip_request_id HAVING COUNT(*) > 1 LIMIT 1")).first()
             if duplicate_salary_trip:
-                raise RuntimeError("Одна заявка включена в несколько расчетов зарплаты; уникальный индекс не создан")
-            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_salary_calc_items_trip_request ON salary_calc_items(trip_request_id)"))
+                print("BOOT migration warning: duplicate salary trip links found; unique salary index skipped", flush=True)
+            else:
+                conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_salary_calc_items_trip_request ON salary_calc_items(trip_request_id)"))
             if engine.dialect.name == "sqlite":
                 conn.execute(text("""
                     CREATE TRIGGER IF NOT EXISTS protect_last_active_admin_update
@@ -284,26 +292,49 @@ def require_role(*allowed_roles):
 def address_suggest(
     q: str = Query("", max_length=200),
     current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    """Адресный автокомплит. Ничего не пишет в БД."""
+    """Адресный автокомплит: DaData -> Яндекс -> Photon. Ничего не пишет в БД."""
     text_query = " ".join((q or "").split()).strip()
     if len(text_query) < 3:
         return JSONResponse({"items": []})
+
+    def dadata_items(api_key: str):
+        payload = json.dumps({"query": text_query, "count": 8}).encode("utf-8")
+        req = urllib.request.Request(
+            "https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Token {api_key}",
+                "User-Agent": "ground-reis/1.0",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=7) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        result = []
+        for row in data.get("suggestions", []):
+            value = str((row or {}).get("value") or "").strip()
+            if value and value not in result:
+                result.append(value)
+        return result[:8]
 
     def yandex_items(api_key: str):
         params = urllib.parse.urlencode({
             "apikey": api_key,
             "text": text_query,
             "lang": "ru",
-            "results": 7,
+            "results": 8,
             "print_address": 1,
+            "countries": "ru",
             "types": "geo",
         })
         req = urllib.request.Request(
             f"https://suggest-maps.yandex.ru/v1/suggest?{params}",
             headers={"User-Agent": "ground-reis/1.0"},
         )
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with urllib.request.urlopen(req, timeout=7) as response:
             payload = json.loads(response.read().decode("utf-8"))
         result = []
         for row in payload.get("results", []):
@@ -313,12 +344,9 @@ def address_suggest(
             value = address or ", ".join(x for x in (title, subtitle) if x)
             if value and value not in result:
                 result.append(value)
-        return result[:7]
+        return result[:8]
 
     def photon_items():
-        # У публичного Photon нет гарантии полноты по короткому запросу без города.
-        # Поэтому делаем максимум два лёгких запроса: как ввёл пользователь и с уточнением страны.
-        # Это по-прежнему только подсказки; в БД ничего не пишется.
         result = []
         queries = [text_query]
         if "россия" not in text_query.lower():
@@ -341,27 +369,106 @@ def address_suggest(
                 district = str(props.get("district") or props.get("county") or "").strip()
                 state = str(props.get("state") or "").strip()
                 country = str(props.get("country") or "").strip()
-                parts = []
-                seen = set()
+                parts, seen = [], set()
                 for value in (street_house, name, locality, district, state, country):
                     key = value.lower()
                     if value and key not in seen:
-                        seen.add(key)
-                        parts.append(value)
+                        seen.add(key); parts.append(value)
                 value = ", ".join(parts)
                 if value and value not in result:
                     result.append(value)
-                if len(result) >= 7:
-                    return result[:7]
-        return result[:7]
+                if len(result) >= 8:
+                    return result[:8]
+        return result[:8]
 
+    dadata_row = db.query(models.IntegrationSetting).filter(models.IntegrationSetting.provider == "dadata").first()
+    yandex_row = db.query(models.IntegrationSetting).filter(models.IntegrationSetting.provider == "yandex_suggest").first()
+    dadata_key = ((dadata_row.secret if dadata_row and dadata_row.is_active else None) or os.getenv("DADATA_API_KEY") or "").strip()
+    yandex_key = ((yandex_row.secret if yandex_row and yandex_row.is_active else None) or os.getenv("YANDEX_SUGGEST_API_KEY") or "").strip()
+    errors = []
+    for provider, key, loader in (("dadata", dadata_key, dadata_items), ("yandex", yandex_key, yandex_items)):
+        if not key:
+            continue
+        try:
+            items = loader(key)
+            if items:
+                return JSONResponse({"items": items, "provider": provider, "external_configured": True})
+        except Exception as exc:
+            errors.append(f"{provider}:{type(exc).__name__}")
     try:
-        api_key = (os.getenv("YANDEX_SUGGEST_API_KEY") or "").strip()
-        items = yandex_items(api_key) if api_key else photon_items()
+        items = photon_items()
+        if items:
+            return JSONResponse({"items": items})
     except Exception as exc:
-        print("ADDRESS_SUGGEST_ERROR", type(exc).__name__, flush=True)
-        items = []
-    return JSONResponse({"items": items})
+        errors.append(f"photon:{type(exc).__name__}")
+    if errors:
+        print("ADDRESS_SUGGEST_ERROR", ",".join(errors), flush=True)
+    return JSONResponse({"items": [], "provider": None, "external_configured": bool(dadata_key or yandex_key)})
+
+
+@app.get("/api/company-suggest")
+def company_suggest(
+    q: str = Query("", max_length=200),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Подсказки заказчиков по названию/ИНН. Сначала локальная база, затем DaData."""
+    text_query = " ".join((q or "").split()).strip()
+    if len(text_query) < 3:
+        return JSONResponse({"items": []})
+    normalized = bitrix._normalize(text_query)
+    digits = "".join(ch for ch in text_query if ch.isdigit())
+    items = []
+    seen = set()
+    for row in db.query(models.Customer).order_by(models.Customer.name).all():
+        row_inn = str(row.inn or "")
+        if normalized in bitrix._normalize(row.name) or (digits and digits in row_inn):
+            key = (row_inn, bitrix._normalize(row.name))
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({"customer_id": row.id, "name": row.name, "inn": row_inn, "address": row.address or "", "source": "local"})
+            if len(items) >= 8:
+                return JSONResponse({"items": items})
+
+    dadata_row = db.query(models.IntegrationSetting).filter(models.IntegrationSetting.provider == "dadata").first()
+    api_key = ((dadata_row.secret if dadata_row and dadata_row.is_active else None) or os.getenv("DADATA_API_KEY") or "").strip()
+    if not api_key:
+        return JSONResponse({"items": items, "external_configured": False})
+    try:
+        payload = json.dumps({"query": text_query, "count": 8}).encode("utf-8")
+        req = urllib.request.Request(
+            "https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/party",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Token {api_key}",
+                "User-Agent": "ground-reis/1.0",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=7) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        for suggestion in data.get("suggestions", []):
+            data_row = (suggestion or {}).get("data") or {}
+            name = str((suggestion or {}).get("value") or ((data_row.get("name") or {}).get("short_with_opf")) or "").strip()
+            inn = "".join(ch for ch in str(data_row.get("inn") or "") if ch.isdigit())
+            address = str(((data_row.get("address") or {}).get("value")) or "").strip()
+            if not name:
+                continue
+            key = (inn, bitrix._normalize(name))
+            if key in seen:
+                continue
+            local = db.query(models.Customer).filter(models.Customer.inn == inn).first() if inn else None
+            seen.add(key)
+            items.append({"customer_id": local.id if local else None, "name": name, "inn": inn, "address": address, "source": "dadata"})
+            if len(items) >= 8:
+                break
+        return JSONResponse({"items": items, "external_configured": True})
+    except Exception as exc:
+        print("COMPANY_SUGGEST_ERROR", type(exc).__name__, flush=True)
+        return JSONResponse({"items": items, "external_configured": True})
+
 
 def calc_sum(req: models.TripRequest, tariff: Optional[models.Tariff]) -> float:
     return _tariff_amount(tariff, req.actual_km if req.actual_km is not None else (req.km or 0), req.actual_volume if req.actual_volume is not None else (req.volume or 0), req.trips_count if req.trips_count is not None else 1)
@@ -578,11 +685,12 @@ def new_samosval(request: Request, current_user: models.User = Depends(require_r
 
 @app.post("/requests/new")
 def create_request(
-    request: Request, number: Optional[str] = Form(None), planned_date: str = Form(...), planned_time: str = Form(""),
+    request: Request, number: Optional[str] = Form(None), planned_at: Optional[str] = Form(None), planned_date: Optional[str] = Form(None), planned_time: str = Form(""),
     driver_id: Optional[str] = Form(None), vehicle_id: Optional[str] = Form(None), load_address: str = Form(""),
     unload_address: str = Form(""), route_name: str = Form(""), km: str = Form("0"), volume: str = Form("0"),
     tonnage: Optional[str] = Form(None), trips_count: str = Form("1"), cargo_type_id: Optional[str] = Form(None),
     customer_id: Optional[str] = Form(None), customer_name_manual: Optional[str] = Form(None),
+    customer_inn_manual: Optional[str] = Form(None), customer_address_manual: Optional[str] = Form(None),
     polygon_id: Optional[str] = Form(None), kind: str = Form(...), comment: str = Form(""),
     tariff_id: Optional[str] = Form(None), site_contact_name: str = Form(""),
     site_contact_phone: str = Form(""), site_contact_comment: str = Form(""),
@@ -590,7 +698,7 @@ def create_request(
 ):
     try:
         kind_value = TripType(kind)
-        planned_value = date.fromisoformat(planned_date)
+        planned_value, planned_time_value = _parse_planned_datetime(planned_at, planned_date, planned_time)
         km_value = _finite_float(km, "Километраж")
         volume_value = _finite_float(volume, "Объём")
         tonnage_value = _finite_float(tonnage, "Тоннаж", nullable=True)
@@ -608,23 +716,9 @@ def create_request(
     vehicle_type = db.query(models.VehicleType).filter(models.VehicleType.id == vehicle.type_id).first()
     if not vehicle.is_active or not vehicle_type or vehicle_type.kind != kind_value:
         raise HTTPException(400, "Автомобиль неактивен или не соответствует направлению")
-    customer_value = _form_fk(db, models.Customer, customer_id, "Заказчик")
-    if not customer_value and customer_name_manual and customer_name_manual.strip():
-        clean_customer = customer_name_manual.strip()
-        normalized_customer = bitrix._normalize(clean_customer)
-        customer = next(
-            (row for row in db.query(models.Customer).all() if bitrix._normalize(row.name) == normalized_customer),
-            None,
-        )
-        if not customer:
-            customer = models.Customer(name=clean_customer, address="")
-            db.add(customer)
-            try:
-                db.flush()
-            except IntegrityError:
-                db.rollback()
-                customer = db.query(models.Customer).filter(models.Customer.name == clean_customer).first()
-        customer_value = customer.id if customer else None
+    customer_value = _resolve_customer_from_form(
+        db, customer_id, customer_name_manual, customer_inn_manual, customer_address_manual
+    )
     cargo_value = _form_fk(db, models.CargoType, cargo_type_id, "Тип груза")
     polygon_value = _form_fk(db, models.Polygon, polygon_id, "Полигон")
     clean_number = (number or "").strip()
@@ -647,7 +741,7 @@ def create_request(
     if not tariff:
         raise HTTPException(400, "Не найден подходящий активный тариф")
     req = models.TripRequest(
-        number=clean_number, planned_date=planned_value, planned_time=planned_time.strip(), driver_id=driver_value,
+        number=clean_number, planned_date=planned_value, planned_time=planned_time_value, driver_id=driver_value,
         vehicle_id=vehicle_value, load_address=load_address.strip(), unload_address=unload_address.strip(),
         route_name=route_name.strip(), km=km_value, volume=volume_value, tonnage=tonnage_value,
         trips_count=trips_value, cargo_type_id=cargo_value, customer_id=customer_value,
@@ -708,6 +802,60 @@ def _finite_float(raw, label, default=0.0, nullable=False):
     if not math.isfinite(value):
         raise HTTPException(400, f"Поле должно быть конечным числом: {label}")
     return value
+
+
+def _parse_planned_datetime(planned_at=None, planned_date=None, planned_time=None):
+    raw_at = str(planned_at or "").strip()
+    if raw_at:
+        try:
+            parsed = datetime.fromisoformat(raw_at)
+        except ValueError:
+            raise HTTPException(400, "Проверьте дату и время рейса")
+        return parsed.date(), parsed.strftime("%H:%M")
+    raw_date = str(planned_date or "").strip()
+    if not raw_date:
+        raise HTTPException(400, "Укажите дату и время рейса")
+    try:
+        parsed_date = date.fromisoformat(raw_date)
+    except ValueError:
+        raise HTTPException(400, "Проверьте дату и время рейса")
+    raw_time = str(planned_time or "").strip()[:5]
+    if raw_time:
+        try:
+            datetime.strptime(raw_time, "%H:%M")
+        except ValueError:
+            raise HTTPException(400, "Проверьте дату и время рейса")
+    return parsed_date, raw_time
+
+
+def _resolve_customer_from_form(db, customer_id=None, customer_name_manual=None, customer_inn_manual=None, customer_address_manual=None):
+    customer_value = _form_fk(db, models.Customer, customer_id, "Заказчик")
+    clean_name = str(customer_name_manual or "").strip()
+    clean_inn = "".join(ch for ch in str(customer_inn_manual or "") if ch.isdigit())
+    clean_address = str(customer_address_manual or "").strip()
+    if clean_inn and len(clean_inn) not in {10, 12}:
+        raise HTTPException(400, "ИНН должен содержать 10 или 12 цифр")
+    customer = db.query(models.Customer).filter(models.Customer.id == customer_value).first() if customer_value else None
+    if not customer and clean_inn:
+        customer = db.query(models.Customer).filter(models.Customer.inn == clean_inn).first()
+    if not customer and clean_name:
+        normalized = bitrix._normalize(clean_name)
+        customer = next((row for row in db.query(models.Customer).all() if bitrix._normalize(row.name) == normalized), None)
+    if not customer and clean_name:
+        customer = models.Customer(name=clean_name, inn=clean_inn or None, address=clean_address)
+        db.add(customer)
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            customer = db.query(models.Customer).filter(models.Customer.inn == clean_inn).first() if clean_inn else db.query(models.Customer).filter(models.Customer.name == clean_name).first()
+    if customer:
+        if clean_inn and not customer.inn:
+            customer.inn = clean_inn
+        if clean_address and not customer.address:
+            customer.address = clean_address
+        return customer.id
+    return None
 
 
 def _customer_identity_values(inn, bitrix_company_id):
@@ -809,7 +957,7 @@ def _safe_bitrix_diagnostic(state):
             safe[key] = state[key]
     if state.get("event") in {
         "ONCRMDYNAMICITEMADD", "ONCRMDYNAMICITEMUPDATE", "ONCRMDYNAMICITEMDELETE",
-        "ONCRMCOMPANYUPDATE", "ONCRMCONTACTUPDATE",
+        "ONCRMCOMPANYUPDATE", "ONCRMCONTACTUPDATE", "ONCRMREQUISITEADD", "ONCRMREQUISITEUPDATE",
     }:
         safe["event"] = state["event"]
     if state.get("kind") in {member.value for member in TripType}:
@@ -1036,11 +1184,13 @@ def edit_request_form(request: Request, req_id: int, current_user: models.User =
 
 @app.post("/requests/{req_id}/edit")
 def edit_request(
-    req_id: int, number: str = Form(...), planned_date: str = Form(...), planned_time: str = Form(""),
+    req_id: int, number: str = Form(...), planned_at: Optional[str] = Form(None), planned_date: Optional[str] = Form(None), planned_time: str = Form(""),
     driver_id: str = Form(...), vehicle_id: Optional[str] = Form(None), load_address: str = Form(""),
     unload_address: str = Form(""), route_name: str = Form(""), km: str = Form("0"),
     volume: str = Form("0"), tonnage: Optional[str] = Form(None), trips_count: str = Form("1"),
     cargo_type_id: Optional[str] = Form(None), customer_id: Optional[str] = Form(None),
+    customer_name_manual: Optional[str] = Form(None), customer_inn_manual: Optional[str] = Form(None),
+    customer_address_manual: Optional[str] = Form(None),
     polygon_id: Optional[str] = Form(None), kind: str = Form(...),
     comment: str = Form(""), tariff_id: Optional[str] = Form(None),
     polygon_cost_manual: Optional[str] = Form(None),
@@ -1064,13 +1214,15 @@ def edit_request(
     if driver.role != UserRole.DRIVER or not driver.is_active:
         raise HTTPException(400, "Выберите активного водителя")
     vehicle_value = _form_fk(db, models.Vehicle, vehicle_id, "Автомобиль", required=True)
-    customer_value = _form_fk(db, models.Customer, customer_id, "Заказчик")
+    customer_value = _resolve_customer_from_form(
+        db, customer_id, customer_name_manual, customer_inn_manual, customer_address_manual
+    )
     cargo_value = _form_fk(db, models.CargoType, cargo_type_id, "Тип груза")
     polygon_value = _form_fk(db, models.Polygon, polygon_id, "Полигон")
     tariff_value = _form_fk(db, models.Tariff, tariff_id, "Тариф")
     try:
         kind_value = TripType(kind)
-        planned_value = date.fromisoformat(planned_date)
+        planned_value, planned_time_value = _parse_planned_datetime(planned_at, planned_date, planned_time)
         km_value = _finite_float(km, "Километраж")
         volume_value = _finite_float(volume, "Объём")
         tonnage_value = _finite_float(tonnage, "Тоннаж", nullable=True)
@@ -1103,7 +1255,7 @@ def edit_request(
     locked_snapshot = _salary_sensitive_values(req) if salary_items else None
     new_amount = _tariff_amount(tariff, calculation_km, calculation_volume, trips_value)
     req.number = clean_number
-    req.planned_date, req.planned_time, req.kind = planned_value, planned_time.strip(), kind_value
+    req.planned_date, req.planned_time, req.kind = planned_value, planned_time_value, kind_value
     req.driver_id, req.vehicle_id = driver_value, vehicle_value
     req.customer_id, req.cargo_type_id, req.polygon_id = customer_value, cargo_value, polygon_value
     req.load_address, req.unload_address, req.route_name = load_address.strip(), unload_address.strip(), route_name.strip()
@@ -2388,7 +2540,7 @@ def save_integrations(provider: str = Form("bitrix24"), webhook_url: str = Form(
     if secret.strip():
         row.secret = secret.strip()
     row.responsible_id = responsible_id
-    row.is_active = bool(row.webhook_url and row.secret)
+    row.is_active = bool(row.webhook_url and row.secret) if provider == "bitrix24" else bool(row.secret)
     db.commit()
     return RedirectResponse("/settings", status_code=302)
 
@@ -2443,6 +2595,21 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
     }
     event, item_id, entity_type_id = bitrix.extract_event_identifiers(payload)
     BITRIX_LAST_EVENT.update({"event": event, "item_id": item_id, "entity_type_id": entity_type_id})
+
+    if event in {"ONCRMREQUISITEADD", "ONCRMREQUISITEUPDATE"}:
+        if not item_id:
+            BITRIX_LAST_EVENT["result"] = "missing_item_id"
+            return JSONResponse({"ok": False, "error": "missing_item_id"}, status_code=400)
+        result = bitrix.sync_customer_from_requisite_event(db, item_id, settings=settings)
+        if result.get("error"):
+            db.rollback()
+            safe_result = _safe_bitrix_result(result)
+            BITRIX_LAST_EVENT["result"] = safe_result
+            return JSONResponse(safe_result, status_code=400)
+        db.commit()
+        safe_result = _safe_bitrix_result(result)
+        BITRIX_LAST_EVENT["result"] = safe_result
+        return JSONResponse(safe_result)
 
     if event in {"ONCRMCOMPANYUPDATE", "ONCRMCONTACTUPDATE"}:
         if not item_id:
