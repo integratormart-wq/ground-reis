@@ -353,12 +353,15 @@ def build_fields(req, field_map=None) -> dict:
 def sync_trip(req, db, settings=None) -> dict:
     settings = settings or get_integration_settings(db)
     if not settings or not settings.is_active or not settings.webhook_url:
+        print("BITRIX_SYNC_SKIP", "no_active_integration", req.id, getattr(req.kind, "value", req.kind), flush=True)
         return {"skipped": True, "reason": "no_active_integration"}
     entity_id = resolve_process_entity(settings.webhook_url, req.kind)
     if not entity_id:
+        print("BITRIX_SYNC_SKIP", "process_not_found", req.id, getattr(req.kind, "value", req.kind), flush=True)
         return {"skipped": True, "reason": "process_not_found"}
     schema = get_element_fields(settings.webhook_url, entity_id)
     if "_error" in schema:
+        print("BITRIX_SYNC_ERROR", "fields", entity_id, req.id, flush=True)
         return {"error": schema["_error"], "action": "fields"}
     fields = build_fields(req, resolve_field_map(schema))
     target_stage = STATUS_STAGE_TITLES.get(req.status)
@@ -367,6 +370,7 @@ def sync_trip(req, db, settings=None) -> dict:
             settings.webhook_url, entity_id, req.status, req.bitrix_element_id,
         )
         if not stage_id:
+            print("BITRIX_SYNC_ERROR", "stage", entity_id, req.id, req.status.value, flush=True)
             return {"error": "bitrix_stage_not_found", "action": "stage"}
         fields["stageId"] = stage_id
         if not req.bitrix_element_id:
@@ -380,12 +384,12 @@ def sync_trip(req, db, settings=None) -> dict:
         payload = {"entityTypeId": int(entity_id), "fields": fields}
         response = _http_post(settings.webhook_url, "crm.item.add", payload)
     if "error" in response:
-        print("BITRIX_SYNC_ERROR", action, flush=True)
+        print("BITRIX_SYNC_ERROR", action, entity_id, req.id, "remote", flush=True)
         return {"error": response["error"], "action": action}
     result = response.get("result", {})
     item_id = result.get("id") or result.get("item", {}).get("id")
     if action == "add" and not item_id:
-        print("BITRIX_SYNC_ERROR", action, "missing_item_id", flush=True)
+        print("BITRIX_SYNC_ERROR", action, entity_id, req.id, "missing_item_id", flush=True)
         return {"error": "bitrix_item_id_missing", "action": action}
     if item_id:
         if not req.bitrix_element_id:
