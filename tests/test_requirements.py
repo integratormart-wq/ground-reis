@@ -1,4 +1,5 @@
 import os
+import json
 from datetime import date
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_requirements.db")
@@ -1125,4 +1126,73 @@ def test_samosval_outbound_uses_process_1092(monkeypatch):
     assert calls[0][1]["entityTypeId"] == 1092
     assert trip.bitrix_entity_type_id == 1092
     assert trip.bitrix_element_id == 606
+    db.close()
+
+
+def test_driver_can_accept_new_request_when_it_is_already_assigned_to_them():
+    db, admin, driver, _ = reset_db()
+    trip = models.TripRequest(
+        number="П-NEW-ASSIGNED-DRIVER",
+        planned_date=date.today(),
+        driver_id=driver.id,
+        kind=models.TripType.PUKHTOVOZ,
+        status=models.RequestStatus.NEW,
+    )
+    db.add(trip); db.commit(); db.refresh(trip)
+
+    response = client_as(driver).post(f"/requests/{trip.id}/accept", follow_redirects=False)
+    assert response.status_code == 302
+    db.refresh(trip)
+    assert trip.status == models.RequestStatus.ACCEPTED
+    history = db.query(models.StatusHistory).filter_by(trip_request_id=trip.id).order_by(models.StatusHistory.id.desc()).first()
+    assert history.old_status == models.RequestStatus.NEW.value
+    assert history.new_status == models.RequestStatus.ACCEPTED.value
+    db.close()
+
+
+def test_request_form_builds_yandex_navigation_from_address_and_has_suggestions():
+    db, admin, *_ = reset_db()
+    page = client_as(admin).get("/pukhtovoz/new")
+    assert page.status_code == 200
+    assert 'id="object_navigation_address"' in page.text
+    assert 'id="object_address_suggestions"' in page.text
+    assert 'type="hidden" id="unload_address" name="unload_address"' in page.text
+    assert 'https://yandex.ru/maps/?text=' in page.text
+    assert '/api/address-suggest?q=' in page.text
+    db.close()
+
+
+def test_address_suggest_returns_city_context_without_writing_to_db(monkeypatch):
+    db, admin, *_ = reset_db()
+    monkeypatch.delenv("YANDEX_SUGGEST_API_KEY", raising=False)
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def read(self):
+            return json.dumps({
+                "features": [{
+                    "properties": {
+                        "street": "Комсомольская улица",
+                        "housenumber": "5А",
+                        "city": "Первоуральск",
+                        "state": "Свердловская область",
+                        "country": "Россия",
+                    }
+                }]
+            }).encode("utf-8")
+
+    def fake_urlopen(request, timeout=0):
+        assert "photon.komoot.io/api/" in request.full_url
+        assert timeout == 5
+        return FakeResponse()
+
+    monkeypatch.setattr(app_module.urllib.request, "urlopen", fake_urlopen)
+    response = client_as(admin).get("/api/address-suggest?q=Комсомольская%205А")
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": ["Комсомольская улица 5А, Первоуральск, Свердловская область, Россия"]
+    }
     db.close()
