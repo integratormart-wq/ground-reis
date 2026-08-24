@@ -777,10 +777,11 @@ def _safe_bitrix_result(result):
     for key in ("element_id", "trip_id"):
         if isinstance(result.get(key), int):
             safe[key] = result[key]
-    if result.get("action") in {"add", "update", "cancel", "delete"}:
+    if result.get("action") in {"add", "update", "cancel", "delete", "customer_update", "attachments"}:
         safe["action"] = result["action"]
     if result.get("reason") in {
         "no_active_integration", "foreign_process", "disabled", "process_not_found", "final_locked",
+        "customer_not_linked", "status_preserved",
     }:
         safe["reason"] = result["reason"]
     if result.get("error"):
@@ -798,7 +799,10 @@ def _safe_bitrix_diagnostic(state):
     for key in ("item_id", "entity_type_id", "request_id"):
         if isinstance(state.get(key), int):
             safe[key] = state[key]
-    if state.get("event") in {"ONCRMDYNAMICITEMADD", "ONCRMDYNAMICITEMUPDATE", "ONCRMDYNAMICITEMDELETE"}:
+    if state.get("event") in {
+        "ONCRMDYNAMICITEMADD", "ONCRMDYNAMICITEMUPDATE", "ONCRMDYNAMICITEMDELETE",
+        "ONCRMCOMPANYUPDATE", "ONCRMCONTACTUPDATE",
+    }:
         safe["event"] = state["event"]
     if state.get("kind") in {member.value for member in TripType}:
         safe["kind"] = state["kind"]
@@ -2376,6 +2380,26 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
     }
     event, item_id, entity_type_id = bitrix.extract_event_identifiers(payload)
     BITRIX_LAST_EVENT.update({"event": event, "item_id": item_id, "entity_type_id": entity_type_id})
+
+    if event in {"ONCRMCOMPANYUPDATE", "ONCRMCONTACTUPDATE"}:
+        if not item_id:
+            BITRIX_LAST_EVENT["result"] = "missing_item_id"
+            return JSONResponse({"ok": False, "error": "missing_item_id"}, status_code=400)
+        result = bitrix.sync_customer_from_bitrix_event(
+            db, settings=settings,
+            company_id=item_id if event == "ONCRMCOMPANYUPDATE" else None,
+            contact_id=item_id if event == "ONCRMCONTACTUPDATE" else None,
+        )
+        if result.get("error"):
+            db.rollback()
+            safe_result = _safe_bitrix_result(result)
+            BITRIX_LAST_EVENT["result"] = safe_result
+            return JSONResponse(safe_result, status_code=400)
+        db.commit()
+        safe_result = _safe_bitrix_result(result)
+        BITRIX_LAST_EVENT["result"] = safe_result
+        return JSONResponse(safe_result)
+
     if event not in {"ONCRMDYNAMICITEMADD", "ONCRMDYNAMICITEMUPDATE", "ONCRMDYNAMICITEMDELETE"}:
         BITRIX_LAST_EVENT["result"] = "unsupported_event"
         return JSONResponse({"ok": True, "skipped": "unsupported_event", "event": event})
@@ -2399,11 +2423,7 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
         return JSONResponse({"ok": True, "action": "cancel", "trip_id": trip.id if trip else None})
 
     old_status = trip.status if trip else None
-    if old_status in {RequestStatus.LOGIST_CONFIRMED, RequestStatus.CANCELLED}:
-        safe_result = {"ok": True, "skipped": True, "reason": "final_locked", "trip_id": trip.id}
-        BITRIX_LAST_EVENT["result"] = safe_result
-        print("BITRIX_INBOUND_SKIP final_locked", entity_type_id, item_id, trip.id, flush=True)
-        return JSONResponse(safe_result)
+    status_locked = old_status in {RequestStatus.LOGIST_CONFIRMED, RequestStatus.CANCELLED}
     old_salary_values = None
     salary_locked = False
     if trip:
@@ -2423,11 +2443,7 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
         if not trip:
             raise HTTPException(502, "Bitrix не вернул локальную заявку")
         old_status = trip.status
-        if old_status in {RequestStatus.LOGIST_CONFIRMED, RequestStatus.CANCELLED}:
-            safe_result = {"ok": True, "skipped": True, "reason": "final_locked", "trip_id": trip.id}
-            BITRIX_LAST_EVENT["result"] = safe_result
-            print("BITRIX_INBOUND_SKIP final_locked", entity_type_id, item_id, trip.id, flush=True)
-            return JSONResponse(safe_result)
+        status_locked = old_status in {RequestStatus.LOGIST_CONFIRMED, RequestStatus.CANCELLED}
         old_salary_values = _salary_sensitive_values(trip)
         salary_locked = bool(db.query(models.SalaryCalcItem).filter_by(trip_request_id=trip.id).first())
         result = _sync_from_bitrix_safe(item_id, entity_type_id, db, settings)
@@ -2442,34 +2458,54 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(502, "Bitrix не вернул локальную заявку")
     if old_status is None and trip.status != RequestStatus.NEW:
         trip.status = RequestStatus.NEW
-    if old_status is not None and trip.status != old_status:
-        allowed_transitions = {
-            RequestStatus.NEW: {RequestStatus.ASSIGNED, RequestStatus.CANCELLED},
-            RequestStatus.ASSIGNED: {RequestStatus.ACCEPTED, RequestStatus.CANCELLED},
-            RequestStatus.ACCEPTED: {RequestStatus.IN_WORK, RequestStatus.CANCELLED},
-            RequestStatus.IN_WORK: {RequestStatus.DRIVER_COMPLETED, RequestStatus.CANCELLED},
-            RequestStatus.DRIVER_COMPLETED: {RequestStatus.ON_REVIEW, RequestStatus.LOGIST_CONFIRMED, RequestStatus.NEEDS_CORRECTION},
-            RequestStatus.ON_REVIEW: {RequestStatus.LOGIST_CONFIRMED, RequestStatus.NEEDS_CORRECTION},
-            RequestStatus.NEEDS_CORRECTION: {RequestStatus.IN_WORK, RequestStatus.CANCELLED},
-        }
-        if trip.status not in allowed_transitions.get(old_status, set()):
-            db.rollback()
-            raise HTTPException(409, "Недопустимый переход статуса через webhook")
-    if trip.status != RequestStatus.NEW:
+
+    allowed_transitions = {
+        RequestStatus.NEW: {RequestStatus.ASSIGNED, RequestStatus.CANCELLED},
+        RequestStatus.ASSIGNED: {RequestStatus.ACCEPTED, RequestStatus.CANCELLED},
+        RequestStatus.ACCEPTED: {RequestStatus.IN_WORK, RequestStatus.CANCELLED},
+        RequestStatus.IN_WORK: {RequestStatus.DRIVER_COMPLETED, RequestStatus.CANCELLED},
+        RequestStatus.DRIVER_COMPLETED: {RequestStatus.ON_REVIEW, RequestStatus.LOGIST_CONFIRMED, RequestStatus.NEEDS_CORRECTION},
+        RequestStatus.ON_REVIEW: {RequestStatus.LOGIST_CONFIRMED, RequestStatus.NEEDS_CORRECTION},
+        RequestStatus.NEEDS_CORRECTION: {RequestStatus.IN_WORK, RequestStatus.CANCELLED},
+    }
+    status_changed = old_status is not None and trip.status != old_status
+    if status_locked and old_status is not None:
+        if status_changed:
+            print("BITRIX_INBOUND_STATUS_PRESERVED final_locked", entity_type_id, item_id, trip.id, flush=True)
+        trip.status = old_status
+        status_changed = False
+    elif status_changed and trip.status not in allowed_transitions.get(old_status, set()):
+        # A stale/backward Bitrix stage must not cancel synchronization of the other fields.
+        print("BITRIX_INBOUND_STATUS_PRESERVED invalid_transition", entity_type_id, item_id, trip.id, flush=True)
+        trip.status = old_status
+        status_changed = False
+
+    # Recalculate/validate tariff only when Bitrix actually advances workflow status.
+    # Ordinary edits (address, customer, files, comments, polygon, etc.) must never be rolled back
+    # because an unrelated tariff or vehicle is missing.
+    if status_changed and trip.status != RequestStatus.NEW:
         driver = db.query(models.User).filter_by(id=trip.driver_id).first() if trip.driver_id else None
         vehicle = db.query(models.Vehicle).filter_by(id=trip.vehicle_id).first() if trip.vehicle_id else None
         if not driver or driver.role != UserRole.DRIVER or not driver.is_active:
-            db.rollback(); raise HTTPException(400, "Webhook назначил неактивного или некорректного водителя")
-        if not vehicle or not vehicle.is_active or not vehicle.type or vehicle.type.kind != trip.kind:
-            db.rollback(); raise HTTPException(400, "Webhook назначил неактивный или несовместимый автомобиль")
-        km_value = trip.actual_km if trip.actual_km is not None else (trip.km or 0)
-        volume_value = trip.actual_volume if trip.actual_volume is not None else (trip.volume or 0)
-        tariff = _select_tariff(db, trip.kind, vehicle, trip.planned_date, km_value, volume_value, trip.tariff_id)
-        if not tariff:
-            db.rollback(); raise HTTPException(400, "Для данных webhook не найден совместимый тариф")
-        trip.tariff_id = tariff.id
-        amount = _tariff_amount(tariff, km_value, volume_value, trip.trips_count if trip.trips_count is not None else 1)
-        trip.sum_trip = trip.sum_driver = amount
+            print("BITRIX_INBOUND_STATUS_PRESERVED invalid_driver", entity_type_id, item_id, trip.id, flush=True)
+            trip.status = old_status
+            status_changed = False
+        elif not vehicle or not vehicle.is_active or not vehicle.type or vehicle.type.kind != trip.kind:
+            print("BITRIX_INBOUND_STATUS_PRESERVED invalid_vehicle", entity_type_id, item_id, trip.id, flush=True)
+            trip.status = old_status
+            status_changed = False
+        else:
+            km_value = trip.actual_km if trip.actual_km is not None else (trip.km or 0)
+            volume_value = trip.actual_volume if trip.actual_volume is not None else (trip.volume or 0)
+            tariff = _select_tariff(db, trip.kind, vehicle, trip.planned_date, km_value, volume_value, trip.tariff_id)
+            if not tariff:
+                print("BITRIX_INBOUND_STATUS_PRESERVED tariff_missing", entity_type_id, item_id, trip.id, flush=True)
+                trip.status = old_status
+                status_changed = False
+            else:
+                trip.tariff_id = tariff.id
+                amount = _tariff_amount(tariff, km_value, volume_value, trip.trips_count if trip.trips_count is not None else 1)
+                trip.sum_trip = trip.sum_driver = amount
     if trip.status == RequestStatus.LOGIST_CONFIRMED and trip.polygon_cost_manual is None:
         polygon_rate_info = _polygon_rate_info(trip, use_snapshot=False)
         trip.polygon_cost_manual = _polygon_trip_cost(trip)
