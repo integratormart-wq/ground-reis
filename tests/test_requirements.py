@@ -2081,3 +2081,101 @@ def test_bitrix_outbound_writes_real_named_fields_and_custom_company(monkeypatch
     assert "ufLoadAddr" not in fields
     assert "ufCustomer" not in fields
     db.close()
+
+
+def test_trip_list_pages_schedule_bitrix_reconcile_without_blocking_request():
+    import inspect
+    for endpoint in (app_module.requests_list, app_module.pukhtovoz_list, app_module.samosval_list):
+        source = inspect.getsource(endpoint)
+        assert "_schedule_bitrix_reconcile()" in source
+        assert "_maybe_reconcile_bitrix(db)" not in source
+
+
+def test_bitrix_known_process_resolution_does_not_require_network(monkeypatch):
+    from backend import bitrix
+    bitrix._clear_runtime_cache()
+    monkeypatch.setattr(bitrix, "_http_post", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("network should not be used")))
+    assert bitrix.resolve_process_entity("https://example.invalid/rest/1/token/", models.TripType.PUKHTOVOZ) == "1088"
+    assert bitrix.resolve_process_entity("https://example.invalid/rest/1/token/", models.TripType.SAMOSVAL) == "1092"
+
+
+def test_bitrix_field_schema_is_cached_and_can_be_force_refreshed(monkeypatch):
+    from backend import bitrix
+    bitrix._clear_runtime_cache()
+    calls = []
+
+    def fake_http(webhook, method, params):
+        calls.append((method, params.get("entityTypeId")))
+        return {"result": {"fields": {"title": {"title": "Название"}}}}
+
+    monkeypatch.setattr(bitrix, "_http_post", fake_http)
+    webhook = "https://cache-test.invalid/rest/1/token/"
+    first = bitrix.get_element_fields(webhook, "1088")
+    second = bitrix.get_element_fields(webhook, "1088")
+    refreshed = bitrix.get_element_fields(webhook, "1088", force=True)
+    assert first == second == refreshed
+    assert calls == [("crm.item.fields", 1088), ("crm.item.fields", 1088)]
+
+
+def test_bitrix_vehicle_mapping_uses_only_new_gosnomer_field():
+    schema = {
+        "title": {"title": "Название", "type": "string"},
+        "ufOldVehicle": {"title": "Машины", "type": "crm"},
+        "ufOldAuto": {"title": "Автомобиль", "type": "string"},
+        "ufPlate": {"title": "Госномер", "type": "string"},
+    }
+    mapping = app_module.bitrix.resolve_field_map(schema)
+    assert mapping["vehicle_name"] == "ufPlate"
+
+
+def test_bitrix_inbound_resolves_prefixed_driver_id_and_new_gosnomer(monkeypatch):
+    db, admin, driver, vt = reset_db()
+    driver.full_name = "Иванов Иван"
+    vehicle = models.Vehicle(name="Техническое имя", plate="А123АА196", type_id=vt.id)
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/", secret="s", is_active=True,
+    )
+    db.add_all([vehicle, settings]); db.commit()
+
+    schema = {
+        "title": {"title": "Название", "type": "string"},
+        "ufDriverReal": {"title": "Водитель", "type": "string"},
+        "ufOldVehicle": {"title": "Машины", "type": "string"},
+        "ufPlate": {"title": "Госномер", "type": "string"},
+    }
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_kinds", lambda url: {"1088": models.TripType.PUKHTOVOZ})
+    monkeypatch.setattr(app_module.bitrix, "status_from_stage", lambda *args: None)
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: schema)
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda url, entity, item_id: {
+        "id": 901,
+        "title": "РЕЙС-901",
+        "ufDriverReal": "U77",
+        "ufOldVehicle": "СТАРОЕ-ПОЛЕ",
+        "ufPlate": "А123АА196",
+    })
+
+    def fake_post(url, method, payload):
+        if method == "user.get":
+            assert str(payload.get("ID")) == "77"
+            return {"result": [{"ID": "77", "LAST_NAME": "Иванов", "NAME": "Иван"}]}
+        return {"result": {}}
+    monkeypatch.setattr(app_module.bitrix, "_http_post", fake_post)
+    app_module.bitrix._clear_runtime_cache()
+
+    result = app_module.bitrix.sync_from_bitrix(901, 1088, db, settings=settings)
+    db.commit()
+    trip = db.query(models.TripRequest).filter_by(bitrix_element_id=901, bitrix_entity_type_id=1088).one()
+    assert result["ok"] is True
+    assert trip.driver_id == driver.id
+    assert trip.vehicle_id == vehicle.id
+    db.close()
+
+
+def test_bitrix_user_directory_access_reports_missing_scope(monkeypatch):
+    monkeypatch.setattr(app_module.bitrix, "_http_post", lambda url, method, payload: {
+        "error": "insufficient_scope",
+        "error_description": "The request requires higher privileges than provided by the webhook token",
+    })
+    result = app_module.bitrix.check_user_directory_access("https://example/rest/1/token/")
+    assert result["ok"] is False
+    assert result["reason"] == "insufficient_scope"
