@@ -394,10 +394,18 @@ def _field_alias_score(title: str, aliases) -> int:
             best = max(best, 10000 + len(normalized_alias) * 10 - index)
             continue
         # Частичное совпадение разрешаем только для достаточно конкретных
-        # многословных названий. Это защищает «Дата и время» от createdTime.
+        # многословных названий. Алиас должен входить в полное название поля,
+        # а не наоборот. Иначе короткое поле «Полигон» ошибочно совпадало сразу
+        # с «Адрес полигона», «Контакт полигона» и «Навигация полигона».
         if len(normalized_alias.split()) >= 2 and len(normalized_alias) >= 7:
-            if normalized_alias in normalized_title or normalized_title in normalized_alias:
+            if normalized_alias in normalized_title:
                 best = max(best, 5000 + len(normalized_alias) * 10 - index)
+            elif (
+                normalized_title in normalized_alias
+                and len(normalized_title.split()) >= 2
+                and len(normalized_title) >= 7
+            ):
+                best = max(best, 4500 + len(normalized_title) * 10 - index)
     return best
 
 
@@ -2051,10 +2059,16 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         if not polygon and re.search(r"[A-Za-zА-Яа-яЁё]", polygon_name):
             polygon = models.Polygon(name=polygon_name); db.add(polygon); db.flush()
         if polygon:
+            # Название выбранного полигона связывает рейс с записью Polygon.
+            # Отдельные реквизиты полигона обновляем только из действительно
+            # отдельных полей Bitrix и никогда не копируем само название в
+            # адрес, контакт, телефон или навигацию.
+            polygon_name_norm = _normalize(polygon_name)
             for logical, attr in (("polygon_address", "address"), ("polygon_contact", "contact"), ("polygon_phone", "phone"), ("polygon_navigator_url", "navigator_url")):
                 if _has_logical(item, logical, mapping):
-                    value = _clean_address_value(settings.webhook_url, item, logical, mapping, schema) if logical == "polygon_address" else str(_read_display_logical(item, logical, mapping, schema, settings.webhook_url) or "")
-                    setattr(polygon, attr, value)
+                    value = _clean_address_value(settings.webhook_url, item, logical, mapping, schema) if logical == "polygon_address" else str(_read_display_logical(item, logical, mapping, schema, settings.webhook_url) or "").strip()
+                    if value and _normalize(value) != polygon_name_norm:
+                        setattr(polygon, attr, value)
             trip.polygon_id = polygon.id
         else:
             print("BITRIX_INBOUND_POLYGON_NOT_MATCHED", entity_type_id, item_id, _normalize(polygon_name), flush=True)
