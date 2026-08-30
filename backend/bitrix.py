@@ -311,24 +311,66 @@ def _field_label(info, fallback="") -> str:
     return str(fallback or "")
 
 
+def _field_alias_score(title: str, aliases) -> int:
+    """Оценивает совпадение названия поля Bitrix с нашим логическим полем.
+
+    Важно: однословные общие алиасы вроде «дата» не должны цепляться за
+    системные поля «Дата создания»/«Дата изменения». Точное русское название
+    всегда имеет приоритет над старым техническим кодом uf*.
+    """
+    normalized_title = _normalize(title)
+    if not normalized_title:
+        return 0
+    best = 0
+    for index, alias in enumerate(aliases or ()):
+        normalized_alias = _normalize(alias)
+        if not normalized_alias:
+            continue
+        if normalized_title == normalized_alias:
+            # Более длинный/конкретный алиас чуть предпочтительнее.
+            best = max(best, 10000 + len(normalized_alias) * 10 - index)
+            continue
+        # Частичное совпадение разрешаем только для достаточно конкретных
+        # многословных названий. Это защищает «Дата и время» от createdTime.
+        if len(normalized_alias.split()) >= 2 and len(normalized_alias) >= 7:
+            if normalized_alias in normalized_title or normalized_title in normalized_alias:
+                best = max(best, 5000 + len(normalized_alias) * 10 - index)
+    return best
+
+
 def resolve_field_map(schema: dict) -> dict:
-    """Находит реальные коды полей по коду или русскому названию, не путая Клиента с companyId/contactIds."""
+    """Находит реальные поля Bitrix по их видимым названиям.
+
+    Раньше технические коды вроде ``ufReisDate``/``ufDriver`` имели
+    приоритет. Если такие старые поля оставались в Bitrix пустыми, интеграция
+    читала их вместо реальных полей «Подача машины», «Водитель», «Тариф»,
+    «Адрес подачи» и т.д. Теперь сначала выбирается поле по названию, и лишь
+    если его нет — используется legacy-код.
+    """
     resolved = {"number": "title"}
-    normalized_schema = {code: _normalize(_field_label(info, code)) for code, info in schema.items()}
+    schema = schema or {}
     for logical, configured_code in FIELD_MAP.items():
         if logical == "number":
             continue
-        if configured_code in schema:
-            resolved[logical] = configured_code
-            continue
-        aliases = tuple(_normalize(x) for x in FIELD_TITLES.get(logical, ()))
-        for code, title in normalized_schema.items():
-            # companyId/contactIds are system client links, not text field "Заказчик".
+        aliases = FIELD_TITLES.get(logical, ())
+        candidates = []
+        for code, info in schema.items():
+            if str(code).startswith("_"):
+                continue
+            # Системные companyId/contactIds — это ссылки Клиента, а не
+            # текстовое пользовательское поле «Заказчик/Компания». Они
+            # обрабатываются отдельно ниже при синхронизации клиента.
             if logical == "customer_name" and code in {"companyId", "contactId", "contactIds"}:
                 continue
-            if title in aliases or any(alias and alias in title for alias in aliases):
-                resolved[logical] = code
-                break
+            score = _field_alias_score(_field_label(info, code), aliases)
+            if score:
+                candidates.append((score, code))
+        if candidates:
+            candidates.sort(key=lambda row: (-row[0], str(row[1])))
+            resolved[logical] = candidates[0][1]
+            continue
+        if configured_code in schema:
+            resolved[logical] = configured_code
     return resolved
 
 
@@ -650,6 +692,138 @@ def _clean_address_value(webhook_base: str, item: dict, logical: str, mapping: d
     return text
 
 
+def _portal_timezone(webhook_base: str):
+    """Возвращает timezone офсета портала Bitrix24 через server.time."""
+    try:
+        response = _http_post(webhook_base, "server.time", {})
+        raw = response.get("result") if isinstance(response, dict) else None
+        if raw:
+            current = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if current.tzinfo is not None:
+                return current.tzinfo
+    except Exception:
+        pass
+    return None
+
+
+def _parse_bitrix_planned_at(webhook_base: str, raw):
+    """Разбирает поле «Подача машины» так же, как оно показано в Bitrix.
+
+    Если Bitrix отдал UTC/другой offset, приводим его к часовому поясу
+    самого портала (server.time), а не к UTC сервера Render.
+    """
+    text = str(_scalar(raw) or "").strip()
+    if not text:
+        return None, None
+    # Русский/человеческий формат встречается в некоторых пользовательских полях.
+    for fmt in ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d.%m.%Y"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return parsed.date(), parsed.strftime("%H:%M") if "%H" in fmt else None
+        except ValueError:
+            pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            portal_tz = _portal_timezone(webhook_base)
+            if portal_tz is not None:
+                parsed = parsed.astimezone(portal_tz)
+        return parsed.date(), parsed.strftime("%H:%M")
+    except ValueError:
+        pass
+    try:
+        return date.fromisoformat(text[:10]), None
+    except ValueError:
+        return None, None
+
+
+def _planned_at_outbound_value(req, webhook_base: str):
+    if not getattr(req, "planned_date", None):
+        return ""
+    raw_time = str(getattr(req, "planned_time", "") or "00:00").strip()[:5] or "00:00"
+    try:
+        value = datetime.combine(req.planned_date, datetime.strptime(raw_time, "%H:%M").time())
+    except ValueError:
+        return _planned_at_value(req)
+    portal_tz = _portal_timezone(webhook_base)
+    if portal_tz is not None:
+        value = value.replace(tzinfo=portal_tz)
+    return value.isoformat(timespec="minutes")
+
+
+def _driver_display_value(webhook_base: str, item: dict, mapping: dict, schema: dict) -> str:
+    code = _field_code(mapping, "driver_name")
+    if not code or code not in item:
+        return ""
+    raw = item.get(code)
+    info = schema.get(code, {}) if isinstance(schema, dict) else {}
+    display = str(_display_field_value(webhook_base, raw, info) or "").strip()
+    # Иногда поле «Водитель» настроено как число/ID пользователя, и Bitrix
+    # не помечает его типом user. В этом случае самостоятельно раскрываем ID.
+    scalar = _scalar(raw)
+    if scalar not in (None, "") and re.fullmatch(r"\d+", str(scalar).strip()):
+        resolved = _user_display_name(webhook_base, scalar)
+        if resolved and not re.fullmatch(r"\d+", str(resolved).strip()):
+            return str(resolved).strip()
+    return display
+
+
+def _company_id_from_field(raw, info: dict):
+    """Извлекает company ID из штатной или пользовательской CRM-привязки."""
+    values = raw if isinstance(raw, list) else [raw]
+    for value in values:
+        if isinstance(value, dict):
+            entity_type = value.get("entityTypeId") or value.get("entity_type_id") or value.get("typeId")
+            item_id = value.get("id") or value.get("itemId") or value.get("entityId") or value.get("value")
+            try:
+                if int(entity_type or 4) == 4 and int(item_id) > 0:
+                    return int(item_id)
+            except (TypeError, ValueError):
+                pass
+        entity_type, item_id = _crm_binding_parts(value)
+        if entity_type == 4 and item_id:
+            return int(item_id)
+    field_type = _field_type(info)
+    # crm_company нередко возвращает просто числовой ID.
+    if "company" in field_type or field_type in {"crm", "crm_entity"}:
+        scalar = _scalar(raw)
+        try:
+            candidate = int(str(scalar).strip())
+            return candidate if candidate > 0 else None
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _find_tariff_by_bitrix_value(db, kind, value: str):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    rows = db.query(models.Tariff).filter(models.Tariff.kind == kind).all()
+    normalized = _normalize(text)
+    exact = [row for row in rows if _normalize(row.title) == normalized]
+    if len(exact) == 1:
+        return exact[0]
+    contains = [row for row in rows if _normalize(row.title) and (
+        _normalize(row.title) in normalized or normalized in _normalize(row.title)
+    )]
+    if len(contains) == 1:
+        return contains[0]
+    # Если в Bitrix поле «Тариф» хранит саму сумму, связываем только при
+    # единственном однозначном совпадении цены среди тарифов нужного типа.
+    number_match = re.fullmatch(r"\s*([0-9]+(?:[.,][0-9]+)?)\s*(?:₽|руб(?:\.|лей)?)?\s*", text, re.I)
+    if number_match:
+        amount = float(number_match.group(1).replace(",", "."))
+        priced = []
+        for row in rows:
+            values = (row.trip_price, row.fixed_sum, row.km_price, row.volume_price)
+            if any(v is not None and abs(float(v) - amount) < 0.000001 for v in values):
+                priced.append(row)
+        if len(priced) == 1:
+            return priced[0]
+    return None
+
+
 def _find_driver_by_surname(db, display_name: str):
     text = str(display_name or "").strip()
     if not text:
@@ -862,7 +1036,7 @@ def _prepare_outbound_reference_fields(fields: dict, values: dict, mapping: dict
             else:
                 prepared[code] = mapped
             continue
-        if field_type in {"user", "employee"}:
+        if field_type in {"user", "employee"} or (logical == "driver_name" and field_type in {"integer", "int"}):
             mapped = _bitrix_user_id_by_name(webhook_base, str(value))
             if mapped is None:
                 prepared.pop(code, None)
@@ -1352,6 +1526,16 @@ def sync_customer_from_requisite_event(db, requisite_id: int, settings=None) -> 
         return {"skipped": True, "reason": "customer_not_linked"}
     return sync_customer_from_bitrix_event(db, settings=settings, company_id=company_id)
 
+def _log_important_field_map(schema: dict, mapping: dict, entity_type_id, item_id=None):
+    important = ("customer_name", "planned_at", "load_address", "driver_name", "tariff_name")
+    parts = []
+    for logical in important:
+        code = mapping.get(logical)
+        label = _field_label(schema.get(code, {}), code) if code else "-"
+        parts.append(f"{logical}={code or '-'}:{_normalize(label) or '-'}")
+    print("BITRIX_FIELD_MAP", entity_type_id, item_id or 0, " ".join(parts), flush=True)
+
+
 def sync_trip(req, db, settings=None) -> dict:
     settings = settings or get_integration_settings(db)
     if not settings or not settings.is_active or not settings.webhook_url:
@@ -1366,8 +1550,12 @@ def sync_trip(req, db, settings=None) -> dict:
         print("BITRIX_SYNC_ERROR", "fields", entity_id, req.id, flush=True)
         return {"error": schema["_error"], "action": "fields"}
     resolved_map = resolve_field_map(schema)
+    _log_important_field_map(schema, resolved_map, entity_id, req.bitrix_element_id)
     values = _trip_values(req, db=db)
     fields = {code: values[logical] for logical, code in resolved_map.items() if logical in values}
+    planned_code = resolved_map.get("planned_at")
+    if planned_code and planned_code in schema:
+        fields[planned_code] = _planned_at_outbound_value(req, settings.webhook_url)
     fields = _prepare_outbound_reference_fields(fields, values, resolved_map, schema, settings.webhook_url)
     # Системное поле «Клиент» нужно только для заявок, где действительно выбран заказчик.
     # Не делаем лишние административные REST-вызовы для рейсов без клиента.
@@ -1379,8 +1567,23 @@ def sync_trip(req, db, settings=None) -> dict:
             resolved_map = resolve_field_map(schema)
             values = _trip_values(req, db=db)
             fields = {code: values[logical] for logical, code in resolved_map.items() if logical in values}
+            planned_code = resolved_map.get("planned_at")
+            if planned_code and planned_code in schema:
+                fields[planned_code] = _planned_at_outbound_value(req, settings.webhook_url)
             fields = _prepare_outbound_reference_fields(fields, values, resolved_map, schema, settings.webhook_url)
     company_id, contact_id = _ensure_bitrix_customer(req.customer, settings.webhook_url) if req.customer else (None, None)
+    # Поддерживаем как штатный «Клиент/Компания» (companyId), так и отдельное
+    # пользовательское поле «Компания».
+    customer_code = resolved_map.get("customer_name")
+    if company_id and customer_code and customer_code in schema:
+        customer_info = schema.get(customer_code, {})
+        customer_type = _field_type(customer_info)
+        if "company" in customer_type:
+            fields[customer_code] = int(company_id)
+        elif customer_type in {"crm", "crm_entity"}:
+            entity_ids = _extract_dynamic_entity_ids(customer_info)
+            if not entity_ids or 4 in entity_ids:
+                fields[customer_code] = f"CO_{int(company_id)}"
     if company_id and "companyId" in schema:
         fields["companyId"] = company_id
     if contact_id and "contactIds" in schema:
@@ -1609,6 +1812,8 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         return {"error": item["_error"]}
     schema = get_element_fields(settings.webhook_url, str(entity_type_id))
     mapping = resolve_field_map(schema) if "_error" not in schema else FIELD_MAP
+    if "_error" not in schema:
+        _log_important_field_map(schema, mapping, entity_type_id, item_id)
 
     number = str(_read_logical(item, "number", mapping) or item.get("title") or f"Б24-{item_id}").strip()
     trip = db.query(models.TripRequest).filter(
@@ -1649,18 +1854,15 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         )
         db.add(trip)
 
-    raw_planned_at = _read_display_logical(item, "planned_at", mapping, schema, settings.webhook_url)
-    if raw_planned_at:
-        raw_text = str(_scalar(raw_planned_at) or "").strip()
-        try:
-            parsed = datetime.fromisoformat(raw_text.replace("Z", "+00:00"))
-            trip.planned_date = parsed.date()
-            trip.planned_time = parsed.strftime("%H:%M")
-        except ValueError:
-            try:
-                trip.planned_date = date.fromisoformat(raw_text[:10])
-            except ValueError:
-                pass
+    # Берём именно фактическое поле «Подача машины/Дата и время», а не
+    # системную «Дату создания», и сохраняем дату/время в часовом поясе портала.
+    planned_code = _field_code(mapping, "planned_at")
+    raw_planned_at = item.get(planned_code) if planned_code and planned_code in item else None
+    planned_date, planned_time = _parse_bitrix_planned_at(settings.webhook_url, raw_planned_at)
+    if planned_date is not None:
+        trip.planned_date = planned_date
+    if planned_time is not None:
+        trip.planned_time = planned_time
     trip.number = number
     for logical, attr, limit in (
         ("load_address", "load_address", None),
@@ -1756,7 +1958,7 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     trip.bitrix_element_id = int(item_id)
     trip.bitrix_entity_type_id = int(entity_type_id)
 
-    driver_text = str(_read_display_logical(item, "driver_name", mapping, schema, settings.webhook_url) or "").strip()
+    driver_text = _driver_display_value(settings.webhook_url, item, mapping, schema)
     driver = _find_driver_by_surname(db, driver_text)
     if driver:
         trip.driver_id = driver.id
@@ -1791,15 +1993,10 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     custom_company_ref_id = None
     customer_field_code = _field_code(mapping, "customer_name")
     if customer_field_code and customer_field_code in item:
-        customer_refs = item.get(customer_field_code)
-        if not isinstance(customer_refs, list):
-            customer_refs = [customer_refs]
-        for customer_ref in customer_refs:
-            ref_entity_type, ref_item_id = _crm_binding_parts(customer_ref)
-            if ref_entity_type == 4 and ref_item_id:
-                custom_company_ref_id = ref_item_id
-                customer_bitrix_id = ref_item_id
-                break
+        customer_info = schema.get(customer_field_code, {}) if isinstance(schema, dict) else {}
+        custom_company_ref_id = _company_id_from_field(item.get(customer_field_code), customer_info)
+        if custom_company_ref_id:
+            customer_bitrix_id = custom_company_ref_id
     client_field_present = any(key in item for key in ("companyId", "contactId", "contactIds"))
     built_in_company_id = _optional_nonnegative_int(item.get("companyId"), "companyId") if item.get("companyId") not in (None, "", 0, "0") else None
     raw_contact_ids = item.get("contactIds") or ([] if item.get("contactId") in (None, "", 0, "0") else [item.get("contactId")])
@@ -1901,13 +2098,11 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
             trip.cargo_type_id = cargo.id
     tariff_name = str(_read_display_logical(item, "tariff_name", mapping, schema, settings.webhook_url) or "").strip()
     if tariff_name:
-        tariff = _find_by_name(db, models.Tariff, models.Tariff.title, tariff_name)
-        if not tariff:
-            normalized_tariff = _normalize(tariff_name)
-            matches = [row for row in db.query(models.Tariff).filter(models.Tariff.kind == kind).all() if _normalize(row.title) == normalized_tariff]
-            tariff = matches[0] if len(matches) == 1 else None
-        if tariff and tariff.kind == kind:
+        tariff = _find_tariff_by_bitrix_value(db, kind, tariff_name)
+        if tariff:
             trip.tariff_id = tariff.id
+        else:
+            print("BITRIX_INBOUND_TARIFF_NOT_MATCHED", entity_type_id, item_id, _normalize(tariff_name), flush=True)
 
     # Показания спидометра/топливо живут в отчёте дня водителя, но могут
     # редактироваться из Bitrix. Обновляем отчёт только если известны водитель,
