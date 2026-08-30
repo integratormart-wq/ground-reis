@@ -6,7 +6,7 @@ from fastapi import FastAPI, Depends, HTTPException, status, Form, Request, Quer
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 from urllib.parse import urlsplit
 from sqlalchemy import func, text
@@ -535,12 +535,13 @@ def driver_panel(request: Request, current_user: models.User = Depends(get_curre
         raise HTTPException(403)
     menu = menu_for(current_user.role)
     today = date.today()
-    rows = db.query(models.TripRequest).filter(models.TripRequest.driver_id == current_user.id, models.TripRequest.planned_date == today).all()
-    new_reqs = db.query(models.TripRequest).filter(
+    driver_trip_query = db.query(models.TripRequest).options(joinedload(models.TripRequest.customer))
+    rows = driver_trip_query.filter(models.TripRequest.driver_id == current_user.id, models.TripRequest.planned_date == today).all()
+    new_reqs = driver_trip_query.filter(
         models.TripRequest.driver_id == current_user.id,
         models.TripRequest.status.in_([RequestStatus.NEW, RequestStatus.ASSIGNED, RequestStatus.ACCEPTED]),
     ).all()
-    work_reqs = db.query(models.TripRequest).filter(models.TripRequest.driver_id == current_user.id, models.TripRequest.status == RequestStatus.IN_WORK).all()
+    work_reqs = driver_trip_query.filter(models.TripRequest.driver_id == current_user.id, models.TripRequest.status == RequestStatus.IN_WORK).all()
     stats = {"today": len(rows), "pukhtovoz": sum(1 for x in rows if x.kind == TripType.PUKHTOVOZ), "samosval": sum(1 for x in rows if x.kind == TripType.SAMOSVAL), "sum_today": sum(x.sum_driver or 0 for x in rows)}
     return render_template("driver.html", {"request": request, "user": current_user, "menu": menu, "stats": stats, "rows": rows, "new_reqs": new_reqs, "work_reqs": work_reqs, "app_name": "ГРАУНД | Рейсы"})
 
@@ -586,8 +587,11 @@ def dashboard(request: Request, current_user: models.User = Depends(get_current_
 @app.get("/requests", response_class=HTMLResponse)
 def requests_list(request: Request, status_f: Optional[str] = None, kind: Optional[str] = None, q: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     if current_user.role in {UserRole.ADMIN, UserRole.LOGIST}:
-        _maybe_reconcile_bitrix(db)
-    rs = db.query(models.TripRequest)
+        _schedule_bitrix_reconcile()
+    rs = db.query(models.TripRequest).options(
+        joinedload(models.TripRequest.customer),
+        joinedload(models.TripRequest.driver),
+    )
     if current_user.role == UserRole.DRIVER:
         rs = rs.filter(models.TripRequest.driver_id == current_user.id)
     if status_f:
@@ -611,8 +615,12 @@ def requests_list(request: Request, status_f: Optional[str] = None, kind: Option
 def pukhtovoz_list(request: Request, status_f: Optional[str] = None, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, q: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
     if current_user.role in {UserRole.ADMIN, UserRole.LOGIST}:
-        _maybe_reconcile_bitrix(db)
-    rs = db.query(models.TripRequest).filter(models.TripRequest.kind == TripType.PUKHTOVOZ)
+        _schedule_bitrix_reconcile()
+    rs = db.query(models.TripRequest).options(
+        joinedload(models.TripRequest.customer),
+        joinedload(models.TripRequest.driver),
+        joinedload(models.TripRequest.vehicle),
+    ).filter(models.TripRequest.kind == TripType.PUKHTOVOZ)
     if current_user.role == UserRole.DRIVER:
         rs = rs.filter(models.TripRequest.driver_id == current_user.id)
     elif driver_id:
@@ -636,8 +644,12 @@ def pukhtovoz_list(request: Request, status_f: Optional[str] = None, driver_id: 
 def samosval_list(request: Request, status_f: Optional[str] = None, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, q: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
     if current_user.role in {UserRole.ADMIN, UserRole.LOGIST}:
-        _maybe_reconcile_bitrix(db)
-    rs = db.query(models.TripRequest).filter(models.TripRequest.kind == TripType.SAMOSVAL)
+        _schedule_bitrix_reconcile()
+    rs = db.query(models.TripRequest).options(
+        joinedload(models.TripRequest.customer),
+        joinedload(models.TripRequest.driver),
+        joinedload(models.TripRequest.vehicle),
+    ).filter(models.TripRequest.kind == TripType.SAMOSVAL)
     if current_user.role == UserRole.DRIVER:
         rs = rs.filter(models.TripRequest.driver_id == current_user.id)
     elif driver_id:
@@ -1050,6 +1062,33 @@ def _maybe_reconcile_bitrix(db, force=False):
         return {"error": "bitrix_sync_error"}
     finally:
         BITRIX_RECONCILE_LOCK.release()
+
+
+def _schedule_bitrix_reconcile():
+    """Запускает страховочную сверку Bitrix в фоне, не задерживая открытие страницы.
+
+    Основной канал остаётся webhook. Фоновая сверка нужна только как резерв на случай
+    пропущенного события и никогда не выполняется внутри пользовательского GET-запроса.
+    """
+    now = datetime.now()
+    if BITRIX_LAST_RECONCILE_AT and (now - BITRIX_LAST_RECONCILE_AT).total_seconds() < 120:
+        return {"skipped": True, "reason": "throttled"}
+    if BITRIX_RECONCILE_LOCK.locked():
+        return {"skipped": True, "reason": "already_running"}
+
+    def worker():
+        try:
+            with SessionLocal() as bg_db:
+                _maybe_reconcile_bitrix(bg_db, force=True)
+        except Exception as exc:
+            print("BITRIX_RECONCILE_BACKGROUND_EXCEPTION", type(exc).__name__, flush=True)
+
+    threading.Thread(
+        target=worker,
+        name="bitrix-reconcile",
+        daemon=True,
+    ).start()
+    return {"started": True}
 
 
 def _sync_linked_reference_trips(section, row, db):
