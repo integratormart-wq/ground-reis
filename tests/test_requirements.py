@@ -1759,3 +1759,164 @@ def test_bitrix_company_inn_is_read_from_requisite_and_combined_datetime(monkeyp
     assert trip.customer is not None and trip.customer.name == "ООО Битрикс Клиент"
     assert trip.customer.inn == "6671234567"
     db.close()
+
+
+def test_bitrix_inbound_resolves_driver_vehicle_polygon_tariff_and_clean_address(monkeypatch):
+    db, admin, driver, vt = reset_db()
+    driver.full_name = "Иванов Иван"
+    vehicle = models.Vehicle(name="КамАЗ 65115", plate="А123АА196", type_id=vt.id)
+    polygon = models.Polygon(name="Широкореченский")
+    tariff = models.Tariff(
+        title="Основной тариф", vehicle_type_id=vt.id, kind=models.TripType.PUKHTOVOZ,
+        trip_price=5000, formula="trip", is_active=True,
+    )
+    settings = models.IntegrationSetting(provider="bitrix24", webhook_url="https://example/rest/1/token/", is_active=True)
+    db.add_all([vehicle, polygon, tariff, settings]); db.commit()
+
+    trip_schema = {
+        "title": {"title": "Название", "type": "string"},
+        "ufWhen": {"title": "Дата и время", "type": "datetime"},
+        "ufAddr": {"title": "Адрес подачи", "type": "address"},
+        "ufDriverReal": {"title": "Водитель", "type": "user"},
+        "ufVehicleReal": {"title": "Машины", "type": "crm", "settings": {"DYNAMIC_1048": "Y"}},
+        "ufPolygonReal": {"title": "Полигон", "type": "enumeration", "items": [{"ID": "10", "VALUE": "Широкореченский"}]},
+        "ufTariffReal": {"title": "Тариф", "type": "enumeration", "items": [{"ID": "20", "VALUE": "Основной тариф"}]},
+        "ufTripsReal": {"title": "Количество рейсов", "type": "integer"},
+        "ufKmReal": {"title": "Километраж", "type": "double"},
+        "ufVolumeReal": {"title": "Объём", "type": "double"},
+        "ufTonnageReal": {"title": "Тоннаж", "type": "double"},
+        "ufCommentReal": {"title": "Комментарий логиста", "type": "string"},
+    }
+    vehicle_schema = {
+        "title": {"title": "Название", "type": "string"},
+        "ufPlate": {"title": "Госномер", "type": "string"},
+    }
+
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_kinds", lambda url: {"1088": models.TripType.PUKHTOVOZ})
+    monkeypatch.setattr(app_module.bitrix, "status_from_stage", lambda *args: None)
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: vehicle_schema if int(entity) == 1048 else trip_schema)
+
+    def fake_fetch(url, entity, item_id):
+        if int(entity) == 1048:
+            return {"id": 55, "title": "Машина 55", "ufPlate": "А123АА196"}
+        return {
+            "id": 901, "title": "РЕЙС-901",
+            "ufWhen": "2026-08-31T07:45:00+05:00",
+            "ufAddr": {"id": "987654", "address": "г Первоуральск, ул Комсомольская, д 5А"},
+            "ufDriverReal": "77",
+            "ufVehicleReal": "T418_55",
+            "ufPolygonReal": "10",
+            "ufTariffReal": "20",
+            "ufTripsReal": 4,
+            "ufKmReal": 32.5,
+            "ufVolumeReal": 18,
+            "ufTonnageReal": 12.7,
+            "ufCommentReal": "Заехать через вторые ворота",
+        }
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", fake_fetch)
+
+    def fake_post(url, method, payload):
+        if method == "user.get":
+            return {"result": [{"ID": "77", "LAST_NAME": "Иванов", "NAME": "Иван"}]}
+        return {"result": {}}
+    monkeypatch.setattr(app_module.bitrix, "_http_post", fake_post)
+
+    result = app_module.bitrix.sync_from_bitrix(901, 1088, db, settings=settings)
+    db.commit()
+    trip = db.query(models.TripRequest).filter_by(bitrix_element_id=901, bitrix_entity_type_id=1088).one()
+    assert result["ok"] is True
+    assert trip.planned_date == date(2026, 8, 31) and trip.planned_time == "07:45"
+    assert trip.load_address == "г Первоуральск, ул Комсомольская, д 5А"
+    assert trip.driver_id == driver.id
+    assert trip.vehicle_id == vehicle.id
+    assert trip.polygon_id == polygon.id
+    assert trip.tariff_id == tariff.id
+    assert trip.trips_count == 4
+    assert trip.km == 32.5 and trip.volume == 18 and trip.tonnage == 12.7
+    assert trip.logist_comment == "Заехать через вторые ворота"
+    db.close()
+
+
+def test_driver_day_report_price_and_fuel_cost_are_sent_to_bitrix(monkeypatch):
+    db, admin, driver, vt = reset_db()
+    vehicle = models.Vehicle(name="КамАЗ", plate="В555ВВ196", type_id=vt.id)
+    trip = models.TripRequest(
+        number="РЕЙС-ТОПЛИВО", planned_date=date(2026, 8, 31), driver=driver, vehicle=vehicle,
+        kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.NEW,
+        bitrix_element_id=123, bitrix_entity_type_id=1088, polygon_cost_manual=2400, sum_driver=3500,
+    )
+    settings = models.IntegrationSetting(provider="bitrix24", webhook_url="https://example/rest/1/token/", secret="s", is_active=True)
+    db.add_all([vehicle, trip, settings]); db.commit()
+
+    schema = {
+        "title": {"title": "Название", "type": "string"},
+        "ufOdo": {"title": "Показания спидометра", "type": "double"},
+        "ufFuel": {"title": "Залито топлива", "type": "double"},
+        "ufFuelPrice": {"title": "Цена за литр топлива", "type": "double"},
+        "ufFuelCost": {"title": "Затраты на топливо", "type": "double"},
+        "ufPolygonCost": {"title": "Затраты на полигон", "type": "double"},
+        "ufSalary": {"title": "Зарплата водителя", "type": "double"},
+    }
+    writes = []
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_entity", lambda url, kind: "1088")
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: schema)
+    def fake_post(url, method, payload):
+        if method == "crm.item.update":
+            writes.append(payload)
+            return {"result": {"item": {"id": 123}}}
+        return {"result": {}}
+    monkeypatch.setattr(app_module.bitrix, "_http_post", fake_post)
+
+    response = client_as(driver).post("/driver/day-report", data={
+        "report_date": "2026-08-31", "vehicle_id": str(vehicle.id), "total_km": "120",
+        "odometer": "456789", "fuel_liters": "80", "fuel_price": "63.50", "comment": "Смена закрыта",
+    }, follow_redirects=False)
+    assert response.status_code == 302
+    report = db.query(models.DriverDayReport).filter_by(driver_id=driver.id, report_date=date(2026, 8, 31)).one()
+    assert report.fuel_price == 63.5
+    assert report.fuel_cost == 5080
+    assert writes
+    fields = writes[-1]["fields"]
+    assert fields["ufOdo"] == 456789
+    assert fields["ufFuel"] == 80
+    assert fields["ufFuelPrice"] == 63.5
+    assert fields["ufFuelCost"] == 5080
+    assert fields["ufPolygonCost"] == 2400
+    assert fields["ufSalary"] == 3500
+    db.close()
+
+
+def test_bitrix_can_update_driver_day_report_fuel_fields(monkeypatch):
+    db, admin, driver, vt = reset_db()
+    driver.full_name = "Петров Пётр"
+    vehicle = models.Vehicle(name="Самосвал", plate="С777СС196", type_id=vt.id)
+    settings = models.IntegrationSetting(provider="bitrix24", webhook_url="https://example/rest/1/token/", is_active=True)
+    db.add_all([vehicle, settings]); db.commit()
+    schema = {
+        "title": {"title": "Название"},
+        "ufWhen": {"title": "Дата и время", "type": "datetime"},
+        "ufDriver": {"title": "Водитель", "type": "string"},
+        "ufVehicle": {"title": "Машины", "type": "string"},
+        "ufOdo": {"title": "Показания спидометра", "type": "double"},
+        "ufFuel": {"title": "Залито топлива", "type": "double"},
+        "ufFuelPrice": {"title": "Цена за литр топлива", "type": "double"},
+    }
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_kinds", lambda url: {"1088": models.TripType.PUKHTOVOZ})
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: schema)
+    monkeypatch.setattr(app_module.bitrix, "status_from_stage", lambda *args: None)
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda *args: {
+        "id": 333, "title": "РЕЙС-333", "ufWhen": "2026-08-31T09:10:00",
+        "ufDriver": "Петров", "ufVehicle": "С777СС196", "ufOdo": 100500,
+        "ufFuel": 50, "ufFuelPrice": 64.2,
+    })
+    result = app_module.bitrix.sync_from_bitrix(333, 1088, db, settings=settings)
+    db.commit()
+    trip = db.query(models.TripRequest).filter_by(bitrix_element_id=333).one()
+    report = db.query(models.DriverDayReport).filter_by(driver_id=driver.id, report_date=date(2026, 8, 31)).one()
+    assert result["ok"] is True
+    assert trip.driver_id == driver.id and trip.vehicle_id == vehicle.id
+    assert report.odometer == 100500
+    assert report.fuel_liters == 50
+    assert report.fuel_price == 64.2
+    assert round(report.fuel_cost, 2) == 3210.0
+    db.close()
