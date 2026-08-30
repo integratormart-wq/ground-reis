@@ -65,6 +65,11 @@ FIELD_MAP = {
     "attachments": "ufTripFiles",
     "sum_trip": "ufSumTrip",
     "sum_driver": "ufSumDriver",
+    "polygon_cost": "ufPolygonCost",
+    "odometer": "ufOdometer",
+    "fuel_liters": "ufFuelLiters",
+    "fuel_price": "ufFuelPrice",
+    "fuel_cost": "ufFuelCost",
     "started_at": "ufStartedAt",
     "finished_at": "ufFinishedAt",
     "waste_bin_count": "ufWasteBinCount",
@@ -82,8 +87,8 @@ FIELD_MAP = {
 
 FIELD_TITLES = {
     "planned_at": ("дата и время", "дата рейса", "плановая дата и время", "дата/время рейса", "подача машины", "дата"),
-    "driver_name": ("водитель", "фио водителя"),
-    "vehicle_name": ("автомобиль", "машина", "транспорт"),
+    "driver_name": ("водитель", "фио водителя", "водители"),
+    "vehicle_name": ("автомобиль", "машина", "машины", "транспорт", "госномер", "государственный номер"),
     "load_address": ("адрес загрузки", "адрес подачи", "загрузка"),
     "unload_address": ("адрес выгрузки", "выгрузка"),
     "route_name": ("маршрут",),
@@ -92,7 +97,7 @@ FIELD_TITLES = {
     "tariff_name": ("тариф",),
     "km": ("километраж план", "плановый километраж", "километраж", "км план"),
     "volume": ("объем план", "плановый объем", "объем", "кубатура"),
-    "tonnage": ("тоннаж план", "плановый тоннаж", "тонны план"),
+    "tonnage": ("тоннаж план", "плановый тоннаж", "тонны план", "тоннаж"),
     "actual_km": ("фактический километраж", "факт км", "км факт"),
     "actual_volume": ("фактический объем", "факт объем", "объем факт"),
     "actual_tonnage": ("фактический тоннаж", "тоннаж факт", "тонны факт"),
@@ -111,6 +116,11 @@ FIELD_TITLES = {
     "attachments": ("файлы рейса", "фото и файлы", "файлы водителя", "вложения рейса", "файлы"),
     "sum_trip": ("сумма рейса", "стоимость рейса"),
     "sum_driver": ("сумма водителю", "зарплата водителя", "начисление водителю"),
+    "polygon_cost": ("затраты на полигон", "стоимость полигона", "расходы на полигон"),
+    "odometer": ("показания спидометра", "спидометр", "одометр"),
+    "fuel_liters": ("залито топлива", "топливо литры", "топливо, л", "литры топлива"),
+    "fuel_price": ("цена за литр топлива", "цена топлива за литр", "стоимость литра топлива", "цена за литр"),
+    "fuel_cost": ("затраты на топливо", "расходы на топливо", "стоимость топлива"),
     "started_at": ("начало рейса", "время начала рейса"),
     "finished_at": ("завершение рейса", "время завершения рейса"),
     "waste_bin_count": ("количество контейнеров", "контейнеры", "кб"),
@@ -343,12 +353,39 @@ def _planned_at_value(req):
     except ValueError:
         return f"{req.planned_date.isoformat()}T{raw_time}"
 
-def _trip_values(req) -> dict:
+def _polygon_cost_value(req):
+    if getattr(req, "polygon_cost_manual", None) is not None:
+        return float(req.polygon_cost_manual or 0)
+    rate = getattr(req, "polygon_rate_snapshot", None)
+    if rate is None:
+        return ""
+    unit = str(getattr(req, "polygon_unit_snapshot", "") or "").lower()
+    if "т" in unit:
+        quantity = req.actual_tonnage if req.actual_tonnage is not None else (req.tonnage or 0)
+    else:
+        quantity = req.actual_volume if req.actual_volume is not None else (req.volume or 0)
+    return float(rate or 0) * float(quantity or 0)
+
+
+def _day_report_for_trip(req, db=None):
+    if db is None or not getattr(req, "driver_id", None) or not getattr(req, "planned_date", None):
+        return None
+    return db.query(models.DriverDayReport).filter(
+        models.DriverDayReport.driver_id == req.driver_id,
+        models.DriverDayReport.report_date == req.planned_date,
+    ).first()
+
+
+def _trip_values(req, db=None) -> dict:
+    day_report = _day_report_for_trip(req, db)
+    fuel_liters = float(day_report.fuel_liters or 0) if day_report else ""
+    fuel_price = float(day_report.fuel_price or 0) if day_report else ""
     return {
         "number": req.number or "",
         "planned_at": _planned_at_value(req),
         "driver_name": req.driver.full_name if req.driver else "",
-        "vehicle_name": (f"{req.vehicle.name} {req.vehicle.plate}" if req.vehicle else ""),
+        # В Bitrix поле называется «Машины», а в приложении оно соответствует госномеру.
+        "vehicle_name": (req.vehicle.plate if req.vehicle else ""),
         "load_address": req.load_address or "",
         "unload_address": req.unload_address or "",
         "route_name": req.route_name or "",
@@ -374,7 +411,12 @@ def _trip_values(req) -> dict:
         "polygon_phone": req.polygon.phone if req.polygon else "",
         "polygon_navigator_url": req.polygon.navigator_url if req.polygon else "",
         "sum_trip": req.sum_trip if req.sum_trip is not None else "",
-        "sum_driver": req.sum_driver or 0,
+        "sum_driver": req.sum_driver if req.sum_driver is not None else "",
+        "polygon_cost": _polygon_cost_value(req),
+        "odometer": float(day_report.odometer or 0) if day_report else "",
+        "fuel_liters": fuel_liters,
+        "fuel_price": fuel_price,
+        "fuel_cost": (fuel_liters * fuel_price) if day_report else "",
         "started_at": _as_bitrix_value(req.started_at),
         "finished_at": _as_bitrix_value(req.finished_at),
         "waste_bin_count": req.waste_bin_count if req.waste_bin_count is not None else "",
@@ -391,9 +433,9 @@ def _trip_values(req) -> dict:
     }
 
 
-def build_fields(req, field_map=None) -> dict:
+def build_fields(req, field_map=None, db=None) -> dict:
     mapping = field_map or FIELD_MAP
-    values = _trip_values(req)
+    values = _trip_values(req, db=db)
     return {code: values[logical] for logical, code in mapping.items() if logical in values}
 
 
@@ -408,6 +450,439 @@ def _field_type(info: dict) -> str:
         or ""
     ).lower()
 
+
+
+
+def _field_code(mapping: dict, logical: str):
+    return mapping.get(logical) or FIELD_MAP.get(logical)
+
+
+def _field_info(schema: dict, mapping: dict, logical: str) -> dict:
+    code = _field_code(mapping, logical)
+    return schema.get(code, {}) if code and isinstance(schema, dict) else {}
+
+
+def _field_options(info: dict) -> list:
+    """Возвращает варианты list/enumeration поля из разных форматов crm.item.fields."""
+    if not isinstance(info, dict):
+        return []
+    data = info.get("data") if isinstance(info.get("data"), dict) else {}
+    for candidate in (info.get("items"), info.get("values"), info.get("enum"), data.get("items"), data.get("values"), data.get("enum")):
+        if isinstance(candidate, list):
+            return candidate
+        if isinstance(candidate, dict):
+            return list(candidate.values())
+    return []
+
+
+def _option_label(row) -> str:
+    if isinstance(row, dict):
+        for key in ("value", "VALUE", "name", "NAME", "title", "TITLE", "label", "LABEL"):
+            if row.get(key) not in (None, ""):
+                return str(row.get(key)).strip()
+    return str(row or "").strip()
+
+
+def _option_id(row):
+    if isinstance(row, dict):
+        for key in ("id", "ID", "valueId", "VALUE_ID", "xmlId", "XML_ID"):
+            if row.get(key) not in (None, ""):
+                return str(row.get(key)).strip()
+    return None
+
+
+def _enum_display_value(raw, info: dict):
+    options = _field_options(info)
+    if not options:
+        return None
+    raw_values = raw if isinstance(raw, list) else [raw]
+    labels = []
+    for value in raw_values:
+        scalar = _scalar(value)
+        value_text = str(scalar or "").strip()
+        matched = next((row for row in options if _option_id(row) == value_text), None)
+        if matched is None:
+            matched = next((row for row in options if _normalize(_option_label(row)) == _normalize(value_text)), None)
+        if matched is not None:
+            label = _option_label(matched)
+            if label:
+                labels.append(label)
+    return ", ".join(labels) if labels else None
+
+
+def _user_display_name(webhook_base: str, raw):
+    user_id = _scalar(raw)
+    try:
+        user_id = int(str(user_id).strip())
+    except (TypeError, ValueError):
+        return str(_scalar(raw) or "").strip()
+    response = _http_post(webhook_base, "user.get", {"ID": user_id})
+    rows = response.get("result", []) if isinstance(response, dict) and "error" not in response else []
+    if isinstance(rows, dict):
+        rows = rows.get("items") or [rows]
+    if not rows:
+        return str(user_id)
+    row = rows[0] or {}
+    parts = [
+        str(row.get("LAST_NAME") or row.get("lastName") or "").strip(),
+        str(row.get("NAME") or row.get("name") or "").strip(),
+        str(row.get("SECOND_NAME") or row.get("secondName") or "").strip(),
+    ]
+    return " ".join(part for part in parts if part).strip() or str(user_id)
+
+
+def _crm_binding_parts(value):
+    text = str(_scalar(value) or "").strip()
+    match = re.fullmatch(r"([A-Za-z0-9]+)_(\d+)", text)
+    if not match:
+        return None, None
+    prefix, item_id = match.groups()
+    prefix_upper = prefix.upper()
+    known = {"L": 1, "D": 2, "C": 3, "CO": 4, "SI": 31}
+    if prefix_upper in known:
+        return known[prefix_upper], int(item_id)
+    if prefix_upper.startswith("T"):
+        try:
+            return int(prefix_upper[1:], 16), int(item_id)
+        except ValueError:
+            return None, None
+    return None, None
+
+
+def _linked_item_preferred_label(webhook_base: str, entity_type_id: int, item: dict) -> str:
+    if entity_type_id == 3:
+        return _contact_display_name(item)
+    title = str(item.get("title") or item.get("TITLE") or "").strip()
+    # Для связанного смарт-процесса «Машины» госномер часто хранится не в title,
+    # а в отдельном поле. Ищем его по названию, чтобы в приложение не попадал ID связи.
+    schema = get_element_fields(webhook_base, str(entity_type_id))
+    if "_error" not in schema:
+        plate_aliases = tuple(_normalize(x) for x in (
+            "госномер", "государственный номер", "номер автомобиля", "регистрационный номер", "номер машины",
+        ))
+        for code, info in schema.items():
+            label = _normalize(_field_label(info, code))
+            if label in plate_aliases or any(alias and alias in label for alias in plate_aliases):
+                value = item.get(code)
+                enum_value = _enum_display_value(value, info)
+                text = str(enum_value if enum_value is not None else _scalar(value) or "").strip()
+                if text:
+                    return text
+    return title
+
+
+def _crm_binding_display(webhook_base: str, raw):
+    raw_values = raw if isinstance(raw, list) else [raw]
+    labels = []
+    for value in raw_values:
+        entity_type_id, item_id = _crm_binding_parts(value)
+        if not entity_type_id or not item_id:
+            continue
+        linked = fetch_item(webhook_base, entity_type_id, item_id)
+        if "_error" in linked:
+            continue
+        label = _linked_item_preferred_label(webhook_base, entity_type_id, linked)
+        if label:
+            labels.append(label)
+    return ", ".join(labels) if labels else None
+
+
+def _display_field_value(webhook_base: str, raw, info: dict):
+    field_type = _field_type(info)
+    enum_value = _enum_display_value(raw, info)
+    if enum_value is not None:
+        return enum_value
+    if field_type in {"user", "employee"}:
+        return _user_display_name(webhook_base, raw)
+    raw_values = raw if isinstance(raw, list) else [raw]
+    looks_like_crm_binding = any(_crm_binding_parts(value)[0] for value in raw_values)
+    if field_type in {"crm", "crm_entity"} or looks_like_crm_binding:
+        linked = _crm_binding_display(webhook_base, raw)
+        if linked:
+            return linked
+    if isinstance(raw, dict):
+        for key in ("address", "ADDRESS", "text", "TEXT", "name", "NAME", "title", "TITLE", "value", "VALUE"):
+            if raw.get(key) not in (None, ""):
+                return str(raw.get(key)).strip()
+    if isinstance(raw, list):
+        values = [str(_scalar(v) or "").strip() for v in raw]
+        return ", ".join(v for v in values if v)
+    text = str(raw or "").strip()
+    # Некоторые CRM-поля возвращают «ID_123|читаемое значение» или наоборот.
+    if "|" in text:
+        parts = [part.strip() for part in text.split("|") if part.strip()]
+        readable = [part for part in parts if re.search(r"[A-Za-zА-Яа-яЁё]", part) and not re.fullmatch(r"(?:ID\s*[:=]?\s*)?\d+", part, re.I)]
+        if readable:
+            return max(readable, key=len)
+    return text
+
+
+def _read_display_logical(item: dict, logical: str, mapping: dict, schema: dict, webhook_base: str):
+    code = _field_code(mapping, logical)
+    if code and code in item:
+        return _display_field_value(webhook_base, item.get(code), schema.get(code, {}) if isinstance(schema, dict) else {})
+    fallback = FIELD_MAP.get(logical)
+    if fallback and fallback in item:
+        return _display_field_value(webhook_base, item.get(fallback), schema.get(fallback, {}) if isinstance(schema, dict) else {})
+    return ""
+
+
+def _clean_address_value(webhook_base: str, item: dict, logical: str, mapping: dict, schema: dict) -> str:
+    value = _read_display_logical(item, logical, mapping, schema, webhook_base)
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    # JSON-строка от адресного поля: берём только читаемый адрес.
+    if text.startswith("{") or text.startswith("["):
+        try:
+            parsed = json.loads(text)
+            displayed = _display_field_value(webhook_base, parsed, _field_info(schema, mapping, logical))
+            if displayed:
+                text = str(displayed).strip()
+        except (ValueError, TypeError):
+            pass
+    # Не сохраняем служебный числовой ID, если Bitrix склеил его с адресом через |.
+    if "|" in text:
+        parts = [part.strip() for part in text.split("|") if part.strip()]
+        readable = [part for part in parts if re.search(r"[A-Za-zА-Яа-яЁё]", part)]
+        if readable:
+            text = max(readable, key=len)
+    return text
+
+
+def _find_driver_by_surname(db, display_name: str):
+    text = str(display_name or "").strip()
+    if not text:
+        return None
+    drivers = db.query(models.User).filter(models.User.role == models.UserRole.DRIVER).all()
+    normalized = _normalize(text)
+    exact = [d for d in drivers if _normalize(d.full_name) == normalized]
+    if len(exact) == 1:
+        return exact[0]
+    tokens = [token for token in normalized.split() if len(token) > 1]
+    if not tokens:
+        return None
+    # В локальной учётке ФИО может быть записано как «Фамилия Имя» или «Имя Фамилия».
+    # Назначаем автоматически только при единственном совпадении фамилии/крайнего токена.
+    candidates = []
+    for driver in drivers:
+        local_tokens = _normalize(driver.full_name).split()
+        if not local_tokens:
+            continue
+        edge_tokens = {local_tokens[0], local_tokens[-1]}
+        if any(token in edge_tokens for token in tokens):
+            candidates.append(driver)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _normalize_plate(value: str) -> str:
+    return re.sub(r"[^A-Za-zА-Яа-я0-9]", "", str(value or "")).upper().replace("Ё", "Е")
+
+
+def _find_vehicle_by_bitrix_value(db, display_value: str):
+    text = str(display_value or "").strip()
+    if not text:
+        return None
+    normalized_plate = _normalize_plate(text)
+    vehicles = db.query(models.Vehicle).all()
+    exact_plate = [v for v in vehicles if _normalize_plate(v.plate) == normalized_plate]
+    if len(exact_plate) == 1:
+        return exact_plate[0]
+    embedded = [v for v in vehicles if _normalize_plate(v.plate) and _normalize_plate(v.plate) in normalized_plate]
+    if len(embedded) == 1:
+        return embedded[0]
+    exact_name = [v for v in vehicles if _normalize(v.name) == _normalize(text)]
+    if len(exact_name) == 1:
+        return exact_name[0]
+    return None
+
+
+
+def _enum_outbound_value(value, info: dict):
+    options = _field_options(info)
+    if not options:
+        return None
+    target = _normalize(value)
+    plate_target = _normalize_plate(value)
+    exact = []
+    contains = []
+    for row in options:
+        label = _option_label(row)
+        option_id = _option_id(row)
+        if not label or option_id is None:
+            continue
+        normalized_label = _normalize(label)
+        if normalized_label == target:
+            exact.append(option_id)
+        elif target and (target in normalized_label or normalized_label in target):
+            contains.append(option_id)
+        elif plate_target and plate_target in _normalize_plate(label):
+            contains.append(option_id)
+    if len(exact) == 1:
+        return exact[0]
+    if len(contains) == 1:
+        return contains[0]
+    return None
+
+
+def _bitrix_user_id_by_name(webhook_base: str, full_name: str):
+    text = str(full_name or "").strip()
+    if not text:
+        return None
+    tokens = _normalize(text).split()
+    surname = tokens[0] if tokens else ""
+    attempts = []
+    if surname:
+        attempts.append({"FILTER": {"LAST_NAME": surname}})
+    attempts.append({})
+    for params in attempts:
+        response = _http_post(webhook_base, "user.get", params)
+        if "error" in response:
+            continue
+        rows = response.get("result", [])
+        if isinstance(rows, dict):
+            rows = rows.get("items") or [rows]
+        matches = []
+        surname_matches = []
+        for row in rows or []:
+            display = " ".join(str(row.get(key) or "").strip() for key in ("LAST_NAME", "NAME", "SECOND_NAME") if str(row.get(key) or "").strip())
+            if _normalize(display) == _normalize(text):
+                matches.append(row)
+            elif surname and surname in {_normalize(row.get("LAST_NAME")), _normalize(row.get("NAME"))}:
+                surname_matches.append(row)
+        chosen = matches[0] if len(matches) == 1 else (surname_matches[0] if len(surname_matches) == 1 else None)
+        if chosen:
+            try:
+                return int(chosen.get("ID") or chosen.get("id"))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _extract_dynamic_entity_ids(value) -> list[int]:
+    found = []
+    def walk(node):
+        if isinstance(node, dict):
+            for key, child in node.items():
+                walk(key); walk(child)
+        elif isinstance(node, (list, tuple, set)):
+            for child in node:
+                walk(child)
+        else:
+            text = str(node or "")
+            for match in re.finditer(r"DYNAMIC[_:\s-]?(\d+)", text, re.I):
+                try:
+                    found.append(int(match.group(1)))
+                except ValueError:
+                    pass
+    walk(value)
+    result = []
+    for entity_id in found:
+        if entity_id not in result:
+            result.append(entity_id)
+    return result
+
+
+def _preferred_link_field_code(schema: dict, logical: str):
+    aliases_by_logical = {
+        "vehicle_name": ("госномер", "государственный номер", "номер автомобиля", "регистрационный номер", "номер машины"),
+        "polygon_name": ("название полигона", "полигон"),
+        "tariff_name": ("название тарифа", "тариф"),
+        "cargo_type_name": ("тип груза", "груз"),
+    }
+    aliases = tuple(_normalize(x) for x in aliases_by_logical.get(logical, ()))
+    for code, info in (schema or {}).items():
+        label = _normalize(_field_label(info, code))
+        if label in aliases or any(alias and alias in label for alias in aliases):
+            return code
+    return None
+
+
+def _find_dynamic_binding(webhook_base: str, entity_type_id: int, logical: str, desired: str):
+    target = str(desired or "").strip()
+    if not target:
+        return None
+    schema = get_element_fields(webhook_base, str(entity_type_id))
+    preferred_code = None if "_error" in schema else _preferred_link_field_code(schema, logical)
+    select = ["id", "title"] + ([preferred_code] if preferred_code else [])
+    # Сначала точный title — это дешёвый путь.
+    response = _http_post(webhook_base, "crm.item.list", {
+        "entityTypeId": int(entity_type_id), "filter": {"title": target}, "select": select, "start": 0,
+    })
+    items = _list_result_items(response) if "error" not in response else []
+    if not items:
+        response = _http_post(webhook_base, "crm.item.list", {
+            "entityTypeId": int(entity_type_id), "select": select, "start": 0,
+        })
+        items = _list_result_items(response) if "error" not in response else []
+    desired_norm = _normalize(target)
+    desired_plate = _normalize_plate(target)
+    matches = []
+    for row in items[:50]:
+        candidates = [str(row.get("title") or "").strip()]
+        if preferred_code:
+            info = schema.get(preferred_code, {})
+            candidates.append(str(_display_field_value(webhook_base, row.get(preferred_code), info) or "").strip())
+        if any(
+            _normalize(candidate) == desired_norm
+            or (desired_plate and desired_plate == _normalize_plate(candidate))
+            or (desired_plate and desired_plate in _normalize_plate(candidate))
+            for candidate in candidates if candidate
+        ):
+            try:
+                matches.append(int(row.get("id")))
+            except (TypeError, ValueError):
+                pass
+    if len(set(matches)) != 1:
+        return None
+    item_id = matches[0]
+    return f"T{int(entity_type_id):x}_{item_id}"
+
+
+def _prepare_outbound_reference_fields(fields: dict, values: dict, mapping: dict, schema: dict, webhook_base: str):
+    """Приводит человекочитаемые значения к ID для list/user/CRM-полей Bitrix.
+
+    Если привязку нельзя однозначно определить, поле пропускается вместо того,
+    чтобы из-за одного неверного ID откатить синхронизацию всей карточки рейса.
+    """
+    prepared = dict(fields)
+    for logical, code in mapping.items():
+        if code not in prepared or code not in schema:
+            continue
+        info = schema.get(code, {})
+        field_type = _field_type(info)
+        value = values.get(logical)
+        if value in (None, ""):
+            continue
+        if _field_options(info):
+            mapped = _enum_outbound_value(value, info)
+            if mapped is None:
+                prepared.pop(code, None)
+                print("BITRIX_SYNC_REFERENCE_SKIP", logical, "enumeration", flush=True)
+            else:
+                prepared[code] = mapped
+            continue
+        if field_type in {"user", "employee"}:
+            mapped = _bitrix_user_id_by_name(webhook_base, str(value))
+            if mapped is None:
+                prepared.pop(code, None)
+                print("BITRIX_SYNC_REFERENCE_SKIP", logical, "user", flush=True)
+            else:
+                prepared[code] = mapped
+            continue
+        if field_type in {"crm", "crm_entity"}:
+            entity_ids = _extract_dynamic_entity_ids(info)
+            mapped = None
+            for target_entity in entity_ids:
+                mapped = _find_dynamic_binding(webhook_base, target_entity, logical, str(value))
+                if mapped:
+                    break
+            if mapped is None:
+                prepared.pop(code, None)
+                print("BITRIX_SYNC_REFERENCE_SKIP", logical, "crm", flush=True)
+            else:
+                prepared[code] = mapped
+    return prepared
 
 def _attachment_field(schema: dict, mapping: dict):
     code = mapping.get("attachments")
@@ -891,7 +1366,9 @@ def sync_trip(req, db, settings=None) -> dict:
         print("BITRIX_SYNC_ERROR", "fields", entity_id, req.id, flush=True)
         return {"error": schema["_error"], "action": "fields"}
     resolved_map = resolve_field_map(schema)
-    fields = build_fields(req, resolved_map)
+    values = _trip_values(req, db=db)
+    fields = {code: values[logical] for logical, code in resolved_map.items() if logical in values}
+    fields = _prepare_outbound_reference_fields(fields, values, resolved_map, schema, settings.webhook_url)
     # Системное поле «Клиент» нужно только для заявок, где действительно выбран заказчик.
     # Не делаем лишние административные REST-вызовы для рейсов без клиента.
     if req.customer and "companyId" not in schema and "contactIds" not in schema:
@@ -900,7 +1377,9 @@ def sync_trip(req, db, settings=None) -> dict:
         if "_error" not in refreshed_schema:
             schema = refreshed_schema
             resolved_map = resolve_field_map(schema)
-            fields = build_fields(req, resolved_map)
+            values = _trip_values(req, db=db)
+            fields = {code: values[logical] for logical, code in resolved_map.items() if logical in values}
+            fields = _prepare_outbound_reference_fields(fields, values, resolved_map, schema, settings.webhook_url)
     company_id, contact_id = _ensure_bitrix_customer(req.customer, settings.webhook_url) if req.customer else (None, None)
     if company_id and "companyId" in schema:
         fields["companyId"] = company_id
@@ -1170,7 +1649,7 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         )
         db.add(trip)
 
-    raw_planned_at = _read_logical(item, "planned_at", mapping)
+    raw_planned_at = _read_display_logical(item, "planned_at", mapping, schema, settings.webhook_url)
     if raw_planned_at:
         raw_text = str(_scalar(raw_planned_at) or "").strip()
         try:
@@ -1189,7 +1668,10 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         ("route_name", "route_name", None),
     ):
         if _has_logical(item, logical, mapping):
-            value = str(_read_logical(item, logical, mapping) or "")
+            if logical in {"load_address", "unload_address"}:
+                value = _clean_address_value(settings.webhook_url, item, logical, mapping, schema)
+            else:
+                value = str(_read_display_logical(item, logical, mapping, schema, settings.webhook_url) or "")
             setattr(trip, attr, value[:limit] if limit else value)
     def inbound_value(parser, logical, field):
         """Плохое одно поле Bitrix не должно отменять создание/обновление всего рейса."""
@@ -1208,6 +1690,10 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     actual_tonnage = inbound_value(_optional_nonnegative_float, "actual_tonnage", "actual_tonnage")
     trips_count = inbound_value(_optional_nonnegative_int, "trips_count", "trips_count")
     waste_bin_count = inbound_value(_optional_nonnegative_int, "waste_bin_count", "waste_bin_count")
+    odometer = inbound_value(_optional_nonnegative_float, "odometer", "odometer")
+    fuel_liters = inbound_value(_optional_nonnegative_float, "fuel_liters", "fuel_liters")
+    fuel_price = inbound_value(_optional_nonnegative_float, "fuel_price", "fuel_price")
+    fuel_cost = inbound_value(_optional_nonnegative_float, "fuel_cost", "fuel_cost")
     started_at = inbound_value(_optional_datetime, "started_at", "started_at")
     finished_at = inbound_value(_optional_datetime, "finished_at", "finished_at")
     customer_bitrix_id = inbound_value(_optional_nonnegative_int, "customer_bitrix_id", "customer_bitrix_id")
@@ -1270,28 +1756,50 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     trip.bitrix_element_id = int(item_id)
     trip.bitrix_entity_type_id = int(entity_type_id)
 
-    driver = _find_by_name(db, models.User, models.User.full_name, _read_logical(item, "driver_name", mapping))
-    if driver and driver.role == models.UserRole.DRIVER:
+    driver_text = str(_read_display_logical(item, "driver_name", mapping, schema, settings.webhook_url) or "").strip()
+    driver = _find_driver_by_surname(db, driver_text)
+    if driver:
         trip.driver_id = driver.id
-    vehicle_text = str(_read_logical(item, "vehicle_name", mapping) or "").strip()
+    elif driver_text:
+        print("BITRIX_INBOUND_DRIVER_NOT_MATCHED", entity_type_id, item_id, _normalize(driver_text), flush=True)
+
+    vehicle_text = str(_read_display_logical(item, "vehicle_name", mapping, schema, settings.webhook_url) or "").strip()
     if vehicle_text:
-        vehicle = db.query(models.Vehicle).filter(models.Vehicle.name.ilike(vehicle_text)).first()
-        if not vehicle:
-            vehicle = db.query(models.Vehicle).filter(models.Vehicle.plate.ilike(f"%{vehicle_text}%")).first()
-        if not vehicle:
-            vehicle = next((v for v in db.query(models.Vehicle).all() if v.name.lower() in vehicle_text.lower() or v.plate.lower() in vehicle_text.lower()), None)
+        vehicle = _find_vehicle_by_bitrix_value(db, vehicle_text)
         if vehicle:
             trip.vehicle_id = vehicle.id
-    polygon_name = str(_read_logical(item, "polygon_name", mapping) or "").strip()
+        else:
+            print("BITRIX_INBOUND_VEHICLE_NOT_MATCHED", entity_type_id, item_id, _normalize_plate(vehicle_text), flush=True)
+    polygon_name = str(_read_display_logical(item, "polygon_name", mapping, schema, settings.webhook_url) or "").strip()
     if polygon_name:
         polygon = _find_by_name(db, models.Polygon, models.Polygon.name, polygon_name)
         if not polygon:
+            normalized_polygon = _normalize(polygon_name)
+            matches = [row for row in db.query(models.Polygon).all() if _normalize(row.name) == normalized_polygon]
+            polygon = matches[0] if len(matches) == 1 else None
+        if not polygon and re.search(r"[A-Za-zА-Яа-яЁё]", polygon_name):
             polygon = models.Polygon(name=polygon_name); db.add(polygon); db.flush()
-        for logical, attr in (("polygon_address", "address"), ("polygon_contact", "contact"), ("polygon_phone", "phone"), ("polygon_navigator_url", "navigator_url")):
-            if _has_logical(item, logical, mapping):
-                setattr(polygon, attr, str(_read_logical(item, logical, mapping) or ""))
-        trip.polygon_id = polygon.id
-    customer_name = str(_read_logical(item, "customer_name", mapping) or "").strip()
+        if polygon:
+            for logical, attr in (("polygon_address", "address"), ("polygon_contact", "contact"), ("polygon_phone", "phone"), ("polygon_navigator_url", "navigator_url")):
+                if _has_logical(item, logical, mapping):
+                    value = _clean_address_value(settings.webhook_url, item, logical, mapping, schema) if logical == "polygon_address" else str(_read_display_logical(item, logical, mapping, schema, settings.webhook_url) or "")
+                    setattr(polygon, attr, value)
+            trip.polygon_id = polygon.id
+        else:
+            print("BITRIX_INBOUND_POLYGON_NOT_MATCHED", entity_type_id, item_id, _normalize(polygon_name), flush=True)
+    customer_name = str(_read_display_logical(item, "customer_name", mapping, schema, settings.webhook_url) or "").strip()
+    custom_company_ref_id = None
+    customer_field_code = _field_code(mapping, "customer_name")
+    if customer_field_code and customer_field_code in item:
+        customer_refs = item.get(customer_field_code)
+        if not isinstance(customer_refs, list):
+            customer_refs = [customer_refs]
+        for customer_ref in customer_refs:
+            ref_entity_type, ref_item_id = _crm_binding_parts(customer_ref)
+            if ref_entity_type == 4 and ref_item_id:
+                custom_company_ref_id = ref_item_id
+                customer_bitrix_id = ref_item_id
+                break
     client_field_present = any(key in item for key in ("companyId", "contactId", "contactIds"))
     built_in_company_id = _optional_nonnegative_int(item.get("companyId"), "companyId") if item.get("companyId") not in (None, "", 0, "0") else None
     raw_contact_ids = item.get("contactIds") or ([] if item.get("contactId") in (None, "", 0, "0") else [item.get("contactId")])
@@ -1306,13 +1814,14 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         if candidate > 0:
             built_in_contact_id = candidate
             break
-    company_item = fetch_item(settings.webhook_url, 4, built_in_company_id) if built_in_company_id else {}
+    company_lookup_id = built_in_company_id or custom_company_ref_id
+    company_item = fetch_item(settings.webhook_url, 4, company_lookup_id) if company_lookup_id else {}
     contact_item = fetch_item(settings.webhook_url, 3, built_in_contact_id) if built_in_contact_id else {}
-    if built_in_company_id and "_error" not in company_item:
+    if company_lookup_id and "_error" not in company_item:
         customer_name = str(company_item.get("title") or customer_name or "").strip()
-        customer_bitrix_id = built_in_company_id
+        customer_bitrix_id = int(company_lookup_id)
         if not customer_inn:
-            customer_inn = _company_requisite_inn(settings.webhook_url, built_in_company_id)
+            customer_inn = _company_requisite_inn(settings.webhook_url, int(company_lookup_id))
     if client_field_present and not built_in_company_id and not built_in_contact_id and not customer_name and not customer_inn:
         trip.customer_id = None
     elif customer_name or customer_bitrix_id is not None or customer_inn or built_in_contact_id:
@@ -1368,7 +1877,7 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
                 print("BITRIX_INBOUND_CUSTOMER_INN_PRESERVED", entity_type_id, item_id, flush=True)
             if built_in_contact_id:
                 customer.bitrix_contact_id = built_in_contact_id
-            if built_in_company_id and "_error" not in company_item:
+            if company_lookup_id and "_error" not in company_item:
                 customer.address = str(company_item.get("address") or "").strip()
                 customer.phone = _first_phone(company_item)
             if built_in_contact_id and "_error" not in contact_item:
@@ -1381,16 +1890,52 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
                 customer.phone = str(_read_logical(item, "customer_contact_phone", mapping) or "")
             if _has_logical(item, "customer_address", mapping):
                 customer.address = str(_read_logical(item, "customer_address", mapping) or "")
-    cargo_name = str(_read_logical(item, "cargo_type_name", mapping) or "").strip()
+    cargo_name = str(_read_display_logical(item, "cargo_type_name", mapping, schema, settings.webhook_url) or "").strip()
     if cargo_name:
         cargo = _find_by_name(db, models.CargoType, models.CargoType.name, cargo_name)
+        if not cargo:
+            normalized_cargo = _normalize(cargo_name)
+            matches = [row for row in db.query(models.CargoType).all() if _normalize(row.name) == normalized_cargo]
+            cargo = matches[0] if len(matches) == 1 else None
         if cargo:
             trip.cargo_type_id = cargo.id
-    tariff_name = str(_read_logical(item, "tariff_name", mapping) or "").strip()
+    tariff_name = str(_read_display_logical(item, "tariff_name", mapping, schema, settings.webhook_url) or "").strip()
     if tariff_name:
         tariff = _find_by_name(db, models.Tariff, models.Tariff.title, tariff_name)
+        if not tariff:
+            normalized_tariff = _normalize(tariff_name)
+            matches = [row for row in db.query(models.Tariff).filter(models.Tariff.kind == kind).all() if _normalize(row.title) == normalized_tariff]
+            tariff = matches[0] if len(matches) == 1 else None
         if tariff and tariff.kind == kind:
             trip.tariff_id = tariff.id
+
+    # Показания спидометра/топливо живут в отчёте дня водителя, но могут
+    # редактироваться из Bitrix. Обновляем отчёт только если известны водитель,
+    # машина и дата; остальные данные рейса при этом не блокируем.
+    report_fields_present = any(_has_logical(item, logical, mapping) for logical in (
+        "odometer", "fuel_liters", "fuel_price", "fuel_cost",
+    ))
+    if report_fields_present and trip.driver_id and trip.vehicle_id and trip.planned_date:
+        day_report = db.query(models.DriverDayReport).filter(
+            models.DriverDayReport.driver_id == trip.driver_id,
+            models.DriverDayReport.report_date == trip.planned_date,
+        ).first()
+        if not day_report:
+            day_report = models.DriverDayReport(
+                driver_id=trip.driver_id, report_date=trip.planned_date, vehicle_id=trip.vehicle_id,
+                total_km=0, odometer=0, fuel_liters=0, fuel_price=0,
+            )
+            db.add(day_report)
+        day_report.vehicle_id = trip.vehicle_id
+        if _has_logical(item, "odometer", mapping) and odometer is not None:
+            day_report.odometer = odometer
+        if _has_logical(item, "fuel_liters", mapping) and fuel_liters is not None:
+            day_report.fuel_liters = fuel_liters
+        if _has_logical(item, "fuel_price", mapping) and fuel_price is not None:
+            day_report.fuel_price = fuel_price
+        elif _has_logical(item, "fuel_cost", mapping) and fuel_cost is not None and float(day_report.fuel_liters or 0) > 0:
+            day_report.fuel_price = float(fuel_cost) / float(day_report.fuel_liters)
+
     db.flush()
     if "_error" not in schema:
         sync_inbound_attachments(item, trip, db, schema, mapping)

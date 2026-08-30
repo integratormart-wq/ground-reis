@@ -292,7 +292,12 @@ class DriverDayReport(Base):
     total_km = Column(Float, default=0, nullable=False)
     odometer = Column(Float, default=0, nullable=False)
     fuel_liters = Column(Float, default=0, nullable=False)
+    fuel_price = Column(Float, default=0, nullable=False)
     comment = Column(Text)
+
+    @property
+    def fuel_cost(self):
+        return float(self.fuel_liters or 0) * float(self.fuel_price or 0)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     driver = relationship("User")
