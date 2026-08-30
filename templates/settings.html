@@ -88,14 +88,13 @@
 
 <h3 id="vehicles" data-settings-section>Автомобили</h3>
 <table class="table">
-  <thead><tr><th>Имя</th><th>Госномер</th><th>Тип</th><th>Вместимость</th><th></th></tr></thead>
+  <thead><tr><th>Госномер</th><th>Тип</th><th>Вместимость</th><th></th></tr></thead>
   <tbody>
   {% for v in vehicles %}
   <tr>
-    <td>{{ v.name }}</td>
     <td>{{ v.plate }}</td>
     <td>{{ v.type.name if v.type else '' }}</td>
-    <td>{{ v.capacity }}</td>
+    <td>{{ v.capacity if v.capacity is not none else '—' }}</td>
     <td>
       <a class="btn btn-ghost btn-sm" href="/settings/vehicles/{{ v.id }}/edit">Редактировать</a>
       <form method="post" action="/settings/vehicles/{{ v.id }}/delete" onsubmit="return confirm('Удалить?')">
@@ -108,14 +107,13 @@
 </table>
 {% if user.role in ['admin','logist'] %}
 <form method="post" action="/settings/vehicles" class="filters">
-  <input name="name" placeholder="Имя" required />
   <input name="plate" placeholder="Госномер" required />
   <select name="type_id">
     {% for vt in vtypes %}
     <option value="{{ vt.id }}">{{ vt.name }}</option>
     {% endfor %}
   </select>
-  <input name="capacity" type="number" step="any" placeholder="Вместимость" />
+  <input name="capacity" type="number" step="any" placeholder="Вместимость (необязательно)" />
   <button class="btn" type="submit">Добавить авто</button>
 </form>
 {% endif %}

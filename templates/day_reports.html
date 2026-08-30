@@ -10,9 +10,9 @@
 </form>
 </section>
 <div class="table-wrap" style="margin-top:16px"><table class="table">
-  <thead><tr><th>Дата</th><th>Водитель</th><th>Автомобиль</th><th>Км за смену</th><th>Спидометр</th><th>Топливо</th><th>Цена/л</th><th>Затраты на топливо</th><th>Комментарий</th><th>Рейсы за день</th></tr></thead>
+  <thead><tr><th>Дата</th><th>Водитель</th><th>Госномер</th><th>Км за смену</th><th>Спидометр</th><th>Топливо</th><th>Цена/л</th><th>Затраты на топливо</th><th>Комментарий</th><th>Рейсы за день</th></tr></thead>
   <tbody>{% for row in rows %}{% set trips = trips_by_report.get(row.id, []) %}<tr>
-    <td>{{ row.report_date.strftime('%d.%m.%Y') }}</td><td>{{ row.driver.full_name }}</td><td>{{ row.vehicle.name }} · {{ row.vehicle.plate }}</td><td>{{ row.total_km }}</td><td>{{ row.odometer }}</td><td>{{ row.fuel_liters }} л</td><td>{{ '%.2f'|format(row.fuel_price or 0) }} ₽</td><td>{{ '%.2f'|format(row.fuel_cost) }} ₽</td><td>{{ row.comment or '—' }}</td>
+    <td>{{ row.report_date.strftime('%d.%m.%Y') }}</td><td>{{ row.driver.full_name }}</td><td>{{ row.vehicle.plate }}</td><td>{{ row.total_km }}</td><td>{{ row.odometer }}</td><td>{{ row.fuel_liters }} л</td><td>{{ '%.2f'|format(row.fuel_price or 0) }} ₽</td><td>{{ '%.2f'|format(row.fuel_cost) }} ₽</td><td>{{ row.comment or '—' }}</td>
     <td>
       {% if trips %}
       <details>

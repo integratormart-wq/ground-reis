@@ -20,10 +20,9 @@
       <label>Заказчик<select name="customer_id"><option value="">— не выбран —</option>{% for c in customers %}<option value="{{ c.id }}" {% if row.customer_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}</select></label>
       <label class="wide">Комментарий<textarea name="comment">{{ row.comment or '' }}</textarea></label>
       {% elif section == 'vehicles' %}
-      <label>Название<input name="name" value="{{ row.name }}" required /></label>
       <label>Госномер<input name="plate" value="{{ row.plate }}" required /></label>
       <label>Тип автомобиля<select name="type_id" required>{% for vt in vtypes %}<option value="{{ vt.id }}" {% if row.type_id == vt.id %}selected{% endif %}>{{ vt.name }}</option>{% endfor %}</select></label>
-      <label>Вместимость<input name="capacity" type="number" step="any" value="{{ row.capacity if row.capacity is not none else '' }}" /></label>
+      <label>Вместимость (необязательно)<input name="capacity" type="number" step="any" value="{{ row.capacity if row.capacity is not none else '' }}" /></label>
       <label><input type="checkbox" name="is_active" {% if row.is_active %}checked{% endif %} /> Активен</label>
       {% elif section == 'customers' %}
       <label>Название<input name="name" value="{{ row.name }}" required /></label>

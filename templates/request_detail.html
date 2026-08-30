@@ -42,7 +42,6 @@
     <div class="form-section-head"><span class="form-section-index">03</span><h2>Рейс и техника</h2></div>
     <div class="details" style="margin:0;border:0;border-radius:0;box-shadow:none;background:transparent">
       <div><b>Водитель:</b> {{ req.driver.full_name if req.driver else '—' }}</div>
-      <div><b>Автомобиль:</b> {{ req.vehicle.name if req.vehicle else '—' }}</div>
       <div><b>Госномер:</b> {{ req.vehicle.plate if req.vehicle else '—' }}</div>
       <div><b>Маршрут:</b> {{ req.route_name or '—' }}</div>
       <div><b>Тип груза:</b> {{ req.cargo_type.name if req.cargo_type else '—' }}</div>

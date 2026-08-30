@@ -81,10 +81,10 @@
           {% for d in drivers %}<option value="{{ d.id }}" {% if editing and editing.driver_id == d.id %}selected{% endif %}>{{ d.full_name }}</option>{% endfor %}
         </select>
       </label>
-      <label>Автомобиль
+      <label>Госномер
         <select name="vehicle_id" id="vehicle_id" required>
           <option value="">— выберите —</option>
-          {% for v in vehicles %}<option value="{{ v.id }}" data-type-id="{{ v.type_id }}" {% if editing and editing.vehicle_id == v.id %}selected{% endif %}>{{ v.name }} {{ v.plate }}</option>{% endfor %}
+          {% for v in vehicles %}<option value="{{ v.id }}" data-type-id="{{ v.type_id }}" {% if editing and editing.vehicle_id == v.id %}selected{% endif %}>{{ v.plate }}</option>{% endfor %}
         </select>
       </label>
     </div>
