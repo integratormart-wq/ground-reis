@@ -4,6 +4,8 @@ import json
 import math
 import os
 import re
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,6 +25,51 @@ KNOWN_PROCESS_KINDS = {
     PUKHTOVOZ_ENTITY_TYPE_ID: TripType.PUKHTOVOZ,
     SAMOSVAL_ENTITY_TYPE_ID: TripType.SAMOSVAL,
 }
+
+# Короткие in-memory кэши убирают повторные служебные REST-запросы Bitrix.
+# В кэш не записываются рейсы и пользовательские данные — только схема CRM,
+# список процессов и часовой пояс портала. После рестарта Render кэш пустой.
+_RUNTIME_CACHE_LOCK = threading.Lock()
+_PROCESS_KINDS_CACHE = {}
+_FIELD_SCHEMA_CACHE = {}
+_PORTAL_TZ_CACHE = {}
+PROCESS_CACHE_TTL = 300
+FIELD_SCHEMA_CACHE_TTL = 300
+PORTAL_TZ_CACHE_TTL = 600
+
+
+def _cache_get(cache: dict, key, ttl: int):
+    now = time.monotonic()
+    with _RUNTIME_CACHE_LOCK:
+        row = cache.get(key)
+        if not row:
+            return None
+        created_at, value = row
+        if now - created_at >= ttl:
+            cache.pop(key, None)
+            return None
+        return value
+
+
+def _cache_put(cache: dict, key, value):
+    with _RUNTIME_CACHE_LOCK:
+        cache[key] = (time.monotonic(), value)
+    return value
+
+
+def _clear_runtime_cache():
+    """Техническая очистка кэша для тестов/изменения схемы Bitrix."""
+    with _RUNTIME_CACHE_LOCK:
+        _PROCESS_KINDS_CACHE.clear()
+        _FIELD_SCHEMA_CACHE.clear()
+        _PORTAL_TZ_CACHE.clear()
+
+def _invalidate_field_schema_cache(webhook_base: str, entity_id) -> None:
+    cache_key = (_normalize_webhook_base(webhook_base), str(entity_id))
+    with _RUNTIME_CACHE_LOCK:
+        _FIELD_SCHEMA_CACHE.pop(cache_key, None)
+
+
 
 STATUS_STAGE_TITLES = {
     RequestStatus.ACCEPTED: "Водитель назначен",
@@ -195,8 +242,12 @@ def find_smart_process_ids(webhook_base: str) -> dict:
 
 
 def resolve_process_kinds(webhook_base: str) -> dict:
-    # Реальные ID портала ООО «ГРАУНД». Автообнаружение ниже дополняет
-    # таблицу, но маршрутизация не зависит от возможного переименования процесса.
+    # Реальные ID портала ООО «ГРАУНД». Для них дополнительный crm.type.list
+    # не нужен на каждом рейсе; автообнаружение выполняется не чаще раза в 5 минут.
+    cache_key = _normalize_webhook_base(webhook_base)
+    cached = _cache_get(_PROCESS_KINDS_CACHE, cache_key, PROCESS_CACHE_TTL)
+    if cached is not None:
+        return dict(cached)
     result = dict(KNOWN_PROCESS_KINDS)
     for entity_id, title in find_smart_process_ids(webhook_base).items():
         if entity_id == "_error":
@@ -206,22 +257,34 @@ def resolve_process_kinds(webhook_base: str) -> dict:
             result[str(entity_id)] = TripType.PUKHTOVOZ
         elif PROCESS_NAME_SAMOSVAL in normalized:
             result[str(entity_id)] = TripType.SAMOSVAL
+    _cache_put(_PROCESS_KINDS_CACHE, cache_key, dict(result))
     return result
 
 
 def resolve_process_entity(webhook_base: str, kind) -> Optional[str]:
     kind_value = kind.value if hasattr(kind, "value") else str(kind)
+    # В штатной конфигурации 1088/1092 известны заранее — не ждём сеть.
+    for entity_id, process_kind in KNOWN_PROCESS_KINDS.items():
+        if process_kind.value == kind_value:
+            return entity_id
     for entity_id, process_kind in resolve_process_kinds(webhook_base).items():
         if process_kind.value == kind_value:
             return entity_id
     return None
 
 
-def get_element_fields(webhook_base: str, entity_id: str) -> dict:
+def get_element_fields(webhook_base: str, entity_id: str, force: bool = False) -> dict:
+    cache_key = (_normalize_webhook_base(webhook_base), str(entity_id))
+    if not force:
+        cached = _cache_get(_FIELD_SCHEMA_CACHE, cache_key, FIELD_SCHEMA_CACHE_TTL)
+        if cached is not None:
+            return cached
     response = _http_post(webhook_base, "crm.item.fields", {"entityTypeId": int(entity_id)})
     if "error" in response:
         return {"_error": response["error"]}
-    return response.get("result", {}).get("fields", {})
+    fields = response.get("result", {}).get("fields", {})
+    _cache_put(_FIELD_SCHEMA_CACHE, cache_key, fields)
+    return fields
 
 
 def fetch_item(webhook_base: str, entity_id: int, item_id: int) -> dict:
@@ -693,14 +756,18 @@ def _clean_address_value(webhook_base: str, item: dict, logical: str, mapping: d
 
 
 def _portal_timezone(webhook_base: str):
-    """Возвращает timezone офсета портала Bitrix24 через server.time."""
+    """Возвращает timezone портала; server.time запрашивается максимум раз в 10 минут."""
+    cache_key = _normalize_webhook_base(webhook_base)
+    cached = _cache_get(_PORTAL_TZ_CACHE, cache_key, PORTAL_TZ_CACHE_TTL)
+    if cached is not None:
+        return cached
     try:
         response = _http_post(webhook_base, "server.time", {})
         raw = response.get("result") if isinstance(response, dict) else None
         if raw:
             current = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
             if current.tzinfo is not None:
-                return current.tzinfo
+                return _cache_put(_PORTAL_TZ_CACHE, cache_key, current.tzinfo)
     except Exception:
         pass
     return None
@@ -1561,6 +1628,7 @@ def sync_trip(req, db, settings=None) -> dict:
     # Не делаем лишние административные REST-вызовы для рейсов без клиента.
     if req.customer and "companyId" not in schema and "contactIds" not in schema:
         ensure_client_field_enabled(settings.webhook_url, int(entity_id))
+        _invalidate_field_schema_cache(settings.webhook_url, entity_id)
         refreshed_schema = get_element_fields(settings.webhook_url, entity_id)
         if "_error" not in refreshed_schema:
             schema = refreshed_schema
@@ -1803,8 +1871,9 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     settings = settings or get_integration_settings(db)
     if not settings or not settings.is_active or not settings.webhook_url:
         return {"skipped": True, "reason": "no_active_integration"}
-    kinds = resolve_process_kinds(settings.webhook_url)
-    kind = kinds.get(str(entity_type_id))
+    kind = KNOWN_PROCESS_KINDS.get(str(entity_type_id))
+    if not kind:
+        kind = resolve_process_kinds(settings.webhook_url).get(str(entity_type_id))
     if not kind:
         return {"skipped": True, "reason": "foreign_process"}
     item = fetch_item(settings.webhook_url, entity_type_id, item_id)
