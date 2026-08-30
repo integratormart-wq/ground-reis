@@ -1920,3 +1920,164 @@ def test_bitrix_can_update_driver_day_report_fuel_fields(monkeypatch):
     assert report.fuel_price == 64.2
     assert round(report.fuel_cost, 2) == 3210.0
     db.close()
+
+
+def test_bitrix_prefers_real_named_fields_over_stale_legacy_codes():
+    schema = {
+        "title": {"title": "Название", "type": "string"},
+        # Старые технические поля остались в процессе, но реально логист их не заполняет.
+        "ufReisDate": {"title": "Старая дата интеграции", "type": "datetime"},
+        "ufDriver": {"title": "Старый водитель интеграции", "type": "string"},
+        "ufLoadAddr": {"title": "Старый адрес интеграции", "type": "string"},
+        "ufTariff": {"title": "Старый тариф интеграции", "type": "string"},
+        "ufCustomer": {"title": "Старый заказчик интеграции", "type": "string"},
+        # Это реальные поля карточки Bitrix24.
+        "ufRealWhen": {"title": "Подача машины", "type": "datetime"},
+        "ufRealAddress": {"title": "Адрес подачи", "type": "address"},
+        "ufRealDriver": {"title": "Водитель", "type": "integer"},
+        "ufRealTariff": {"title": "Тариф", "type": "enumeration"},
+        "ufRealCompany": {"title": "Компания", "type": "crm_company"},
+    }
+    mapping = app_module.bitrix.resolve_field_map(schema)
+    assert mapping["planned_at"] == "ufRealWhen"
+    assert mapping["load_address"] == "ufRealAddress"
+    assert mapping["driver_name"] == "ufRealDriver"
+    assert mapping["tariff_name"] == "ufRealTariff"
+    assert mapping["customer_name"] == "ufRealCompany"
+
+
+def test_bitrix_generic_date_alias_never_selects_creation_date():
+    schema = {
+        "createdTime": {"title": "Дата создания", "type": "datetime"},
+        "updatedTime": {"title": "Дата изменения", "type": "datetime"},
+        "ufWhen": {"title": "Подача машины", "type": "datetime"},
+    }
+    mapping = app_module.bitrix.resolve_field_map(schema)
+    assert mapping["planned_at"] == "ufWhen"
+
+
+def test_bitrix_inbound_uses_company_address_time_driver_and_tariff_from_real_fields(monkeypatch):
+    db, admin, driver, vt = reset_db()
+    driver.full_name = "Иванов Иван"
+    tariff = models.Tariff(
+        title="Основной тариф", vehicle_type_id=vt.id, kind=models.TripType.PUKHTOVOZ,
+        trip_price=5000, formula="trip", is_active=True,
+    )
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/", secret="s", is_active=True,
+    )
+    db.add_all([tariff, settings]); db.commit()
+
+    schema = {
+        "title": {"title": "Название", "type": "string"},
+        "createdTime": {"title": "Дата создания", "type": "datetime"},
+        "ufReisDate": {"title": "Старая дата интеграции", "type": "datetime"},
+        "ufDriver": {"title": "Старый водитель интеграции", "type": "string"},
+        "ufLoadAddr": {"title": "Старый адрес интеграции", "type": "string"},
+        "ufTariff": {"title": "Старый тариф интеграции", "type": "string"},
+        "ufCustomer": {"title": "Старый заказчик интеграции", "type": "string"},
+        "ufWhen": {"title": "Подача машины", "type": "datetime"},
+        "ufAddress": {"title": "Адрес подачи", "type": "address"},
+        "ufDriverReal": {"title": "Водитель", "type": "integer"},
+        "ufTariffReal": {"title": "Тариф", "type": "enumeration", "items": [{"ID": "9", "VALUE": "Основной тариф"}]},
+        "ufCompanyReal": {"title": "Компания", "type": "crm_company"},
+    }
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_kinds", lambda url: {"1088": models.TripType.PUKHTOVOZ})
+    monkeypatch.setattr(app_module.bitrix, "status_from_stage", lambda *args: None)
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity: schema)
+
+    def fake_fetch(url, entity, item_id):
+        if int(entity) == 4:
+            return {"id": 321, "title": "ООО Ромашка", "address": "г Екатеринбург, ул Мира, 1"}
+        return {
+            "id": 777,
+            "title": "РЕЙС-777",
+            "createdTime": "2026-08-30T23:55:00+05:00",
+            "ufReisDate": "2020-01-01T00:00:00+05:00",
+            "ufDriver": "",
+            "ufLoadAddr": "",
+            "ufTariff": "",
+            "ufCustomer": "",
+            "ufWhen": "2026-08-31T09:40:00Z",
+            "ufAddress": "777888|г Первоуральск, ул Комсомольская, д 5А",
+            "ufDriverReal": "77",
+            "ufTariffReal": "9",
+            "ufCompanyReal": "321",
+        }
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", fake_fetch)
+
+    def fake_post(url, method, payload):
+        if method == "server.time":
+            return {"result": "2026-08-31T14:40:00+05:00"}
+        if method == "user.get":
+            return {"result": [{"ID": "77", "LAST_NAME": "Иванов", "NAME": "Иван"}]}
+        if method == "crm.requisite.list":
+            return {"result": []}
+        return {"result": {}}
+    monkeypatch.setattr(app_module.bitrix, "_http_post", fake_post)
+
+    result = app_module.bitrix.sync_from_bitrix(777, 1088, db, settings=settings)
+    db.commit()
+    trip = db.query(models.TripRequest).filter_by(bitrix_element_id=777, bitrix_entity_type_id=1088).one()
+    assert result["ok"] is True
+    assert trip.customer is not None and trip.customer.name == "ООО Ромашка"
+    assert trip.load_address == "г Первоуральск, ул Комсомольская, д 5А"
+    # 09:40 UTC должно отображаться как 14:40 в часовом поясе портала +05.
+    assert trip.planned_date == date(2026, 8, 31)
+    assert trip.planned_time == "14:40"
+    assert trip.driver_id == driver.id
+    assert trip.tariff_id == tariff.id
+    db.close()
+
+
+def test_bitrix_outbound_writes_real_named_fields_and_custom_company(monkeypatch):
+    db, admin, driver, vt = reset_db()
+    driver.full_name = "Иванов Иван"
+    customer = models.Customer(name="ООО Ромашка", bitrix_company_id=321)
+    trip = models.TripRequest(
+        number="РЕЙС-OUT-1", planned_date=date(2026, 8, 31), planned_time="14:40",
+        driver=driver, customer=customer, load_address="г Первоуральск, ул Комсомольская, д 5А",
+        kind=models.TripType.PUKHTOVOZ, status=models.RequestStatus.NEW,
+    )
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/", secret="s", is_active=True,
+    )
+    db.add_all([customer, trip, settings]); db.commit()
+    schema = {
+        "title": {"title": "Название", "type": "string"},
+        "ufReisDate": {"title": "Старая дата интеграции", "type": "datetime"},
+        "ufDriver": {"title": "Старый водитель интеграции", "type": "string"},
+        "ufLoadAddr": {"title": "Старый адрес интеграции", "type": "string"},
+        "ufCustomer": {"title": "Старый заказчик интеграции", "type": "string"},
+        "ufWhen": {"title": "Подача машины", "type": "datetime"},
+        "ufAddress": {"title": "Адрес подачи", "type": "string"},
+        "ufDriverReal": {"title": "Водитель", "type": "integer"},
+        "ufCompanyReal": {"title": "Компания", "type": "crm_company"},
+    }
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_entity", lambda *args: "1088")
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda *args: schema)
+    monkeypatch.setattr(app_module.bitrix, "resolve_stage", lambda *args: ("DT1088_1:NEW", 1))
+    monkeypatch.setattr(app_module.bitrix, "_ensure_bitrix_customer", lambda *args: (321, None))
+    writes = []
+    def fake_post(url, method, payload):
+        if method == "server.time":
+            return {"result": "2026-08-31T14:00:00+05:00"}
+        if method == "user.get":
+            return {"result": [{"ID": "77", "LAST_NAME": "Иванов", "NAME": "Иван"}]}
+        if method == "crm.item.add":
+            writes.append(payload)
+            return {"result": {"item": {"id": 999}}}
+        return {"result": {}}
+    monkeypatch.setattr(app_module.bitrix, "_http_post", fake_post)
+    result = app_module.bitrix.sync_trip(trip, db, settings=settings)
+    assert result["ok"] is True
+    fields = writes[-1]["fields"]
+    assert fields["ufWhen"].startswith("2026-08-31T14:40")
+    assert fields["ufAddress"] == "г Первоуральск, ул Комсомольская, д 5А"
+    assert fields["ufDriverReal"] == 77
+    assert fields["ufCompanyReal"] == 321
+    assert "ufReisDate" not in fields
+    assert "ufDriver" not in fields
+    assert "ufLoadAddr" not in fields
+    assert "ufCustomer" not in fields
+    db.close()
