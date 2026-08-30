@@ -14,6 +14,19 @@
     {% endif %}
   </div>
 
+  {% if info.user_access %}
+    <div class="card" style="padding:14px;margin-top:14px">
+      <b>Доступ к сотрудникам Bitrix24:</b>
+      {% if info.user_access.ok %}
+        <span style="color:green">есть — водитель может определяться по ФИО/фамилии ✅</span>
+      {% elif info.user_access.reason == 'insufficient_scope' %}
+        <span style="color:#b00">нет — во входящем webhook нужно добавить право <b>user_brief</b> («Пользователи: базовая информация»). Без него Bitrix отдаёт ID водителя, но приложение не может получить его фамилию.</span>
+      {% else %}
+        <span style="color:#b00">нет доступа к списку сотрудников. Проверьте права пользователя, от имени которого создан webhook.</span>
+      {% endif %}
+    </div>
+  {% endif %}
+
   <h3 style="margin-top:18px">Найденные смарт-процессы</h3>
   {% if info.processes %}
     <table class="table">
