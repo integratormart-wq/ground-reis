@@ -33,9 +33,11 @@ _RUNTIME_CACHE_LOCK = threading.Lock()
 _PROCESS_KINDS_CACHE = {}
 _FIELD_SCHEMA_CACHE = {}
 _PORTAL_TZ_CACHE = {}
+_BITRIX_USER_CACHE = {}
 PROCESS_CACHE_TTL = 300
 FIELD_SCHEMA_CACHE_TTL = 300
 PORTAL_TZ_CACHE_TTL = 600
+BITRIX_USER_CACHE_TTL = 600
 
 
 def _cache_get(cache: dict, key, ttl: int):
@@ -63,6 +65,7 @@ def _clear_runtime_cache():
         _PROCESS_KINDS_CACHE.clear()
         _FIELD_SCHEMA_CACHE.clear()
         _PORTAL_TZ_CACHE.clear()
+        _BITRIX_USER_CACHE.clear()
 
 def _invalidate_field_schema_cache(webhook_base: str, entity_id) -> None:
     cache_key = (_normalize_webhook_base(webhook_base), str(entity_id))
@@ -135,7 +138,10 @@ FIELD_MAP = {
 FIELD_TITLES = {
     "planned_at": ("дата и время", "дата рейса", "плановая дата и время", "дата/время рейса", "подача машины", "дата"),
     "driver_name": ("водитель", "фио водителя", "водители"),
-    "vehicle_name": ("автомобиль", "машина", "машины", "транспорт", "госномер", "государственный номер"),
+    # В Bitrix поле теперь называется именно «Госномер». Не подхватываем
+    # старые поля «Машина/Машины/Автомобиль», чтобы они больше не могли
+    # перехватить синхронизацию.
+    "vehicle_name": ("госномер", "государственный номер"),
     "load_address": ("адрес загрузки", "адрес подачи", "загрузка"),
     "unload_address": ("адрес выгрузки", "выгрузка"),
     "route_name": ("маршрут",),
@@ -623,25 +629,107 @@ def _enum_display_value(raw, info: dict):
     return ", ".join(labels) if labels else None
 
 
-def _user_display_name(webhook_base: str, raw):
-    user_id = _scalar(raw)
+def _extract_bitrix_user_id(raw):
+    """Достаёт ID сотрудника из разных форматов пользовательского поля Bitrix."""
+    if isinstance(raw, list):
+        for value in raw:
+            found = _extract_bitrix_user_id(value)
+            if found:
+                return found
+        return None
+    if isinstance(raw, dict):
+        for key in ("id", "ID", "userId", "USER_ID", "value", "VALUE"):
+            if raw.get(key) not in (None, ""):
+                found = _extract_bitrix_user_id(raw.get(key))
+                if found:
+                    return found
+        return None
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    # В разных пользовательских полях встречаются 77, U77, USER_77,
+    # user:77 и похожие представления одного и того же сотрудника.
+    match = re.fullmatch(r"(?:U|USER[_:\- ]*)?(\d+)", text, re.I)
+    if not match:
+        return None
     try:
-        user_id = int(str(user_id).strip())
+        user_id = int(match.group(1))
     except (TypeError, ValueError):
-        return str(_scalar(raw) or "").strip()
-    response = _http_post(webhook_base, "user.get", {"ID": user_id})
-    rows = response.get("result", []) if isinstance(response, dict) and "error" not in response else []
+        return None
+    return user_id if user_id > 0 else None
+
+
+def _bitrix_user_record(webhook_base: str, raw):
+    """Возвращает безопасную карточку пользователя Bitrix с коротким кэшем.
+
+    Для user.get входящему webhook нужен scope user/user_brief/user_basic.
+    Если права не выданы, синхронизация рейса не падает: пишем понятный
+    диагностический маркер и продолжаем обрабатывать остальные поля.
+    """
+    user_id = _extract_bitrix_user_id(raw)
+    if not user_id:
+        return None
+    cache_key = (_normalize_webhook_base(webhook_base), int(user_id))
+    cached = _cache_get(_BITRIX_USER_CACHE, cache_key, BITRIX_USER_CACHE_TTL)
+    if cached is not None:
+        return cached or None
+    response = _http_post(webhook_base, "user.get", {"ID": int(user_id)})
+    if not isinstance(response, dict):
+        return _cache_put(_BITRIX_USER_CACHE, cache_key, {}) or None
+    if "error" in response:
+        error_code = str(response.get("error") or "").strip().lower()
+        description = str(response.get("error_description") or "").strip().lower()
+        if "scope" in error_code or "scope" in description or error_code in {"access_denied", "insufficient_scope"}:
+            print("BITRIX_DRIVER_USER_SCOPE_MISSING", int(user_id), flush=True)
+        else:
+            print("BITRIX_DRIVER_USER_LOOKUP_ERROR", int(user_id), error_code[:80], flush=True)
+        return _cache_put(_BITRIX_USER_CACHE, cache_key, {}) or None
+    rows = response.get("result", [])
     if isinstance(rows, dict):
         rows = rows.get("items") or [rows]
-    if not rows:
-        return str(user_id)
-    row = rows[0] or {}
+    row = (rows or [None])[0]
+    if not isinstance(row, dict):
+        return _cache_put(_BITRIX_USER_CACHE, cache_key, {}) or None
+    return _cache_put(_BITRIX_USER_CACHE, cache_key, row)
+
+
+def check_user_directory_access(webhook_base: str) -> dict:
+    """Проверяет, может ли текущий webhook читать сотрудников Bitrix.
+
+    Это обязательное право для полей типа «Привязка к сотруднику»: в самом
+    рейсе Bitrix хранит ID, а фамилию/имя нужно получить через user.get.
+    """
+    response = _http_post(webhook_base, "user.get", {"FILTER": {"ACTIVE": "Y"}})
+    if not isinstance(response, dict):
+        return {"ok": False, "reason": "invalid_response"}
+    if "error" in response:
+        error_code = str(response.get("error") or "").strip()
+        description = str(response.get("error_description") or "").strip()
+        lower = f"{error_code} {description}".lower()
+        reason = "insufficient_scope" if "scope" in lower else "access_error"
+        return {"ok": False, "reason": reason, "error": error_code[:80]}
+    return {"ok": True}
+
+
+def _bitrix_user_full_name(row: dict) -> str:
+    if not isinstance(row, dict):
+        return ""
     parts = [
         str(row.get("LAST_NAME") or row.get("lastName") or "").strip(),
         str(row.get("NAME") or row.get("name") or "").strip(),
         str(row.get("SECOND_NAME") or row.get("secondName") or "").strip(),
     ]
-    return " ".join(part for part in parts if part).strip() or str(user_id)
+    return " ".join(part for part in parts if part).strip()
+
+
+def _user_display_name(webhook_base: str, raw):
+    row = _bitrix_user_record(webhook_base, raw)
+    if row:
+        display = _bitrix_user_full_name(row)
+        if display:
+            return display
+    scalar = _scalar(raw)
+    return str(scalar or "").strip()
 
 
 def _crm_binding_parts(value):
@@ -833,14 +921,82 @@ def _driver_display_value(webhook_base: str, item: dict, mapping: dict, schema: 
     raw = item.get(code)
     info = schema.get(code, {}) if isinstance(schema, dict) else {}
     display = str(_display_field_value(webhook_base, raw, info) or "").strip()
-    # Иногда поле «Водитель» настроено как число/ID пользователя, и Bitrix
-    # не помечает его типом user. В этом случае самостоятельно раскрываем ID.
-    scalar = _scalar(raw)
-    if scalar not in (None, "") and re.fullmatch(r"\d+", str(scalar).strip()):
-        resolved = _user_display_name(webhook_base, scalar)
-        if resolved and not re.fullmatch(r"\d+", str(resolved).strip()):
+    # Поле «Водитель» может быть user/employee, integer либо возвращать
+    # префиксированный ID вроде U77. Во всех этих случаях сначала пробуем
+    # получить реальное ФИО сотрудника Bitrix.
+    user_id = _extract_bitrix_user_id(raw)
+    if user_id:
+        resolved = _user_display_name(webhook_base, user_id)
+        if resolved and not re.fullmatch(r"(?:U|USER[_:\- ]*)?\d+", str(resolved).strip(), re.I):
             return str(resolved).strip()
     return display
+
+
+def _driver_text_candidates(webhook_base: str, raw, info: dict) -> list[str]:
+    """Собирает все безопасные варианты ФИО из поля «Водитель» Bitrix."""
+    candidates = []
+
+    def add(value):
+        text = str(value or "").strip()
+        if not text or text in candidates:
+            return
+        candidates.append(text)
+
+    add(_display_field_value(webhook_base, raw, info or {}))
+
+    user_id = _extract_bitrix_user_id(raw)
+    if user_id:
+        row = _bitrix_user_record(webhook_base, user_id)
+        if row:
+            add(_bitrix_user_full_name(row))
+            add(row.get("LAST_NAME") or row.get("lastName"))
+
+    def walk(node):
+        if isinstance(node, dict):
+            # Сначала именно поля, где Bitrix обычно отдаёт имя/ФИО.
+            for key in (
+                "fullName", "FULL_NAME", "displayName", "DISPLAY_NAME",
+                "lastName", "LAST_NAME", "name", "NAME", "title", "TITLE",
+                "label", "LABEL", "text", "TEXT", "value", "VALUE",
+            ):
+                if node.get(key) not in (None, ""):
+                    value = node.get(key)
+                    if not isinstance(value, (dict, list, tuple, set)):
+                        add(value)
+            for value in node.values():
+                if isinstance(value, (dict, list, tuple, set)):
+                    walk(value)
+        elif isinstance(node, (list, tuple, set)):
+            for value in node:
+                walk(value)
+        else:
+            text = str(node or "").strip()
+            # Чистые ID не помогают сопоставить локального водителя.
+            if text and re.search(r"[A-Za-zА-Яа-яЁё]", text) and not re.fullmatch(r"(?:U|USER[_:\- ]*)?\d+", text, re.I):
+                add(text)
+
+    walk(raw)
+    return candidates
+
+
+def _resolve_local_driver(db, webhook_base: str, item: dict, mapping: dict, schema: dict):
+    """Разрешает «Водителя» Bitrix в конкретную учётную запись приложения.
+
+    Приоритет: точное ФИО -> ФИО из user.get -> уникальное совпадение по фамилии.
+    Никакого назначения случайного водителя при неоднозначности.
+    """
+    code = _field_code(mapping, "driver_name")
+    if not code or code not in item:
+        return None, ""
+    raw = item.get(code)
+    info = schema.get(code, {}) if isinstance(schema, dict) else {}
+    candidates = _driver_text_candidates(webhook_base, raw, info)
+    for candidate in candidates:
+        driver = _find_driver_by_surname(db, candidate)
+        if driver:
+            return driver, candidate
+    display = _driver_display_value(webhook_base, item, mapping, schema)
+    return None, display or (candidates[0] if candidates else str(_scalar(raw) or "").strip())
 
 
 def _company_id_from_field(raw, info: dict):
@@ -905,23 +1061,39 @@ def _find_driver_by_surname(db, display_name: str):
         return None
     drivers = db.query(models.User).filter(models.User.role == models.UserRole.DRIVER).all()
     normalized = _normalize(text)
+    if not normalized:
+        return None
+
+    # 1. Полное ФИО — самый надёжный вариант.
     exact = [d for d in drivers if _normalize(d.full_name) == normalized]
     if len(exact) == 1:
         return exact[0]
-    tokens = [token for token in normalized.split() if len(token) > 1]
-    if not tokens:
+
+    # Иногда в Bitrix в поле возвращается логин сотрудника вместо ФИО.
+    login_exact = [d for d in drivers if _normalize(getattr(d, "login", "")) == normalized]
+    if len(login_exact) == 1:
+        return login_exact[0]
+
+    incoming_tokens = [token for token in normalized.split() if len(token) > 1 and not token.isdigit()]
+    if not incoming_tokens:
         return None
-    # В локальной учётке ФИО может быть записано как «Фамилия Имя» или «Имя Фамилия».
-    # Назначаем автоматически только при единственном совпадении фамилии/крайнего токена.
+
+    # 2. Пользователь просит сопоставлять именно по фамилии. В локальной базе
+    # фамилия обычно стоит первой, но поддерживаем и запись «Имя Фамилия».
+    # Совпадение принимаем только если оно указывает ровно на одного водителя.
     candidates = []
     for driver in drivers:
-        local_tokens = _normalize(driver.full_name).split()
+        local_tokens = [t for t in _normalize(driver.full_name).split() if len(t) > 1]
         if not local_tokens:
             continue
-        edge_tokens = {local_tokens[0], local_tokens[-1]}
-        if any(token in edge_tokens for token in tokens):
+        surname_tokens = {local_tokens[0], local_tokens[-1]}
+        if surname_tokens.intersection(incoming_tokens):
             candidates.append(driver)
-    return candidates[0] if len(candidates) == 1 else None
+    unique = []
+    for driver in candidates:
+        if driver.id not in {row.id for row in unique}:
+            unique.append(driver)
+    return unique[0] if len(unique) == 1 else None
 
 
 def _normalize_plate(value: str) -> str:
@@ -987,6 +1159,10 @@ def _bitrix_user_id_by_name(webhook_base: str, full_name: str):
     for params in attempts:
         response = _http_post(webhook_base, "user.get", params)
         if "error" in response:
+            error_code = str(response.get("error") or "").strip().lower()
+            description = str(response.get("error_description") or "").strip().lower()
+            if "scope" in error_code or "scope" in description:
+                print("BITRIX_DRIVER_USER_SCOPE_MISSING", "outbound", flush=True)
             continue
         rows = response.get("result", [])
         if isinstance(rows, dict):
@@ -1602,7 +1778,7 @@ def sync_customer_from_requisite_event(db, requisite_id: int, settings=None) -> 
     return sync_customer_from_bitrix_event(db, settings=settings, company_id=company_id)
 
 def _log_important_field_map(schema: dict, mapping: dict, entity_type_id, item_id=None):
-    important = ("customer_name", "planned_at", "load_address", "driver_name", "tariff_name")
+    important = ("customer_name", "planned_at", "load_address", "driver_name", "vehicle_name", "tariff_name")
     parts = []
     for logical in important:
         code = mapping.get(logical)
@@ -2035,10 +2211,10 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     trip.bitrix_element_id = int(item_id)
     trip.bitrix_entity_type_id = int(entity_type_id)
 
-    driver_text = _driver_display_value(settings.webhook_url, item, mapping, schema)
-    driver = _find_driver_by_surname(db, driver_text)
+    driver, driver_text = _resolve_local_driver(db, settings.webhook_url, item, mapping, schema)
     if driver:
         trip.driver_id = driver.id
+        print("BITRIX_INBOUND_DRIVER_MATCHED", entity_type_id, item_id, driver.id, _normalize(driver.full_name), flush=True)
     elif driver_text:
         print("BITRIX_INBOUND_DRIVER_NOT_MATCHED", entity_type_id, item_id, _normalize(driver_text), flush=True)
 
