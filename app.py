@@ -2617,7 +2617,7 @@ def save_integrations(provider: str = Form("bitrix24"), webhook_url: str = Form(
 def bitrix_test(request: Request, current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
     row = db.query(models.IntegrationSetting).filter(models.IntegrationSetting.provider == "bitrix24").first()
-    info = {"configured": bool(row and row.webhook_url), "processes": [], "error": None}
+    info = {"configured": bool(row and row.webhook_url), "processes": [], "error": None, "user_access": None}
     if row and row.webhook_url:
         try:
             types = bitrix.find_smart_process_ids(row.webhook_url)
@@ -2625,6 +2625,7 @@ def bitrix_test(request: Request, current_user: models.User = Depends(require_ro
                 info["error"] = "Ошибка подключения к Bitrix24"
             else:
                 info["processes"] = [{"id": k, "title": v} for k, v in types.items()]
+            info["user_access"] = bitrix.check_user_directory_access(row.webhook_url)
         except Exception:
             info["error"] = "Ошибка подключения к Bitrix24"
     return render_template("bitrix_test.html", {"request": request, "user": current_user, "menu": menu, "info": info, "app_name": "ГРАУНД | Рейсы"})
