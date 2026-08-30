@@ -149,6 +149,10 @@ def _initialize_database():
                 if column_name not in polygon_cols:
                     conn.execute(text(f"ALTER TABLE polygons ADD COLUMN {column_name} {column_type}"))
                     print(f"BOOT migrated polygons: added {column_name}", flush=True)
+            report_cols = [c["name"] for c in insp.get_columns("driver_day_reports")]
+            if "fuel_price" not in report_cols:
+                conn.execute(text("ALTER TABLE driver_day_reports ADD COLUMN fuel_price FLOAT DEFAULT 0"))
+                print("BOOT migrated driver_day_reports: added fuel_price", flush=True)
             customer_cols = [c["name"] for c in insp.get_columns("customers")]
             for column_name, column_type in {"inn": "VARCHAR(12)", "bitrix_company_id": "INTEGER", "bitrix_contact_id": "INTEGER"}.items():
                 if column_name not in customer_cols:
@@ -1635,7 +1639,7 @@ def driver_day_report_edit(
 @app.post("/driver/day-report")
 def save_driver_day_report(
     report_date: str = Form(...), vehicle_id: str = Form(...), total_km: str = Form("0"),
-    odometer: str = Form("0"), fuel_liters: str = Form("0"), comment: str = Form(""),
+    odometer: str = Form("0"), fuel_liters: str = Form("0"), fuel_price: str = Form("0"), comment: str = Form(""),
     current_user: models.User = Depends(require_role(UserRole.DRIVER)), db: Session = Depends(get_db),
 ):
     try:
@@ -1643,9 +1647,10 @@ def save_driver_day_report(
         total_km_value = _finite_float(total_km, "Общий километраж")
         odometer_value = _finite_float(odometer, "Показания спидометра")
         fuel_value = _finite_float(fuel_liters, "Топливо")
+        fuel_price_value = _finite_float(fuel_price, "Цена за литр топлива")
     except ValueError:
         raise HTTPException(400, "Проверьте дату и числовые поля")
-    if min(total_km_value, odometer_value, fuel_value) < 0:
+    if min(total_km_value, odometer_value, fuel_value, fuel_price_value) < 0:
         raise HTTPException(400, "Показатели отчёта дня не могут быть отрицательными")
     vehicle_value = _form_fk(db, models.Vehicle, vehicle_id, "Автомобиль", required=True)
     report = db.query(models.DriverDayReport).filter(
@@ -1667,8 +1672,21 @@ def save_driver_day_report(
     report.total_km = total_km_value
     report.odometer = odometer_value
     report.fuel_liters = fuel_value
+    report.fuel_price = fuel_price_value
     report.comment = comment.strip()
     _commit_or_conflict(db, "Отчёт за эту дату уже существует")
+
+    # Показания спидометра и топливо относятся к отчёту дня, но Bitrix хранит
+    # их в карточках рейсов. После сохранения отчёта обновляем все рейсы этого
+    # водителя за выбранную дату. Существующие рейсы/данные не удаляются.
+    linked_trips = db.query(models.TripRequest).filter(
+        models.TripRequest.driver_id == current_user.id,
+        models.TripRequest.planned_date == report_date_value,
+    ).all()
+    for trip in linked_trips:
+        _sync_trip_outbound(trip, db)
+    if linked_trips:
+        db.commit()
     return RedirectResponse("/driver/day-report", status_code=302)
 
 
