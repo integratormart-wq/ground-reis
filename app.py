@@ -2098,7 +2098,7 @@ def export_polygon(polygon_id: str, driver_id: Optional[str] = None, date_from: 
     out = io.StringIO(); writer = csv.writer(out)
     writer.writerow(["Полигон", "Номер", "Дата", "Статус", "Водитель", "Автомобиль", "Тип груза", "Тариф полигона", "Объём, м³", "Тонны", "Затраты полигона"])
     for r in rows:
-        writer.writerow(_export_row([polygon.name, r.number, r.planned_date, r.status.value, r.driver.full_name if r.driver else "", r.vehicle.name if r.vehicle else "", r.cargo_type.name if r.cargo_type else "", _polygon_tariff_label(r), r.actual_volume if r.actual_volume is not None else r.volume or 0, r.actual_tonnage if r.actual_tonnage is not None else r.tonnage or 0, _polygon_trip_cost(r)]))
+        writer.writerow(_export_row([polygon.name, r.number, r.planned_date, r.status.value, r.driver.full_name if r.driver else "", r.vehicle.plate if r.vehicle else "", r.cargo_type.name if r.cargo_type else "", _polygon_tariff_label(r), r.actual_volume if r.actual_volume is not None else r.volume or 0, r.actual_tonnage if r.actual_tonnage is not None else r.tonnage or 0, _polygon_trip_cost(r)]))
     return Response(content="\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f"attachment; filename=polygon-{polygon.id}.csv"})
 
 @app.get("/export/polygons.csv")
@@ -2159,15 +2159,25 @@ def add_route(name: str = Form(...), load_address: str = Form(""), unload_addres
 
 
 @app.post("/settings/vehicles")
-def add_vehicle(name: str = Form(...), plate: str = Form(...), type_id: int = Form(...), capacity: Optional[str] = Form(None), current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
-    clean_name, clean_plate = name.strip(), plate.strip().upper()
-    if db.query(models.Vehicle).filter((models.Vehicle.name == clean_name) | (models.Vehicle.plate == clean_plate)).first():
+def add_vehicle(plate: str = Form(...), type_id: int = Form(...), capacity: Optional[str] = Form(None), current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
+    clean_plate = plate.strip().upper()
+    if not clean_plate:
+        raise HTTPException(400, "Укажите госномер")
+    if db.query(models.Vehicle).filter(models.Vehicle.plate == clean_plate).first():
         return RedirectResponse("/settings?error=vehicle_exists", status_code=302)
     type_value = _form_fk(db, models.VehicleType, type_id, "Тип автомобиля", required=True)
     capacity_value = _finite_float(capacity, "Вместимость", nullable=True)
     if capacity_value is not None and capacity_value < 0:
         raise HTTPException(400, "Вместимость не может быть отрицательной")
-    db.add(models.Vehicle(name=clean_name, plate=clean_plate, type_id=type_value, capacity=capacity_value, is_active=True))
+    # Поле name остаётся только как внутреннее legacy-поле БД, чтобы не делать
+    # рискованную миграцию Neon. В интерфейсе автомобиль идентифицируется госномером.
+    base_name = f"AUTO:{clean_plate}"
+    internal_name = base_name
+    suffix = 2
+    while db.query(models.Vehicle).filter(models.Vehicle.name == internal_name).first():
+        internal_name = f"{base_name}:{suffix}"
+        suffix += 1
+    db.add(models.Vehicle(name=internal_name, plate=clean_plate, type_id=type_value, capacity=capacity_value, is_active=True))
     _commit_or_conflict(db)
     return RedirectResponse("/settings#vehicles", status_code=302)
 
@@ -2424,15 +2434,15 @@ def edit_setting_record(
         row.customer_id = _form_fk(db, models.Customer, customer_id, "Заказчик")
         row.load_address, row.unload_address, row.comment = load_address.strip(), unload_address.strip(), comment.strip()
     elif section == "vehicles":
-        clean_name, clean_plate = (name or "").strip(), (plate or "").strip().upper()
-        if not clean_name or not clean_plate:
-            raise HTTPException(400, "Заполните название и госномер")
+        clean_plate = (plate or "").strip().upper()
+        if not clean_plate:
+            raise HTTPException(400, "Укажите госномер")
         duplicate = db.query(models.Vehicle).filter(
             models.Vehicle.id != record_id,
-            (models.Vehicle.name == clean_name) | (models.Vehicle.plate == clean_plate),
+            models.Vehicle.plate == clean_plate,
         ).first()
         if duplicate:
-            raise HTTPException(400, "Автомобиль с таким названием или госномером уже существует")
+            raise HTTPException(400, "Автомобиль с таким госномером уже существует")
         try:
             capacity_value = _finite_float(capacity, "Вместимость", nullable=True)
         except ValueError:
@@ -2446,7 +2456,9 @@ def edit_setting_record(
         )
         if row.type_id != new_type_id and vehicle_in_history:
             raise HTTPException(409, "Нельзя менять тип автомобиля, используемого в заявках или архиве")
-        row.name, row.plate = clean_name, clean_plate
+        # Legacy name не показываем и не меняем: это сохраняет старые записи
+        # без миграции и без риска для уже связанных рейсов.
+        row.plate = clean_plate
         row.type_id = new_type_id
         row.capacity, row.is_active = capacity_value, is_active is not None
     elif section == "customers":
@@ -3031,7 +3043,7 @@ def export_csv(status_f: Optional[str] = None, kind: Optional[str] = None, drive
     out = io.StringIO(); writer = csv.writer(out)
     writer.writerow(["Номер", "Дата", "Статус", "Водитель", "Автомобиль", "Сумма водителю"])
     for r in rows:
-        writer.writerow(_export_row([r.number, r.planned_date, r.status.value, r.driver.full_name if r.driver else "", r.vehicle.name if r.vehicle else "", r.sum_driver or 0]))
+        writer.writerow(_export_row([r.number, r.planned_date, r.status.value, r.driver.full_name if r.driver else "", r.vehicle.plate if r.vehicle else "", r.sum_driver or 0]))
     return Response(content="\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=requests.csv"})
 
 @app.get("/export/salary.xlsx")
