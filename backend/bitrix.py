@@ -169,7 +169,7 @@ FIELD_TITLES = {
     "attachments": ("файлы рейса", "фото и файлы", "файлы водителя", "вложения рейса", "файлы"),
     "sum_trip": ("сумма рейса", "стоимость рейса"),
     "sum_driver": ("сумма водителю", "зарплата водителя", "начисление водителю"),
-    "polygon_cost": ("затраты на полигон", "стоимость полигона", "расходы на полигон"),
+    "polygon_cost": ("затраты полигона", "затраты на полигон", "стоимость полигона", "расходы полигона", "расходы на полигон"),
     "odometer": ("показания спидометра", "спидометр", "одометр"),
     "fuel_liters": ("залито топлива", "топливо литры", "топливо, л", "литры топлива"),
     "fuel_price": ("цена за литр топлива", "цена топлива за литр", "стоимость литра топлива", "цена за литр"),
@@ -451,6 +451,85 @@ def resolve_field_map(schema: dict) -> dict:
     return resolved
 
 
+def _raw_value_present(value) -> bool:
+    """True, если поле Bitrix действительно содержит значение. Ноль считаем значением."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set)):
+        return any(_raw_value_present(item) for item in value)
+    if isinstance(value, dict):
+        if not value:
+            return False
+        # Bitrix часто заворачивает значение в value/VALUE/id/ID.
+        preferred = [value.get(key) for key in ("value", "VALUE", "id", "ID", "title", "TITLE", "name", "NAME") if key in value]
+        if preferred:
+            return any(_raw_value_present(item) for item in preferred)
+        return any(_raw_value_present(item) for item in value.values())
+    return True
+
+
+def _logical_candidate_codes(schema: dict, logical: str) -> list[str]:
+    """Все подходящие поля Bitrix для логического поля, от самого точного к legacy.
+
+    Это важно после переименований: в смарт-процессе могут одновременно остаться
+    два пользовательских поля с одинаковой подписью, одно пустое, второе рабочее.
+    """
+    schema = schema or {}
+    aliases = FIELD_TITLES.get(logical, ())
+    ranked = []
+    for code, info in schema.items():
+        if str(code).startswith("_"):
+            continue
+        if logical == "customer_name" and code in {"companyId", "contactId", "contactIds"}:
+            continue
+        score = _field_alias_score(_field_label(info, code), aliases)
+        if score:
+            ranked.append((score, str(code)))
+    ranked.sort(key=lambda row: (-row[0], row[1]))
+    result = []
+    for _, code in ranked:
+        if code not in result:
+            result.append(code)
+    legacy = FIELD_MAP.get(logical)
+    if legacy and legacy in schema and legacy not in result:
+        result.append(legacy)
+    return result
+
+
+def resolve_field_map_for_item(schema: dict, item: dict) -> dict:
+    """Как resolve_field_map, но среди дублей выбирает поле, реально заполненное в карточке."""
+    resolved = resolve_field_map(schema)
+    item = item or {}
+    for logical in FIELD_TITLES:
+        codes = _logical_candidate_codes(schema, logical)
+        filled = [code for code in codes if code in item and _raw_value_present(item.get(code))]
+        if filled:
+            resolved[logical] = filled[0]
+    return resolved
+
+
+def _logical_raw_candidates(item: dict, logical: str, mapping: dict, schema: dict):
+    """Возвращает все реально заполненные кандидаты поля в карточке Bitrix."""
+    seen = set()
+    ordered = []
+    preferred = mapping.get(logical) if isinstance(mapping, dict) else None
+    if preferred:
+        ordered.append(preferred)
+    ordered.extend(_logical_candidate_codes(schema, logical))
+    legacy = FIELD_MAP.get(logical)
+    if legacy:
+        ordered.append(legacy)
+    for code in ordered:
+        if not code or code in seen or code not in item:
+            continue
+        seen.add(code)
+        raw = item.get(code)
+        if _raw_value_present(raw):
+            yield code, raw, (schema or {}).get(code, {})
+
+
 def _as_bitrix_value(value):
     if isinstance(value, datetime):
         return value.isoformat()
@@ -472,13 +551,39 @@ def _planned_at_value(req):
     except ValueError:
         return f"{req.planned_date.isoformat()}T{raw_time}"
 
-def _polygon_cost_value(req):
+def _polygon_cost_value(req, db=None):
+    """Стоимость полигона для Bitrix, даже если снимок тарифа ещё не зафиксирован.
+
+    Для новых рейсов из Bitrix snapshot появляется позднее, поэтому старый код
+    отправлял пустоту. Теперь берём точный тариф полигона по типу груза, а затем
+    безопасный legacy-тариф самого полигона.
+    """
     if getattr(req, "polygon_cost_manual", None) is not None:
         return float(req.polygon_cost_manual or 0)
     rate = getattr(req, "polygon_rate_snapshot", None)
+    unit = str(getattr(req, "polygon_unit_snapshot", "") or "").lower()
+    if rate is None and db is not None and getattr(req, "polygon_id", None):
+        polygon_tariff = None
+        if getattr(req, "cargo_type_id", None):
+            polygon_tariff = db.query(models.PolygonTariff).filter(
+                models.PolygonTariff.polygon_id == req.polygon_id,
+                models.PolygonTariff.cargo_type_id == req.cargo_type_id,
+            ).first()
+        if polygon_tariff:
+            rate = float(polygon_tariff.rate or 0)
+            unit = str(polygon_tariff.unit or "м³").lower()
+        else:
+            polygon = getattr(req, "polygon", None) or db.query(models.Polygon).filter(models.Polygon.id == req.polygon_id).first()
+            if polygon:
+                method = str(getattr(polygon, "calculation_method", "volume") or "volume").lower()
+                if method == "tonnes":
+                    rate = float(getattr(polygon, "tonnage_rate", 0) or 0)
+                    unit = "т"
+                elif method != "manual":
+                    rate = float(getattr(polygon, "volume_rate", 0) or 0)
+                    unit = "м³"
     if rate is None:
         return ""
-    unit = str(getattr(req, "polygon_unit_snapshot", "") or "").lower()
     if "т" in unit:
         quantity = req.actual_tonnage if req.actual_tonnage is not None else (req.tonnage or 0)
     else:
@@ -531,7 +636,7 @@ def _trip_values(req, db=None) -> dict:
         "polygon_navigator_url": req.polygon.navigator_url if req.polygon else "",
         "sum_trip": req.sum_trip if req.sum_trip is not None else "",
         "sum_driver": req.sum_driver if req.sum_driver is not None else "",
-        "polygon_cost": _polygon_cost_value(req),
+        "polygon_cost": _polygon_cost_value(req, db=db),
         "odometer": float(day_report.odometer or 0) if day_report else "",
         "fuel_liters": fuel_liters,
         "fuel_price": fuel_price,
@@ -649,7 +754,7 @@ def _extract_bitrix_user_id(raw):
         return None
     # В разных пользовательских полях встречаются 77, U77, USER_77,
     # user:77 и похожие представления одного и того же сотрудника.
-    match = re.fullmatch(r"(?:U|USER[_:\- ]*)?(\d+)", text, re.I)
+    match = re.fullmatch(r"(?:(?:U|USER|EMPLOYEE|STAFF|WORKER|СОТРУДНИК)[_:\- ]*)?(\d+)", text, re.I)
     if not match:
         return None
     try:
@@ -979,24 +1084,59 @@ def _driver_text_candidates(webhook_base: str, raw, info: dict) -> list[str]:
     return candidates
 
 
+def _driver_binding_candidates(webhook_base: str, raw) -> list[str]:
+    """ФИО из CRM-привязки, если поле «Водитель» связано с другим смарт-процессом."""
+    result = []
+    values = raw if isinstance(raw, list) else [raw]
+    aliases = tuple(_normalize(x) for x in (
+        "водитель", "фио", "фио водителя", "полное имя", "фамилия имя", "фамилия", "сотрудник",
+    ))
+    for value in values:
+        entity_type_id, linked_id = _crm_binding_parts(value)
+        if not entity_type_id or not linked_id:
+            continue
+        linked = fetch_item(webhook_base, entity_type_id, linked_id)
+        if "_error" in linked:
+            continue
+        title = str(linked.get("title") or linked.get("TITLE") or "").strip()
+        if title:
+            result.append(title)
+        linked_schema = get_element_fields(webhook_base, str(entity_type_id))
+        if "_error" in linked_schema:
+            continue
+        for code, info in linked_schema.items():
+            label = _normalize(_field_label(info, code))
+            if label not in aliases and not any(alias and alias in label for alias in aliases if len(alias) >= 4):
+                continue
+            display = str(_display_field_value(webhook_base, linked.get(code), info) or "").strip()
+            if display:
+                result.append(display)
+    unique = []
+    for value in result:
+        if value not in unique:
+            unique.append(value)
+    return unique
+
+
 def _resolve_local_driver(db, webhook_base: str, item: dict, mapping: dict, schema: dict):
     """Разрешает «Водителя» Bitrix в конкретную учётную запись приложения.
 
-    Приоритет: точное ФИО -> ФИО из user.get -> уникальное совпадение по фамилии.
-    Никакого назначения случайного водителя при неоднозначности.
+    Проверяем не только одно выбранное поле схемы, а все заполненные поля с
+    точным названием «Водитель». Это защищает от дублей после переименований.
     """
-    code = _field_code(mapping, "driver_name")
-    if not code or code not in item:
-        return None, ""
-    raw = item.get(code)
-    info = schema.get(code, {}) if isinstance(schema, dict) else {}
-    candidates = _driver_text_candidates(webhook_base, raw, info)
-    for candidate in candidates:
+    all_candidates = []
+    for code, raw, info in _logical_raw_candidates(item, "driver_name", mapping, schema):
+        for candidate in _driver_text_candidates(webhook_base, raw, info):
+            if candidate not in all_candidates:
+                all_candidates.append(candidate)
+        for candidate in _driver_binding_candidates(webhook_base, raw):
+            if candidate not in all_candidates:
+                all_candidates.append(candidate)
+    for candidate in all_candidates:
         driver = _find_driver_by_surname(db, candidate)
         if driver:
             return driver, candidate
-    display = _driver_display_value(webhook_base, item, mapping, schema)
-    return None, display or (candidates[0] if candidates else str(_scalar(raw) or "").strip())
+    return None, (all_candidates[0] if all_candidates else "")
 
 
 def _company_id_from_field(raw, info: dict):
@@ -1054,7 +1194,6 @@ def _find_tariff_by_bitrix_value(db, kind, value: str):
             return priced[0]
     return None
 
-
 def _find_driver_by_surname(db, display_name: str):
     text = str(display_name or "").strip()
     if not text:
@@ -1097,7 +1236,14 @@ def _find_driver_by_surname(db, display_name: str):
 
 
 def _normalize_plate(value: str) -> str:
-    return re.sub(r"[^A-Za-zА-Яа-я0-9]", "", str(value or "")).upper().replace("Ё", "Е")
+    # Российские номера часто вводят смесью латиницы/кириллицы. Для сравнения
+    # приводим визуально одинаковые допустимые буквы к одному латинскому виду.
+    text = re.sub(r"[^A-Za-zА-Яа-я0-9]", "", str(value or "")).upper().replace("Ё", "Е")
+    visual = str.maketrans({
+        "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H",
+        "О": "O", "Р": "P", "С": "C", "Т": "T", "У": "Y", "Х": "X",
+    })
+    return text.translate(visual)
 
 
 def _find_vehicle_by_bitrix_value(db, display_value: str):
@@ -1778,7 +1924,7 @@ def sync_customer_from_requisite_event(db, requisite_id: int, settings=None) -> 
     return sync_customer_from_bitrix_event(db, settings=settings, company_id=company_id)
 
 def _log_important_field_map(schema: dict, mapping: dict, entity_type_id, item_id=None):
-    important = ("customer_name", "planned_at", "load_address", "driver_name", "vehicle_name", "tariff_name")
+    important = ("customer_name", "planned_at", "load_address", "driver_name", "vehicle_name", "tariff_name", "polygon_cost")
     parts = []
     for logical in important:
         code = mapping.get(logical)
@@ -2064,7 +2210,7 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     if "_error" in item:
         return {"error": item["_error"]}
     schema = get_element_fields(settings.webhook_url, str(entity_type_id))
-    mapping = resolve_field_map(schema) if "_error" not in schema else FIELD_MAP
+    mapping = resolve_field_map_for_item(schema, item) if "_error" not in schema else FIELD_MAP
     if "_error" not in schema:
         _log_important_field_map(schema, mapping, entity_type_id, item_id)
 
@@ -2218,13 +2364,22 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     elif driver_text:
         print("BITRIX_INBOUND_DRIVER_NOT_MATCHED", entity_type_id, item_id, _normalize(driver_text), flush=True)
 
-    vehicle_text = str(_read_display_logical(item, "vehicle_name", mapping, schema, settings.webhook_url) or "").strip()
-    if vehicle_text:
-        vehicle = _find_vehicle_by_bitrix_value(db, vehicle_text)
+    vehicle = None
+    vehicle_text = ""
+    for _, raw_vehicle, vehicle_info in _logical_raw_candidates(item, "vehicle_name", mapping, schema):
+        candidate_text = str(_display_field_value(settings.webhook_url, raw_vehicle, vehicle_info) or "").strip()
+        if not candidate_text:
+            continue
+        if not vehicle_text:
+            vehicle_text = candidate_text
+        vehicle = _find_vehicle_by_bitrix_value(db, candidate_text)
         if vehicle:
-            trip.vehicle_id = vehicle.id
-        else:
-            print("BITRIX_INBOUND_VEHICLE_NOT_MATCHED", entity_type_id, item_id, _normalize_plate(vehicle_text), flush=True)
+            break
+    if vehicle:
+        trip.vehicle_id = vehicle.id
+        print("BITRIX_INBOUND_VEHICLE_MATCHED", entity_type_id, item_id, vehicle.id, _normalize_plate(vehicle.plate), flush=True)
+    elif vehicle_text:
+        print("BITRIX_INBOUND_VEHICLE_NOT_MATCHED", entity_type_id, item_id, _normalize_plate(vehicle_text), flush=True)
     polygon_name = str(_read_display_logical(item, "polygon_name", mapping, schema, settings.webhook_url) or "").strip()
     if polygon_name:
         polygon = _find_by_name(db, models.Polygon, models.Polygon.name, polygon_name)
