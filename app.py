@@ -124,6 +124,8 @@ def _initialize_database():
                 "polygon_cost_manual": "FLOAT",
                 "polygon_rate_snapshot": "FLOAT",
                 "polygon_unit_snapshot": "VARCHAR(10)",
+                # Только новая nullable-колонка. Существующие рейсы не меняются.
+                "base_rate": "VARCHAR(255)",
             }
             for column_name, column_type in trip_column_migrations.items():
                 if column_name not in cols:
@@ -748,7 +750,9 @@ def create_request(
         clean_number = f"{prefix}-{next_num}"
     if db.query(models.TripRequest).filter(models.TripRequest.number == clean_number).first():
         raise HTTPException(409, "Заявка с таким номером уже существует")
-    tariff_value = _form_fk(db, models.Tariff, tariff_id, "Тариф")
+    tariff_value = _form_fk(db, models.Tariff, tariff_id, "Базовая ставка" if kind_value == TripType.SAMOSVAL else "Тариф")
+    if kind_value == TripType.SAMOSVAL and not tariff_value:
+        raise HTTPException(400, "Выберите базовую ставку для самосвала")
     if tariff_value:
         selected = db.query(models.Tariff).filter(models.Tariff.id == tariff_value).first()
         if not _tariff_matches(selected, kind_value, vehicle, planned_value, km_value, volume_value):
@@ -763,6 +767,7 @@ def create_request(
         trips_count=trips_value, cargo_type_id=cargo_value, customer_id=customer_value,
         polygon_id=polygon_value, kind=kind_value, status=RequestStatus.ASSIGNED,
         comment=comment.strip(), tariff_id=tariff.id,
+        base_rate=tariff.title if kind_value == TripType.SAMOSVAL else None,
         site_contact_name=site_contact_name.strip(), site_contact_phone=site_contact_phone.strip(),
         site_contact_comment=site_contact_comment.strip(),
         sum_driver=_tariff_amount(tariff, km_value, volume_value, trips_value),
@@ -930,7 +935,7 @@ def _salary_sensitive_values(trip):
         trip.actual_km, trip.actual_volume, trip.actual_tonnage,
         trip.is_empty_run, trip.empty_run_comment,
         trip.has_downtime, trip.downtime_minutes, trip.downtime_comment,
-        trip.polygon_cost_manual, trip.sum_trip, trip.sum_driver, trip.tariff_id,
+        trip.polygon_cost_manual, trip.sum_trip, trip.sum_driver, trip.tariff_id, trip.base_rate,
         trip.comment, trip.logist_comment,
         trip.site_contact_name, trip.site_contact_phone, trip.site_contact_comment,
         trip.polygon_id, trip.waste_bin_count,
@@ -1106,6 +1111,15 @@ def _sync_linked_reference_trips(section, row, db):
         condition, models.TripRequest.bitrix_element_id.isnot(None),
     ).all()
     for trip in trips:
+        if section == "tariffs" and trip.kind == TripType.SAMOSVAL and row.comment == "samosval_base_rate":
+            # Цена в матрице самосвалов — источник зарплаты. Исторический рейс,
+            # уже включённый в расчёт зарплаты, не пересчитываем.
+            locked = db.query(models.SalaryCalcItem.id).filter(models.SalaryCalcItem.trip_request_id == trip.id).first()
+            if not locked:
+                trip.base_rate = row.title
+                trip.sum_driver = _tariff_amount(row, trip.km or 0, trip.volume or 0, trip.trips_count or 1)
+                trip.sum_trip = trip.sum_driver
+                db.add(trip)
         _sync_trip_outbound(trip, db)
     if trips:
         db.commit()
@@ -1247,7 +1261,7 @@ def edit_request(
     old_snapshot = json.dumps({
         "number": req.number, "status": req.status.value, "planned_date": str(req.planned_date), "planned_time": req.planned_time,
         "kind": req.kind.value, "driver_id": req.driver_id, "vehicle_id": req.vehicle_id, "customer_id": req.customer_id,
-        "cargo_type_id": req.cargo_type_id, "polygon_id": req.polygon_id, "tariff_id": req.tariff_id,
+        "cargo_type_id": req.cargo_type_id, "polygon_id": req.polygon_id, "tariff_id": req.tariff_id, "base_rate": req.base_rate,
         "load_address": req.load_address, "unload_address": req.unload_address, "route_name": req.route_name,
         "km": req.km, "volume": req.volume, "trips_count": req.trips_count, "comment": req.comment,
         "sum_trip": req.sum_trip, "sum_driver": req.sum_driver,
@@ -1262,6 +1276,7 @@ def edit_request(
     )
     cargo_value = _form_fk(db, models.CargoType, cargo_type_id, "Тип груза")
     polygon_value = _form_fk(db, models.Polygon, polygon_id, "Полигон")
+    # Название подписи зависит от направления; окончательная проверка — после разбора kind.
     tariff_value = _form_fk(db, models.Tariff, tariff_id, "Тариф")
     try:
         kind_value = TripType(kind)
@@ -1285,8 +1300,12 @@ def edit_request(
     if not vehicle.is_active or not vehicle_type or vehicle_type.kind != kind_value:
         raise HTTPException(400, "Автомобиль неактивен или не соответствует направлению")
     final_statuses = {RequestStatus.DRIVER_COMPLETED, RequestStatus.LOGIST_CONFIRMED, RequestStatus.CANCELLED}
+    # Для самосвала базовая ставка выбирается менеджером вместе с ПЛАНОВЫМ объёмом.
+    # Фактический объём водителя не должен самовольно переключать зарплатный тариф.
     calculation_km = req.actual_km if req.status in final_statuses and req.actual_km is not None else km_value
-    calculation_volume = req.actual_volume if req.status in final_statuses and req.actual_volume is not None else volume_value
+    calculation_volume = volume_value if kind_value == TripType.SAMOSVAL else (req.actual_volume if req.status in final_statuses and req.actual_volume is not None else volume_value)
+    if kind_value == TripType.SAMOSVAL and not tariff_value:
+        raise HTTPException(400, "Выберите базовую ставку для самосвала")
     if tariff_value:
         selected = db.query(models.Tariff).filter(models.Tariff.id == tariff_value).first()
         if not _tariff_matches(selected, kind_value, vehicle, planned_value, calculation_km, calculation_volume):
@@ -1309,6 +1328,7 @@ def edit_request(
     req.site_contact_phone = site_contact_phone.strip()
     req.site_contact_comment = site_contact_comment.strip()
     req.tariff_id = tariff.id
+    req.base_rate = tariff.title if kind_value == TripType.SAMOSVAL else None
     if not salary_items:
         req.sum_driver = new_amount
         req.sum_trip = new_amount
@@ -1318,7 +1338,7 @@ def edit_request(
     new_snapshot = json.dumps({
         "number": req.number, "status": req.status.value, "planned_date": str(req.planned_date), "planned_time": req.planned_time,
         "kind": req.kind.value, "driver_id": req.driver_id, "vehicle_id": req.vehicle_id, "customer_id": req.customer_id,
-        "cargo_type_id": req.cargo_type_id, "polygon_id": req.polygon_id, "tariff_id": req.tariff_id,
+        "cargo_type_id": req.cargo_type_id, "polygon_id": req.polygon_id, "tariff_id": req.tariff_id, "base_rate": req.base_rate,
         "load_address": req.load_address, "unload_address": req.unload_address, "route_name": req.route_name,
         "km": req.km, "volume": req.volume, "trips_count": req.trips_count, "comment": req.comment,
         "sum_trip": req.sum_trip, "sum_driver": req.sum_driver,
@@ -1590,7 +1610,12 @@ def complete_trip(
     vehicle_type = db.query(models.VehicleType).filter(models.VehicleType.id == vehicle.type_id).first() if vehicle else None
     if not vehicle or not vehicle.is_active or not vehicle_type or vehicle_type.kind != req.kind:
         raise HTTPException(409, "Назначенный автомобиль неактивен или не соответствует направлению")
-    tariff = _select_tariff(db, req.kind, vehicle, req.planned_date, km_value, volume_value, req.tariff_id)
+    if req.kind == TripType.SAMOSVAL:
+        # Базовая ставка и объём уже выбраны логистом/менеджером. Факт водителя
+        # не меняет тарифную комбинацию задним числом.
+        tariff = _select_tariff(db, req.kind, vehicle, req.planned_date, req.km or 0, req.volume or 0, req.tariff_id)
+    else:
+        tariff = _select_tariff(db, req.kind, vehicle, req.planned_date, km_value, volume_value, req.tariff_id)
     if not tariff:
         raise HTTPException(400, "Не найден подходящий активный тариф")
     old = req.status
@@ -1604,7 +1629,11 @@ def complete_trip(
     if clean_comment:
         req.comment = (req.comment or "") + (" | " if req.comment else "") + clean_comment
     req.tariff_id = tariff.id
-    req.sum_driver = _tariff_amount(tariff, km_value, volume_value, req.trips_count or 1)
+    if req.kind == TripType.SAMOSVAL:
+        req.base_rate = tariff.title
+        req.sum_driver = _tariff_amount(tariff, req.km or 0, req.volume or 0, req.trips_count or 1)
+    else:
+        req.sum_driver = _tariff_amount(tariff, km_value, volume_value, req.trips_count or 1)
     req.sum_trip = req.sum_driver
     db.add(models.StatusHistory(trip_request_id=req.id, user_id=current_user.id, old_status=old.value, new_status=RequestStatus.DRIVER_COMPLETED.value))
     _commit_or_conflict(db)
@@ -2304,48 +2333,57 @@ def add_pukhtovoz_tariff_grid(
 @app.post("/settings/tariffs/samosval-grid")
 def add_samosval_tariff_grid(
     samosval_title: list[str] = Form(...),
-    samosval_km: list[str] = Form(...),
     samosval_volume: list[str] = Form(...),
     samosval_price: list[str] = Form(...),
     is_active: Optional[str] = Form(None),
     current_user: models.User = Depends(require_role(UserRole.ADMIN)),
     db: Session = Depends(get_db),
 ):
-    lengths = {len(samosval_title), len(samosval_km), len(samosval_volume), len(samosval_price)}
+    # Самосвалы работают по отдельной матрице: «Базовая ставка» + «Объём».
+    # Километры менеджер в приложении не вводит — диапазон уже зашит в названии
+    # базовой ставки, например «до 15 км» или «16–35 км».
+    lengths = {len(samosval_title), len(samosval_volume), len(samosval_price)}
     if not samosval_title or len(lengths) != 1:
-        raise HTTPException(400, "Заполните название, объём, километры и стоимость в каждой строке")
+        raise HTTPException(400, "Заполните базовую ставку, объём и стоимость в каждой строке")
     titles = [value.strip() for value in samosval_title]
     if any(not value for value in titles):
-        raise HTTPException(400, "Укажите название каждого тарифа")
+        raise HTTPException(400, "Укажите базовую ставку в каждой строке")
     try:
         rows = [
-            (_finite_float(km, "Километры"), _finite_float(volume, "Объём"), _finite_float(price, "Стоимость рейса"))
-            for km, volume, price in zip(samosval_km, samosval_volume, samosval_price)
+            (_finite_float(volume, "Объём"), _finite_float(price, "Стоимость для водителя"))
+            for volume, price in zip(samosval_volume, samosval_price)
         ]
     except (ValueError, TypeError):
-        raise HTTPException(400, "Проверьте объём, километры и стоимость")
-    if any(km < 0 or volume < 0 or price < 0 for km, volume, price in rows):
-        raise HTTPException(400, "Значения тарифа не могут быть отрицательными")
-    if len({(km, volume) for km, volume, _ in rows}) != len(rows):
-        raise HTTPException(409, "Одинаковая комбинация километров и объёма указана дважды")
+        raise HTTPException(400, "Проверьте объём и стоимость")
+    if any(volume < 0 or price < 0 for volume, price in rows):
+        raise HTTPException(400, "Объём и стоимость не могут быть отрицательными")
+    normalized_pairs = [(bitrix._normalize(title), volume) for title, (volume, _) in zip(titles, rows)]
+    if len(set(normalized_pairs)) != len(normalized_pairs):
+        raise HTTPException(409, "Одинаковая базовая ставка и объём указаны дважды")
     vehicle_type = _first_vehicle_type(db, TripType.SAMOSVAL)
-    for km, volume, _ in rows:
-        duplicate = db.query(models.Tariff).filter(
-            models.Tariff.kind == TripType.SAMOSVAL,
-            models.Tariff.vehicle_type_id == vehicle_type.id,
-            models.Tariff.min_km == km, models.Tariff.max_km == km,
-            models.Tariff.min_volume == volume, models.Tariff.max_volume == volume,
-        ).first()
+    for title, (volume, _) in zip(titles, rows):
+        duplicate = next((
+            row for row in db.query(models.Tariff).filter(models.Tariff.kind == TripType.SAMOSVAL).all()
+            if bitrix._normalize(row.title) == bitrix._normalize(title)
+            and row.min_volume is not None and row.max_volume is not None
+            and abs(float(row.min_volume) - volume) < 0.000001
+            and abs(float(row.max_volume) - volume) < 0.000001
+            and row.max_km is None
+            and row.comment == "samosval_base_rate"
+        ), None)
         if duplicate:
-            raise HTTPException(409, f"Тариф для {km:g} км и {volume:g} м³ уже существует")
+            raise HTTPException(409, f"Ставка «{title}» для объёма {volume:g} м³ уже существует")
     active = is_active is not None
-    for title, (km, volume, price) in zip(titles, rows):
+    for title, (volume, price) in zip(titles, rows):
         db.add(models.Tariff(
             title=title, kind=TripType.SAMOSVAL, vehicle_type_id=vehicle_type.id,
+            # Стоимость задаётся для конкретного объёма и одной базовой ставки.
+            # Для зарплаты это фиксированная стоимость одного рейса; количество
+            # рейсов умножается стандартной формулой trip.
             formula="trip", trip_price=price, km_price=0, volume_price=0, fixed_sum=0,
-            min_km=km, max_km=km, min_volume=volume, max_volume=volume,
+            min_km=0, max_km=None, min_volume=volume, max_volume=volume,
             extra_fee=0, coefficient=1, date_from=None, date_to=None,
-            comment="", is_active=active,
+            comment="samosval_base_rate", is_active=active,
         ))
     _commit_or_conflict(db)
     return RedirectResponse("/settings#tariffs", status_code=302)
@@ -2537,25 +2575,30 @@ def edit_setting_record(
         if price_value < 0:
             raise HTTPException(400, "Стоимость рейса не может быть отрицательной")
         if row.kind == TripType.SAMOSVAL:
-            if exact_km is None or exact_volume is None:
-                raise HTTPException(400, "Укажите объём и километры")
+            if exact_volume is None:
+                raise HTTPException(400, "Укажите объём")
             try:
-                km_value = _finite_float(exact_km, "Километры")
                 volume_value = _finite_float(exact_volume, "Объём")
             except (ValueError, TypeError):
-                raise HTTPException(400, "Проверьте объём и километры")
-            if km_value < 0 or volume_value < 0:
-                raise HTTPException(400, "Объём и километры не могут быть отрицательными")
-            duplicate = db.query(models.Tariff).filter(
-                models.Tariff.id != row.id,
-                models.Tariff.kind == TripType.SAMOSVAL,
-                models.Tariff.min_km == km_value, models.Tariff.max_km == km_value,
-                models.Tariff.min_volume == volume_value, models.Tariff.max_volume == volume_value,
-            ).first()
+                raise HTTPException(400, "Проверьте объём")
+            if volume_value < 0:
+                raise HTTPException(400, "Объём не может быть отрицательным")
+            duplicate = next((
+                tariff for tariff in db.query(models.Tariff).filter(
+                    models.Tariff.id != row.id, models.Tariff.kind == TripType.SAMOSVAL,
+                ).all()
+                if bitrix._normalize(tariff.title) == bitrix._normalize(row.title)
+                and tariff.min_volume is not None and tariff.max_volume is not None
+                and abs(float(tariff.min_volume) - volume_value) < 0.000001
+                and abs(float(tariff.max_volume) - volume_value) < 0.000001
+                and tariff.max_km is None
+                and tariff.comment == "samosval_base_rate"
+            ), None)
             if duplicate:
-                raise HTTPException(409, f"Тариф для {km_value:g} км и {volume_value:g} м³ уже существует")
-            row.min_km = row.max_km = km_value
+                raise HTTPException(409, f"Ставка «{row.title}» для объёма {volume_value:g} м³ уже существует")
+            row.min_km, row.max_km = 0, None
             row.min_volume = row.max_volume = volume_value
+            row.comment = "samosval_base_rate"
         else:
             row.min_km, row.max_km = 0, None
             row.min_volume, row.max_volume = 0, None
@@ -2563,7 +2606,8 @@ def edit_setting_record(
         row.km_price = row.volume_price = row.fixed_sum = row.extra_fee = 0
         row.coefficient = 1
         row.date_from = row.date_to = None
-        row.comment = ""
+        if row.kind != TripType.SAMOSVAL:
+            row.comment = ""
         row.is_active = is_active is not None
     _add_audit(db, current_user.id, f"settings:{section}", row.id, old_value, _model_snapshot(row))
     _commit_or_conflict(db)
@@ -2617,7 +2661,7 @@ def save_integrations(provider: str = Form("bitrix24"), webhook_url: str = Form(
 def bitrix_test(request: Request, current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
     row = db.query(models.IntegrationSetting).filter(models.IntegrationSetting.provider == "bitrix24").first()
-    info = {"configured": bool(row and row.webhook_url), "processes": [], "error": None, "user_access": None}
+    info = {"configured": bool(row and row.webhook_url), "processes": [], "error": None, "user_access": None, "field_diagnostics": []}
     if row and row.webhook_url:
         try:
             types = bitrix.find_smart_process_ids(row.webhook_url)
@@ -2626,6 +2670,12 @@ def bitrix_test(request: Request, current_user: models.User = Depends(require_ro
             else:
                 info["processes"] = [{"id": k, "title": v} for k, v in types.items()]
             info["user_access"] = bitrix.check_user_directory_access(row.webhook_url)
+            for entity_id in (int(bitrix.PUKHTOVOZ_ENTITY_TYPE_ID), int(bitrix.SAMOSVAL_ENTITY_TYPE_ID)):
+                recent_ids = bitrix.list_recent_trip_ids(row.webhook_url, entity_id, limit=1)
+                if recent_ids:
+                    diag = bitrix.diagnose_trip_fields(row.webhook_url, entity_id, recent_ids[0])
+                    diag["entity_type_id"] = entity_id
+                    info["field_diagnostics"].append(diag)
         except Exception:
             info["error"] = "Ошибка подключения к Bitrix24"
     return render_template("bitrix_test.html", {"request": request, "user": current_user, "menu": menu, "info": info, "app_name": "ГРАУНД | Рейсы"})
@@ -2839,6 +2889,12 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
     elif trip.status != old_status:
         db.add(models.StatusHistory(trip_request_id=trip.id, old_status=old_status.value, new_status=trip.status.value))
     db.commit()
+    try:
+        # После изменения полигона/объёма в Bitrix рассчитанная приложением
+        # стоимость полигона должна сразу вернуться в поле «Затраты полигона».
+        bitrix.sync_polygon_cost_to_bitrix(trip, db, settings=settings)
+    except Exception as exc:
+        print("BITRIX_POLYGON_COST_EXCEPTION", type(exc).__name__, flush=True)
     safe_result = _safe_bitrix_result(result)
     BITRIX_LAST_EVENT["result"] = safe_result
     return JSONResponse(safe_result)
