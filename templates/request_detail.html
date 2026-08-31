@@ -49,7 +49,7 @@
       <div><b>Объём:</b> {{ req.volume }}</div>
       <div><b>Тоннаж:</b> {{ req.tonnage if req.tonnage is not none else '—' }}{% if req.tonnage is not none %} т{% endif %}</div>
       <div><b>Рейсов:</b> {{ req.trips_count }}</div>
-      <div><b>Тариф:</b> {{ req.tariff.title if req.tariff else '—' }}</div>
+      <div><b>{% if req.kind.value == 'самосвал' %}Базовая ставка{% else %}Тариф{% endif %}:</b> {% if req.kind.value == 'самосвал' %}{{ req.base_rate or (req.tariff.title if req.tariff else '—') }}{% else %}{{ req.tariff.title if req.tariff else '—' }}{% endif %}</div>
     </div>
   </section>
 

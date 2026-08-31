@@ -6,7 +6,7 @@
   <a href="#vehicle-types">Типы автомобилей</a>
   <a href="#routes">Объекты и маршруты</a>
   <a href="#tariffs">Тарифы пухтовозов</a>
-  <a href="#tariffs-samosval">Тарифы самосвалов</a>
+  <a href="#tariffs-samosval">Базовые ставки самосвалов</a>
   <a href="#vehicles">Автомобили</a>
   <a href="#customers">Заказчики</a>
   <a href="#cargo">Типы грузов</a>
@@ -42,19 +42,20 @@
 </form></div>
 {% endif %}
 
-<h3 id="tariffs-samosval" data-settings-section>Тарифы самосвалов</h3>
+<h3 id="tariffs-samosval" data-settings-section>Базовые ставки самосвалов</h3>
+<p class="muted">Для самосвалов зарплата водителя определяется комбинацией «Базовая ставка» + «Объём». Например: «до 15 км» + 20 м³. Старые тарифы самосвалов сохранены в базе для истории, но в новых рейсах не используются.</p>
 <div class="table-wrap"><table class="table">
-  <thead><tr><th>Название тарифа</th><th>Объём, м³</th><th>Километры</th><th>Стоимость рейса, ₽</th><th>Активен</th><th></th></tr></thead>
-  <tbody>{% for t in tariffs if t.kind.value == 'самосвал' %}<tr><td>{{ t.title }}</td><td>{{ t.min_volume or 0 }}</td><td>{{ t.min_km or 0 }}</td><td>{{ t.trip_price or 0 }}</td><td>{{ 'Да' if t.is_active else 'Нет' }}</td><td class="actions-cell"><a class="btn btn-ghost btn-sm" href="/settings/tariffs/{{ t.id }}/edit">Редактировать</a><form method="post" action="/settings/tariffs/{{ t.id }}/delete" onsubmit="return confirm('Удалить?')"><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>{% else %}<tr><td colspan="6">Тарифов самосвалов нет</td></tr>{% endfor %}</tbody>
+  <thead><tr><th>Базовая ставка</th><th>Объём, м³</th><th>Стоимость для водителя за рейс, ₽</th><th>Активна</th><th></th></tr></thead>
+  <tbody>{% for t in tariffs if t.kind.value == 'самосвал' and t.comment == 'samosval_base_rate' %}<tr><td>{{ t.title }}</td><td>{{ t.min_volume or 0 }}</td><td>{{ t.trip_price or 0 }}</td><td>{{ 'Да' if t.is_active else 'Нет' }}</td><td class="actions-cell"><a class="btn btn-ghost btn-sm" href="/settings/tariffs/{{ t.id }}/edit">Редактировать</a><form method="post" action="/settings/tariffs/{{ t.id }}/delete" onsubmit="return confirm('Удалить?')"><button class="btn btn-ghost btn-sm" type="submit">Удалить</button></form></td></tr>{% else %}<tr><td colspan="5">Базовые ставки самосвалов не настроены</td></tr>{% endfor %}</tbody>
 </table></div>
 {% if user.role in ['admin','logist'] %}
 <div class="form tariff-grid-form"><form id="samosval-tariff-form" method="post" action="/settings/tariffs/samosval-grid">
   <div id="samosval-tariff-rows" class="tariff-grid-rows">
-    <div class="tariff-grid-row tariff-grid-row--samosval"><label>Название тарифа<input name="samosval_title" required /></label><label>Объём, м³<input type="number" min="0" step="any" name="samosval_volume" required /></label><label>Километры<input type="number" min="0" step="any" name="samosval_km" required /></label><label>Стоимость рейса, ₽<input type="number" min="0" step="any" name="samosval_price" required /></label><button class="btn btn-ghost btn-sm tariff-row-remove" type="button">Убрать строку</button></div>
+    <div class="tariff-grid-row tariff-grid-row--samosval"><label>Базовая ставка<input name="samosval_title" placeholder="Например: до 15 км" required /></label><label>Объём, м³<input type="number" min="0" step="any" name="samosval_volume" required /></label><label>Стоимость для водителя за рейс, ₽<input type="number" min="0" step="any" name="samosval_price" required /></label><button class="btn btn-ghost btn-sm tariff-row-remove" type="button">Убрать строку</button></div>
   </div>
-  <template id="samosval-tariff-row-template"><div class="tariff-grid-row tariff-grid-row--samosval"><label>Название тарифа<input name="samosval_title" required /></label><label>Объём, м³<input type="number" min="0" step="any" name="samosval_volume" required /></label><label>Километры<input type="number" min="0" step="any" name="samosval_km" required /></label><label>Стоимость рейса, ₽<input type="number" min="0" step="any" name="samosval_price" required /></label><button class="btn btn-ghost btn-sm tariff-row-remove" type="button">Убрать строку</button></div></template>
+  <template id="samosval-tariff-row-template"><div class="tariff-grid-row tariff-grid-row--samosval"><label>Базовая ставка<input name="samosval_title" placeholder="Например: 16–35 км" required /></label><label>Объём, м³<input type="number" min="0" step="any" name="samosval_volume" required /></label><label>Стоимость для водителя за рейс, ₽<input type="number" min="0" step="any" name="samosval_price" required /></label><button class="btn btn-ghost btn-sm tariff-row-remove" type="button">Убрать строку</button></div></template>
   <label><input type="checkbox" name="is_active" checked /> Активны</label>
-  <div class="form-row tariff-grid-actions"><button id="add-samosval-tariff-row" class="btn btn-ghost" type="button">Добавить тариф</button><button class="btn btn-primary" type="submit">Сохранить тарифы</button></div>
+  <div class="form-row tariff-grid-actions"><button id="add-samosval-tariff-row" class="btn btn-ghost" type="button">Добавить ставку</button><button class="btn btn-primary" type="submit">Сохранить ставки</button></div>
 </form></div>
 {% endif %}
 

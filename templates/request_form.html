@@ -103,13 +103,14 @@
   </section>
 
   <section class="form-section">
-    <div class="form-section-head"><span class="form-section-index">05</span><h2>Оплата и тариф</h2></div>
+    <div class="form-section-head"><span class="form-section-index">05</span><h2>{% if kind == 'самосвал' %}Базовая ставка и оплата{% else %}Оплата и тариф{% endif %}</h2></div>
     <div class="form-grid">
-      <label>Тариф
+      <label>{% if kind == 'самосвал' %}Базовая ставка{% else %}Тариф{% endif %}
         <select name="tariff_id" id="tariff_id">
-          <option value="">— автоматически —</option>
-          {% for t in tariffs %}{% if t.kind.value == kind %}<option value="{{ t.id }}" {% if editing and editing.tariff_id == t.id %}selected{% endif %}>{{ t.title }}</option>{% endif %}{% endfor %}
+          <option value="">{% if kind == 'самосвал' %}— выберите базовую ставку —{% else %}— автоматически —{% endif %}</option>
+          {% for t in tariffs %}{% if t.kind.value == kind and (kind != 'самосвал' or t.max_km is none) %}<option value="{{ t.id }}" {% if editing and editing.tariff_id == t.id %}selected{% endif %}>{{ t.title }}</option>{% endif %}{% endfor %}
         </select>
+        {% if kind == 'самосвал' %}<small class="muted">Список ставок зависит от указанного объёма.</small>{% endif %}
       </label>
       <div class="payment-summary">
         <div><span>Сумма водителю</span><strong><span id="sum_driver">0</span> ₽</strong></div>
@@ -428,6 +429,7 @@ const tariffs = [
   'active': t.is_active, 'vehicle_type_id': t.vehicle_type_id,
   'min_km': t.min_km or 0, 'max_km': t.max_km,
   'min_volume': t.min_volume or 0, 'max_volume': t.max_volume,
+  'samosval_base': (t.kind.value == 'самосвал' and t.comment == 'samosval_base_rate'),
   'date_from': t.date_from.isoformat() if t.date_from else '', 'date_to': t.date_to.isoformat() if t.date_to else ''
 } | tojson }}{% if not loop.last %},{% endif %}
 {% endfor %}
@@ -448,21 +450,22 @@ function recalc(){
   const plannedDate = (dateEl.value || '').split('T')[0];
   const list = tariffs.filter(t => t.active && t.kind === kind
     && (t.kind === 'пухтовоз' || (
-      Number(t.min_km || 0) <= km && (t.max_km === null || km <= Number(t.max_km))
+      t.samosval_base
       && Number(t.min_volume || 0) <= vol && (t.max_volume === null || vol <= Number(t.max_volume))
     ))
     && (!t.date_from || plannedDate >= t.date_from) && (!t.date_to || plannedDate <= t.date_to)
-  ).sort((a, b) => {
-    if (kind !== 'самосвал') return Number(a.id) - Number(b.id);
-    const score = t => Number(Number(t.min_km || 0) > 0) + Number(t.max_km !== null)
-      + Number(Number(t.min_volume || 0) > 0) + Number(t.max_volume !== null);
-    return score(b) - score(a) || Number(a.id) - Number(b.id);
-  });
-  tariffEl.replaceChildren(new Option('— автоматически —', ''));
+  ).sort((a, b) => Number(a.id) - Number(b.id));
+  tariffEl.replaceChildren(new Option(kind === 'самосвал' ? '— выберите базовую ставку —' : '— автоматически —', ''));
   list.forEach(t => tariffEl.add(new Option(t.title, String(t.id))));
-  if (tariffManuallySelected && previousId && list.some(t => String(t.id) === String(previousId))) tariffEl.value = previousId;
-  else if (list[0]) tariffEl.value = String(list[0].id);
-  const chosen = list.find(t => String(t.id) === String(tariffEl.value)) || list[0] || {};
+  if (tariffManuallySelected && previousId && list.some(t => String(t.id) === String(previousId))) {
+    tariffEl.value = previousId;
+  } else if (kind !== 'самосвал' && list[0]) {
+    tariffEl.value = String(list[0].id);
+  } else {
+    tariffEl.value = '';
+    if (kind === 'самосвал') tariffManuallySelected = false;
+  }
+  const chosen = list.find(t => String(t.id) === String(tariffEl.value)) || {};
   const trips = parseFloat(document.querySelector('input[name=trips_count]').value || 1);
   const formula = chosen.formula || 'trip';
   let base = formula === 'km' ? (km || 0) * parseFloat(chosen.km_price || 0)
@@ -477,7 +480,10 @@ const autoRecalc = () => {
   recalc();
 };
 [kindEl, vehicleEl, dateEl].forEach(el => el.addEventListener('change', autoRecalc));
-[kmEl, volEl].forEach(el => el.addEventListener('input', autoRecalc));
+kmEl.addEventListener('input', () => {
+  if (kindEl.value === 'самосвал') recalc(); else autoRecalc();
+});
+volEl.addEventListener('input', autoRecalc);
 volEl.addEventListener('input', syncPolygonTariff);
 tariffEl.addEventListener('change', () => {
   tariffManuallySelected = Boolean(tariffEl.value);

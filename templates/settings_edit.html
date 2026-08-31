@@ -51,12 +51,11 @@
       <label class="wide">Виды отходов<textarea name="waste_types">{{ row.waste_types or '' }}</textarea></label>
       <label class="wide">Комментарий<textarea name="comment">{{ row.comment or '' }}</textarea></label>
       {% elif section == 'tariffs' %}
-      <label>Название тарифа<input name="title" value="{{ row.title }}" required /></label>
+      <label>{% if row.kind.value == 'самосвал' %}Базовая ставка{% else %}Название тарифа{% endif %}<input name="title" value="{{ row.title }}" required /></label>
       {% if row.kind.value == 'самосвал' %}
       <label>Объём, м³<input name="exact_volume" type="number" min="0" step="any" value="{{ row.min_volume or 0 }}" required /></label>
-      <label>Километры<input name="exact_km" type="number" min="0" step="any" value="{{ row.min_km or 0 }}" required /></label>
       {% endif %}
-      <label>Стоимость рейса, ₽<input name="trip_price" type="number" min="0" step="any" value="{{ row.trip_price or 0 }}" required /></label>
+      <label>{% if row.kind.value == 'самосвал' %}Стоимость для водителя за рейс, ₽{% else %}Стоимость рейса, ₽{% endif %}<input name="trip_price" type="number" min="0" step="any" value="{{ row.trip_price or 0 }}" required /></label>
       <label><input type="checkbox" name="is_active" {% if row.is_active %}checked{% endif %} /> Активен</label>
       {% endif %}
     </div>

@@ -49,6 +49,32 @@
   {% else %}
     <div class="card" style="padding:14px;color:#888">Смарт-процессы не найдены или нет прав.</div>
   {% endif %}
+
+  {% if info.field_diagnostics %}
+    <h3 style="margin-top:18px">Диагностика полей последнего рейса</h3>
+    <p class="hint">Здесь нет webhook и секретных ключей. Если водитель или госномер не подгрузятся, пришлите скрин именно этой таблицы.</p>
+    {% for d in info.field_diagnostics %}
+      <div class="card" style="padding:14px;margin-top:10px">
+        <b>Процесс {{ d.entity_type_id }}, элемент #{{ d.item_id }}</b>
+        <table class="table" style="margin-top:10px">
+          <thead><tr><th>Куда</th><th>Поле Bitrix</th><th>Тип</th><th>Что реально отдаёт Bitrix</th></tr></thead>
+          <tbody>
+          {% for logical, label in [('driver_name','Водитель'),('vehicle_name','Госномер'),('base_rate','Базовая ставка'),('volume','Объём'),('polygon_cost','Затраты полигона')] %}
+            {% set rows = d.fields.get(logical, []) %}
+            {% if rows %}
+              {% for f in rows %}
+                <tr><td>{{ label }}</td><td>{{ f.title }}<br><small>{{ f.code }}</small></td><td>{{ f.type }}</td><td>{{ f.value or '—' }}</td></tr>
+              {% endfor %}
+            {% else %}
+              <tr><td>{{ label }}</td><td colspan="3" style="color:#b00">Заполненное поле с таким названием в последнем рейсе не найдено</td></tr>
+            {% endif %}
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endfor %}
+  {% endif %}
+
 {% endif %}
 
 <p><a class="btn btn-ghost" href="/settings">Назад к настройкам</a></p>
