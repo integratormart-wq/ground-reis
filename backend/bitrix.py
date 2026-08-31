@@ -138,11 +138,11 @@ FIELD_MAP = {
 
 FIELD_TITLES = {
     "planned_at": ("подача машины", "дата и время", "дата рейса", "плановая дата и время", "дата/время рейса", "дата"),
-    "driver_name": ("водитель", "фио водителя", "водители"),
+    "driver_name": ("водитель", "фио водителя", "водители", "фио"),
     # В Bitrix поле теперь называется именно «Госномер». Не подхватываем
     # старые поля «Машина/Машины/Автомобиль», чтобы они больше не могли
     # перехватить синхронизацию.
-    "vehicle_name": ("госномер", "государственный номер"),
+    "vehicle_name": ("госномер", "гос номер", "государственный номер", "номер автомобиля", "номер машины", "регистрационный номер"),
     "load_address": ("адрес подачи", "адрес загрузки", "загрузка"),
     "unload_address": ("адрес выгрузки", "выгрузка"),
     "route_name": ("маршрут",),
@@ -160,9 +160,9 @@ FIELD_TITLES = {
     "actual_volume": ("фактический объем", "факт объем", "объем факт"),
     "actual_tonnage": ("фактический тоннаж", "тоннаж факт", "тонны факт"),
     "status": ("статус заявки", "статус рейса", "статус"),
-    "customer_name": ("заказчик", "клиент", "компания"),
+    "customer_name": ("заказчик", "клиент", "компания", "клиент компания", "клиент / компания"),
     "customer_bitrix_id": ("id компании битрикс", "bitrix id клиента", "id клиента битрикс"),
-    "customer_inn": ("инн заказчика", "инн клиента", "инн"),
+    "customer_inn": ("инн заказчика", "инн клиента", "инн компании", "инн"),
     "customer_contact_name": ("контакт заказчика", "контакт клиента", "контактное лицо заказчика"),
     "customer_contact_phone": ("телефон заказчика", "телефон клиента", "телефон компании"),
     "customer_address": ("адрес заказчика", "адрес клиента", "адрес компании"),
@@ -898,6 +898,7 @@ def _user_display_name(webhook_base: str, raw):
 
 
 def _crm_binding_parts(value):
+    """Разбирает стандартное строковое значение CRM-привязки Bitrix (CO_12/T444_7)."""
     text = str(_scalar(value) or "").strip()
     match = re.fullmatch(r"([A-Za-z0-9]+)_(\d+)", text)
     if not match:
@@ -912,6 +913,87 @@ def _crm_binding_parts(value):
             return int(prefix_upper[1:], 16), int(item_id)
         except ValueError:
             return None, None
+    return None, None
+
+
+def _crm_entity_ids_from_info(info: dict) -> list[int]:
+    """Возвращает допустимые типы сущностей CRM из схемы пользовательского поля.
+
+    У разных порталов Bitrix24 одно и то же поле CRM приходит по-разному:
+    иногда как ``T444_12``, иногда как голый ``12`` + DYNAMIC_444 в settings.
+    """
+    info = info or {}
+    ids = _extract_dynamic_entity_ids(info)
+
+    def contains_key(node, needle):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                key_norm = str(key or "").upper()
+                if needle in key_norm and str(value or "").strip().upper() not in {"", "N", "NO", "FALSE", "0"}:
+                    return True
+                if contains_key(value, needle):
+                    return True
+        elif isinstance(node, (list, tuple, set)):
+            return any(contains_key(value, needle) for value in node)
+        return False
+
+    field_type = _field_type(info)
+    if "company" in field_type or contains_key(info, "COMPANY"):
+        ids.append(4)
+    if "contact" in field_type or contains_key(info, "CONTACT"):
+        ids.append(3)
+    if "deal" in field_type or contains_key(info, "DEAL"):
+        ids.append(2)
+    if "lead" in field_type or contains_key(info, "LEAD"):
+        ids.append(1)
+    result = []
+    for entity_id in ids:
+        try:
+            entity_id = int(entity_id)
+        except (TypeError, ValueError):
+            continue
+        if entity_id > 0 and entity_id not in result:
+            result.append(entity_id)
+    return result
+
+
+def _crm_binding_parts_with_info(value, info: dict = None):
+    """Разбирает CRM-привязку с учётом метаданных поля Bitrix."""
+    if isinstance(value, dict):
+        entity_type = (
+            value.get("entityTypeId") or value.get("entity_type_id") or value.get("typeId")
+            or value.get("ENTITY_TYPE_ID") or value.get("TYPE_ID")
+        )
+        item_id = (
+            value.get("id") or value.get("ID") or value.get("itemId") or value.get("ITEM_ID")
+            or value.get("entityId") or value.get("ENTITY_ID")
+        )
+        try:
+            if int(entity_type or 0) > 0 and int(item_id or 0) > 0:
+                return int(entity_type), int(item_id)
+        except (TypeError, ValueError):
+            pass
+        for key in ("value", "VALUE", "binding", "BINDING"):
+            if key in value:
+                parsed = _crm_binding_parts_with_info(value.get(key), info)
+                if parsed[0] and parsed[1]:
+                    return parsed
+
+    parsed = _crm_binding_parts(value)
+    if parsed[0] and parsed[1]:
+        return parsed
+
+    # Некоторые CRM-поля отдают только числовой ID. Использовать его безопасно
+    # можно лишь когда схема однозначно говорит, к какому типу сущности он относится.
+    entity_ids = _crm_entity_ids_from_info(info or {})
+    if len(entity_ids) == 1:
+        scalar = _scalar(value)
+        try:
+            item_id = int(str(scalar).strip())
+        except (TypeError, ValueError):
+            item_id = 0
+        if item_id > 0:
+            return entity_ids[0], item_id
     return None, None
 
 
@@ -937,11 +1019,11 @@ def _linked_item_preferred_label(webhook_base: str, entity_type_id: int, item: d
     return title
 
 
-def _crm_binding_display(webhook_base: str, raw):
+def _crm_binding_display(webhook_base: str, raw, info: dict = None):
     raw_values = raw if isinstance(raw, list) else [raw]
     labels = []
     for value in raw_values:
-        entity_type_id, item_id = _crm_binding_parts(value)
+        entity_type_id, item_id = _crm_binding_parts_with_info(value, info or {})
         if not entity_type_id or not item_id:
             continue
         linked = fetch_item(webhook_base, entity_type_id, item_id)
@@ -961,9 +1043,9 @@ def _display_field_value(webhook_base: str, raw, info: dict):
     if field_type in {"user", "employee"}:
         return _user_display_name(webhook_base, raw)
     raw_values = raw if isinstance(raw, list) else [raw]
-    looks_like_crm_binding = any(_crm_binding_parts(value)[0] for value in raw_values)
-    if field_type in {"crm", "crm_entity"} or looks_like_crm_binding:
-        linked = _crm_binding_display(webhook_base, raw)
+    looks_like_crm_binding = any(_crm_binding_parts_with_info(value, info or {})[0] for value in raw_values)
+    if field_type in {"crm", "crm_entity", "crm_company", "crm_contact"} or looks_like_crm_binding or _crm_entity_ids_from_info(info or {}):
+        linked = _crm_binding_display(webhook_base, raw, info or {})
         if linked:
             return linked
     if isinstance(raw, dict):
@@ -1155,7 +1237,15 @@ def _driver_text_candidates(webhook_base: str, raw, info: dict) -> list[str]:
 
     add(_display_field_value(webhook_base, raw, info or {}))
 
-    user_id = _extract_bitrix_user_id(raw)
+    field_type = _field_type(info or {})
+    crm_entities = _crm_entity_ids_from_info(info or {})
+    # Голый числовой ID в CRM-привязке — это ID связанной сущности, а не
+    # сотрудника Bitrix. user.get вызываем только для настоящих user/employee
+    # полей (или старого integer-поля без CRM-настроек).
+    may_be_user = field_type in {"user", "employee"} or (
+        field_type in {"integer", "int"} and not crm_entities
+    ) or bool(re.fullmatch(r"(?:U|USER|EMPLOYEE|STAFF|WORKER|СОТРУДНИК)[_:\- ]*\d+", str(_scalar(raw) or "").strip(), re.I))
+    user_id = _extract_bitrix_user_id(raw) if may_be_user else None
     if user_id:
         row = _bitrix_user_record(webhook_base, user_id)
         if row:
@@ -1190,7 +1280,7 @@ def _driver_text_candidates(webhook_base: str, raw, info: dict) -> list[str]:
     return candidates
 
 
-def _driver_binding_candidates(webhook_base: str, raw) -> list[str]:
+def _driver_binding_candidates(webhook_base: str, raw, info: dict = None) -> list[str]:
     """ФИО из CRM-привязки, если поле «Водитель» связано с другим смарт-процессом."""
     result = []
     values = raw if isinstance(raw, list) else [raw]
@@ -1198,7 +1288,7 @@ def _driver_binding_candidates(webhook_base: str, raw) -> list[str]:
         "водитель", "фио", "фио водителя", "полное имя", "фамилия имя", "фамилия", "сотрудник",
     ))
     for value in values:
-        entity_type_id, linked_id = _crm_binding_parts(value)
+        entity_type_id, linked_id = _crm_binding_parts_with_info(value, info or {})
         if not entity_type_id or not linked_id:
             continue
         linked = fetch_item(webhook_base, entity_type_id, linked_id)
@@ -1236,7 +1326,7 @@ def _resolve_local_driver(db, webhook_base: str, item: dict, mapping: dict, sche
     all_candidates = []
     for code, raw, info in _logical_raw_candidates(item, "driver_name", mapping, schema):
         field_candidates = _driver_text_candidates(webhook_base, raw, info)
-        binding_candidates = _driver_binding_candidates(webhook_base, raw)
+        binding_candidates = _driver_binding_candidates(webhook_base, raw, info)
         safe_display = next((str(x).strip() for x in field_candidates + binding_candidates if str(x).strip()), "")
         print(
             "BITRIX_INBOUND_DRIVER_FIELD", code, _normalize(_field_label(info, code)),
@@ -1259,20 +1349,13 @@ def _company_id_from_field(raw, info: dict):
     """Извлекает company ID из штатной или пользовательской CRM-привязки."""
     values = raw if isinstance(raw, list) else [raw]
     for value in values:
-        if isinstance(value, dict):
-            entity_type = value.get("entityTypeId") or value.get("entity_type_id") or value.get("typeId")
-            item_id = value.get("id") or value.get("itemId") or value.get("entityId") or value.get("value")
-            try:
-                if int(entity_type or 4) == 4 and int(item_id) > 0:
-                    return int(item_id)
-            except (TypeError, ValueError):
-                pass
-        entity_type, item_id = _crm_binding_parts(value)
+        entity_type, item_id = _crm_binding_parts_with_info(value, info or {})
         if entity_type == 4 and item_id:
             return int(item_id)
+    # Поле с типом crm_company иногда вообще не содержит настроек сущности и
+    # возвращает голый числовой ID. В этом конкретном типе это однозначно компания.
     field_type = _field_type(info)
-    # crm_company нередко возвращает просто числовой ID.
-    if "company" in field_type or field_type in {"crm", "crm_entity"}:
+    if "company" in field_type:
         scalar = _scalar(raw)
         try:
             candidate = int(str(scalar).strip())
@@ -2760,19 +2843,35 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
             print("BITRIX_INBOUND_POLYGON_NOT_MATCHED", entity_type_id, item_id, _normalize(polygon_name), flush=True)
     customer_name = str(_read_display_logical(item, "customer_name", mapping, schema, settings.webhook_url) or "").strip()
     custom_company_ref_id = None
-    customer_field_code = _field_code(mapping, "customer_name")
-    if customer_field_code and customer_field_code in item:
-        customer_info = schema.get(customer_field_code, {}) if isinstance(schema, dict) else {}
-        custom_company_ref_id = _company_id_from_field(item.get(customer_field_code), customer_info)
-        if custom_company_ref_id:
-            customer_bitrix_id = custom_company_ref_id
-    client_field_present = any(key in item for key in ("companyId", "contactId", "contactIds"))
-    built_in_company_id = _optional_nonnegative_int(item.get("companyId"), "companyId") if item.get("companyId") not in (None, "", 0, "0") else None
-    raw_contact_ids = item.get("contactIds") or ([] if item.get("contactId") in (None, "", 0, "0") else [item.get("contactId")])
+
+    # В самосвалах поле в интерфейсе Bitrix называется «Клиент», а приложение
+    # хранит его как «Заказчик». Не завязываемся на конкретный UF-код: проверяем
+    # все заполненные поля с алиасами Клиент/Заказчик/Компания и штатный companyId.
+    for customer_field_code, raw_customer, customer_info in _logical_raw_candidates(
+        item, "customer_name", mapping, schema
+    ):
+        candidate_company_id = _company_id_from_field(raw_customer, customer_info)
+        if candidate_company_id:
+            custom_company_ref_id = candidate_company_id
+            customer_bitrix_id = candidate_company_id
+            break
+
+    client_field_present = any(_item_has_ci(item, key) for key in ("companyId", "contactId", "contactIds"))
+    raw_company_id = _item_value_ci(item, "companyId")
+    built_in_company_id = (
+        _optional_nonnegative_int(raw_company_id, "companyId")
+        if raw_company_id not in (None, "", 0, "0") else None
+    )
+    raw_contact_ids = _item_value_ci(item, "contactIds")
+    raw_contact_id = _item_value_ci(item, "contactId")
+    if raw_contact_ids in (None, "", []):
+        raw_contact_ids = [] if raw_contact_id in (None, "", 0, "0") else [raw_contact_id]
     if not isinstance(raw_contact_ids, list):
         raw_contact_ids = [raw_contact_ids]
     built_in_contact_id = None
     for raw_contact_id in raw_contact_ids:
+        if isinstance(raw_contact_id, dict):
+            raw_contact_id = raw_contact_id.get("id") or raw_contact_id.get("ID") or raw_contact_id.get("value") or raw_contact_id.get("VALUE")
         try:
             candidate = int(raw_contact_id)
         except (TypeError, ValueError):
@@ -2780,7 +2879,18 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         if candidate > 0:
             built_in_contact_id = candidate
             break
+
     company_lookup_id = built_in_company_id or custom_company_ref_id
+
+    # Если карточка самосвала передала только ИНН, находим по нему компанию в
+    # Bitrix (реквизиты) и затем подтягиваем название/ID. Это та же логика,
+    # которую ожидаем от пухтовозов: ИНН становится полноценной связью с компанией.
+    if not company_lookup_id and customer_inn:
+        company_lookup_id = _find_company_by_inn(settings.webhook_url, customer_inn)
+        if company_lookup_id:
+            customer_bitrix_id = int(company_lookup_id)
+            print("BITRIX_INBOUND_CUSTOMER_BY_INN", entity_type_id, item_id, company_lookup_id, customer_inn, flush=True)
+
     company_item = fetch_item(settings.webhook_url, 4, company_lookup_id) if company_lookup_id else {}
     contact_item = fetch_item(settings.webhook_url, 3, built_in_contact_id) if built_in_contact_id else {}
     if company_lookup_id and "_error" not in company_item:
