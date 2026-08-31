@@ -169,6 +169,10 @@ class TripRequest(Base):
     sum_trip = Column(Float, nullable=True)
     sum_driver = Column(Float, nullable=True)
     tariff_id = Column(Integer, ForeignKey("tariffs.id"), nullable=True)
+    # Для самосвалов менеджер Bitrix выбирает отдельное поле «Базовая ставка».
+    # Храним выбранное название независимо от tariff_id, чтобы значение из CRM
+    # не терялось даже до настройки цены для конкретного объёма.
+    base_rate = Column(String(255), nullable=True)
     comment = Column(Text)
     logist_comment = Column(Text)
     site_contact_name = Column(String(255), nullable=True)

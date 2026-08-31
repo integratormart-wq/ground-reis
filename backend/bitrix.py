@@ -94,6 +94,7 @@ FIELD_MAP = {
     "trips_count": "ufTripsCount",
     "cargo_type_name": "ufCargoType",
     "tariff_name": "ufTariff",
+    "base_rate": "ufBaseRate",
     "km": "ufKmPlan",
     "volume": "ufVolumePlan",
     "tonnage": "ufTonnagePlan",
@@ -147,7 +148,11 @@ FIELD_TITLES = {
     "route_name": ("маршрут",),
     "trips_count": ("количество рейсов", "число рейсов", "рейсов"),
     "cargo_type_name": ("тип груза", "груз"),
+    # Пухтовозы продолжают использовать «Тариф», самосвалы — отдельное поле
+    # «Базовая ставка». Это два разных логических поля, чтобы значения не
+    # перехватывали друг друга между смарт-процессами.
     "tariff_name": ("тариф",),
+    "base_rate": ("базовая ставка",),
     "km": ("километраж план", "плановый километраж", "километраж", "км план"),
     "volume": ("объем план", "плановый объем", "объем", "кубатура"),
     "tonnage": ("тоннаж план", "плановый тоннаж", "тонны план", "тоннаж"),
@@ -616,6 +621,7 @@ def _trip_values(req, db=None) -> dict:
         "trips_count": req.trips_count if req.trips_count is not None else 1,
         "cargo_type_name": req.cargo_type.name if req.cargo_type else "",
         "tariff_name": req.tariff.title if req.tariff else "",
+        "base_rate": (getattr(req, "base_rate", None) or (req.tariff.title if req.tariff and req.kind == TripType.SAMOSVAL else "")),
         "km": req.km or 0,
         "volume": req.volume or 0,
         "tonnage": req.tonnage if req.tonnage is not None else "",
@@ -662,6 +668,20 @@ def build_fields(req, field_map=None, db=None) -> dict:
     values = _trip_values(req, db=db)
     return {code: values[logical] for logical, code in mapping.items() if logical in values}
 
+
+
+def _directional_outbound_fields(req, fields: dict, mapping: dict) -> dict:
+    """Не смешивает тариф пухтовоза и базовую ставку самосвала."""
+    prepared = dict(fields)
+    if getattr(req, "kind", None) == TripType.SAMOSVAL:
+        old_tariff_code = (mapping or {}).get("tariff_name")
+        if old_tariff_code:
+            prepared.pop(old_tariff_code, None)
+    else:
+        base_rate_code = (mapping or {}).get("base_rate")
+        if base_rate_code:
+            prepared.pop(base_rate_code, None)
+    return prepared
 
 
 def _field_type(info: dict) -> str:
@@ -1126,10 +1146,17 @@ def _resolve_local_driver(db, webhook_base: str, item: dict, mapping: dict, sche
     """
     all_candidates = []
     for code, raw, info in _logical_raw_candidates(item, "driver_name", mapping, schema):
-        for candidate in _driver_text_candidates(webhook_base, raw, info):
+        field_candidates = _driver_text_candidates(webhook_base, raw, info)
+        binding_candidates = _driver_binding_candidates(webhook_base, raw)
+        safe_display = next((str(x).strip() for x in field_candidates + binding_candidates if str(x).strip()), "")
+        print(
+            "BITRIX_INBOUND_DRIVER_FIELD", code, _normalize(_field_label(info, code)),
+            _field_type(info) or "unknown", _normalize(safe_display), flush=True,
+        )
+        for candidate in field_candidates:
             if candidate not in all_candidates:
                 all_candidates.append(candidate)
-        for candidate in _driver_binding_candidates(webhook_base, raw):
+        for candidate in binding_candidates:
             if candidate not in all_candidates:
                 all_candidates.append(candidate)
     for candidate in all_candidates:
@@ -1193,6 +1220,64 @@ def _find_tariff_by_bitrix_value(db, kind, value: str):
         if len(priced) == 1:
             return priced[0]
     return None
+
+def _find_samosval_tariff_by_base_rate_volume(db, base_rate: str, volume):
+    """Находит зарплатную ставку самосвала по двум полям Bitrix.
+
+    Менеджер выбирает «Базовая ставка» и «Объём». В настройках приложения
+    каждая комбинация имеет свою стоимость для водителя. Старые самосвальные
+    тарифы с километрами (max_km != NULL) в новых рейсах не участвуют.
+    """
+    title_norm = _normalize(base_rate)
+    if not title_norm:
+        return None
+    try:
+        volume_value = float(volume)
+    except (TypeError, ValueError):
+        volume_value = None
+    rows = db.query(models.Tariff).filter(
+        models.Tariff.kind == TripType.SAMOSVAL,
+        models.Tariff.is_active == True,
+        models.Tariff.max_km.is_(None),
+        models.Tariff.comment == "samosval_base_rate",
+    ).all()
+    titled = [row for row in rows if _normalize(row.title) == title_norm]
+    if not titled:
+        return None
+    if volume_value is not None:
+        exact = [row for row in titled if
+            row.min_volume is not None and row.max_volume is not None
+            and abs(float(row.min_volume) - volume_value) < 0.000001
+            and abs(float(row.max_volume) - volume_value) < 0.000001
+        ]
+        if len(exact) == 1:
+            return exact[0]
+        ranged = [row for row in titled if
+            float(row.min_volume or 0) <= volume_value
+            and (row.max_volume is None or volume_value <= float(row.max_volume))
+        ]
+        if len(ranged) == 1:
+            return ranged[0]
+    return titled[0] if len(titled) == 1 else None
+
+
+def _tariff_driver_amount(tariff, trip) -> float:
+    if not tariff:
+        return 0.0
+    trips = max(1, int(getattr(trip, "trips_count", 1) or 1))
+    km = float(getattr(trip, "km", 0) or 0)
+    volume = float(getattr(trip, "volume", 0) or 0)
+    formula = tariff.formula if tariff.formula in {"trip", "km", "volume", "fixed"} else "trip"
+    if formula == "km":
+        base = km * float(tariff.km_price or 0)
+    elif formula == "volume":
+        base = volume * float(tariff.volume_price or 0)
+    elif formula == "fixed":
+        base = float(tariff.fixed_sum or 0)
+    else:
+        base = trips * float(tariff.trip_price or 0)
+    return (base + float(tariff.extra_fee or 0)) * float(tariff.coefficient if tariff.coefficient is not None else 1)
+
 
 def _find_driver_by_surname(db, display_name: str):
     text = str(display_name or "").strip()
@@ -1262,6 +1347,47 @@ def _find_vehicle_by_bitrix_value(db, display_value: str):
     if len(exact_name) == 1:
         return exact_name[0]
     return None
+
+
+def _ensure_vehicle_from_bitrix_plate(db, kind, display_value: str):
+    """Возвращает машину по госномеру, а при отсутствии безопасно создаёт её.
+
+    В Bitrix поле «Госномер» может содержать текст, при этом в приложении рейс
+    хранит FK на таблицу vehicles. Чтобы новый госномер не терялся, создаём
+    автомобиль с типом, соответствующим смарт-процессу (пухтовоз/самосвал).
+    Вместимость остаётся пустой. Существующие машины и рейсы не меняются.
+    """
+    vehicle = _find_vehicle_by_bitrix_value(db, display_value)
+    if vehicle:
+        return vehicle, False
+    text = str(display_value or "").strip()
+    normalized = _normalize_plate(text)
+    if not normalized or len(normalized) < 4:
+        return None, False
+    # Не создаём машину из явно служебного CRM-ID.
+    if re.fullmatch(r"(?:CO|C|D|L|SI|T[0-9A-F]+)_\d+", text, re.I):
+        return None, False
+    vehicle_types = db.query(models.VehicleType).filter(models.VehicleType.kind == kind).order_by(models.VehicleType.id).all()
+    if not vehicle_types:
+        return None, False
+    # Госномер уникален. name остаётся техническим и равен госномеру.
+    vehicle = models.Vehicle(name=text, plate=text, type_id=vehicle_types[0].id, capacity=None, is_active=True)
+    # SAVEPOINT защищает остальную входящую синхронизацию, если такой госномер
+    # успел создать параллельный запрос. Основную транзакцию не откатываем.
+    savepoint = db.begin_nested()
+    try:
+        db.add(vehicle)
+        db.flush()
+        savepoint.commit()
+    except Exception:
+        savepoint.rollback()
+        try:
+            db.expunge(vehicle)
+        except Exception:
+            pass
+        return _find_vehicle_by_bitrix_value(db, text), False
+    print("BITRIX_INBOUND_VEHICLE_CREATED", _normalize_plate(text), flush=True)
+    return vehicle, True
 
 
 
@@ -1359,6 +1485,7 @@ def _preferred_link_field_code(schema: dict, logical: str):
         "vehicle_name": ("госномер", "государственный номер", "номер автомобиля", "регистрационный номер", "номер машины"),
         "polygon_name": ("название полигона", "полигон"),
         "tariff_name": ("название тарифа", "тариф"),
+        "base_rate": ("базовая ставка",),
         "cargo_type_name": ("тип груза", "груз"),
     }
     aliases = tuple(_normalize(x) for x in aliases_by_logical.get(logical, ()))
@@ -1924,13 +2051,85 @@ def sync_customer_from_requisite_event(db, requisite_id: int, settings=None) -> 
     return sync_customer_from_bitrix_event(db, settings=settings, company_id=company_id)
 
 def _log_important_field_map(schema: dict, mapping: dict, entity_type_id, item_id=None):
-    important = ("customer_name", "planned_at", "load_address", "driver_name", "vehicle_name", "tariff_name", "polygon_cost")
+    important = ("customer_name", "planned_at", "load_address", "driver_name", "vehicle_name", "tariff_name", "base_rate", "volume", "polygon_cost")
     parts = []
     for logical in important:
         code = mapping.get(logical)
         label = _field_label(schema.get(code, {}), code) if code else "-"
         parts.append(f"{logical}={code or '-'}:{_normalize(label) or '-'}")
     print("BITRIX_FIELD_MAP", entity_type_id, item_id or 0, " ".join(parts), flush=True)
+
+
+def _numeric_equal(a, b, tolerance=0.005):
+    try:
+        return abs(float(_scalar(a) or 0) - float(b or 0)) <= tolerance
+    except (TypeError, ValueError):
+        return str(_scalar(a) or "").strip() == str(b or "").strip()
+
+
+def sync_polygon_cost_to_bitrix(req, db, settings=None) -> dict:
+    """Точечно отправляет вычисленные «Затраты полигона» в тот же рейс Bitrix.
+
+    Вызывается после inbound-синхронизации. Полную карточку обратно не шлём,
+    поэтому не перетираем данные логиста и не создаём цикл. Перед update
+    сравниваем текущее значение и отправляем только если сумма реально изменилась.
+    """
+    settings = settings or get_integration_settings(db)
+    if not settings or not settings.is_active or not settings.webhook_url:
+        return {"skipped": True, "reason": "no_active_integration"}
+    if not getattr(req, "bitrix_element_id", None) or not getattr(req, "bitrix_entity_type_id", None):
+        return {"skipped": True, "reason": "not_linked"}
+    entity_id = int(req.bitrix_entity_type_id)
+    schema = get_element_fields(settings.webhook_url, str(entity_id))
+    if "_error" in schema:
+        return {"error": schema["_error"], "action": "polygon_cost_fields"}
+    mapping = resolve_field_map(schema)
+    code = mapping.get("polygon_cost")
+    if not code or code not in schema:
+        print("BITRIX_POLYGON_COST_SKIP field_not_found", entity_id, req.id, flush=True)
+        return {"skipped": True, "reason": "polygon_cost_field_not_found"}
+    desired = _polygon_cost_value(req, db=db)
+    if desired in (None, ""):
+        print("BITRIX_POLYGON_COST_SKIP no_value", entity_id, req.id, flush=True)
+        return {"skipped": True, "reason": "polygon_cost_not_calculated"}
+    remote = fetch_item(settings.webhook_url, entity_id, int(req.bitrix_element_id))
+    if "_error" in remote:
+        return {"error": remote["_error"], "action": "polygon_cost_get"}
+    if _numeric_equal(remote.get(code), desired):
+        print("BITRIX_POLYGON_COST_OK unchanged", entity_id, req.id, float(desired), flush=True)
+        return {"ok": True, "action": "polygon_cost_unchanged", "value": float(desired)}
+    response = _http_post(settings.webhook_url, "crm.item.update", {
+        "entityTypeId": entity_id,
+        "id": int(req.bitrix_element_id),
+        "fields": {code: float(desired)},
+    })
+    if "error" in response:
+        print("BITRIX_POLYGON_COST_ERROR", entity_id, req.id, flush=True)
+        return {"error": response["error"], "action": "polygon_cost_update"}
+    print("BITRIX_POLYGON_COST_OK updated", entity_id, req.id, float(desired), flush=True)
+    return {"ok": True, "action": "polygon_cost_update", "value": float(desired)}
+
+
+def diagnose_trip_fields(webhook_base: str, entity_type_id: int, item_id: int) -> dict:
+    """Безопасная диагностика трёх проблемных полей без webhook/token."""
+    schema = get_element_fields(webhook_base, str(entity_type_id), force=True)
+    item = fetch_item(webhook_base, int(entity_type_id), int(item_id))
+    if "_error" in schema or "_error" in item:
+        return {"ok": False, "item_id": int(item_id)}
+    mapping = resolve_field_map_for_item(schema, item)
+    result = {"ok": True, "item_id": int(item_id), "fields": {}}
+    for logical in ("driver_name", "vehicle_name", "base_rate", "volume", "polygon_cost"):
+        rows = []
+        for code, raw, info in _logical_raw_candidates(item, logical, mapping, schema):
+            display = str(_display_field_value(webhook_base, raw, info) or "").strip()
+            rows.append({
+                "code": code,
+                "title": _field_label(info, code),
+                "type": _field_type(info) or "unknown",
+                "value": display[:120],
+            })
+        result["fields"][logical] = rows
+    return result
 
 
 def sync_trip(req, db, settings=None) -> dict:
@@ -1950,6 +2149,7 @@ def sync_trip(req, db, settings=None) -> dict:
     _log_important_field_map(schema, resolved_map, entity_id, req.bitrix_element_id)
     values = _trip_values(req, db=db)
     fields = {code: values[logical] for logical, code in resolved_map.items() if logical in values}
+    fields = _directional_outbound_fields(req, fields, resolved_map)
     planned_code = resolved_map.get("planned_at")
     if planned_code and planned_code in schema:
         fields[planned_code] = _planned_at_outbound_value(req, settings.webhook_url)
@@ -1965,6 +2165,7 @@ def sync_trip(req, db, settings=None) -> dict:
             resolved_map = resolve_field_map(schema)
             values = _trip_values(req, db=db)
             fields = {code: values[logical] for logical, code in resolved_map.items() if logical in values}
+            fields = _directional_outbound_fields(req, fields, resolved_map)
             planned_code = resolved_map.get("planned_at")
             if planned_code and planned_code in schema:
                 fields[planned_code] = _planned_at_outbound_value(req, settings.webhook_url)
@@ -2186,6 +2387,10 @@ def pull_recent_trips(db, settings=None, limit_per_process: int = 10) -> dict:
                     summary["errors"] += 1
                     print("BITRIX_RECONCILE_ITEM_ERROR", entity_id, item_id, flush=True)
                     continue
+                if result.get("ok") and result.get("trip_id"):
+                    req = db.query(models.TripRequest).filter(models.TripRequest.id == int(result["trip_id"])).first()
+                    if req:
+                        sync_polygon_cost_to_bitrix(req, db, settings=settings)
                 savepoint.commit()
                 if result.get("ok"):
                     summary["synced"] += 1
@@ -2366,13 +2571,18 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
 
     vehicle = None
     vehicle_text = ""
-    for _, raw_vehicle, vehicle_info in _logical_raw_candidates(item, "vehicle_name", mapping, schema):
+    for vehicle_code, raw_vehicle, vehicle_info in _logical_raw_candidates(item, "vehicle_name", mapping, schema):
         candidate_text = str(_display_field_value(settings.webhook_url, raw_vehicle, vehicle_info) or "").strip()
+        print(
+            "BITRIX_INBOUND_VEHICLE_FIELD", entity_type_id, item_id, vehicle_code,
+            _normalize(_field_label(vehicle_info, vehicle_code)), _field_type(vehicle_info) or "unknown",
+            _normalize_plate(candidate_text), flush=True,
+        )
         if not candidate_text:
             continue
         if not vehicle_text:
             vehicle_text = candidate_text
-        vehicle = _find_vehicle_by_bitrix_value(db, candidate_text)
+        vehicle, _created_vehicle = _ensure_vehicle_from_bitrix_plate(db, kind, candidate_text)
         if vehicle:
             break
     if vehicle:
@@ -2510,13 +2720,41 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
             cargo = matches[0] if len(matches) == 1 else None
         if cargo:
             trip.cargo_type_id = cargo.id
-    tariff_name = str(_read_display_logical(item, "tariff_name", mapping, schema, settings.webhook_url) or "").strip()
-    if tariff_name:
-        tariff = _find_tariff_by_bitrix_value(db, kind, tariff_name)
-        if tariff:
-            trip.tariff_id = tariff.id
-        else:
-            print("BITRIX_INBOUND_TARIFF_NOT_MATCHED", entity_type_id, item_id, _normalize(tariff_name), flush=True)
+    if kind == TripType.SAMOSVAL:
+        # В процессе самосвалов используются только два поля: «Базовая ставка»
+        # и «Объём». Старое поле «Тариф» от пухтовозов сознательно игнорируем.
+        base_rate = str(_read_display_logical(item, "base_rate", mapping, schema, settings.webhook_url) or "").strip()
+        if base_rate:
+            trip.base_rate = base_rate
+            tariff = _find_samosval_tariff_by_base_rate_volume(db, base_rate, trip.volume)
+            locked = bool(
+                getattr(trip, "id", None)
+                and db.query(models.SalaryCalcItem.id).filter(models.SalaryCalcItem.trip_request_id == trip.id).first()
+            )
+            if tariff:
+                trip.tariff_id = tariff.id
+                # Зарплата самосвала рассчитывается именно по настроенной
+                # комбинации базовой ставки + объёма и числу рейсов.
+                if not locked:
+                    trip.sum_driver = _tariff_driver_amount(tariff, trip)
+                    trip.sum_trip = trip.sum_driver
+                print("BITRIX_INBOUND_SAMOSVAL_RATE_MATCHED", entity_type_id, item_id, tariff.id, _normalize(base_rate), float(trip.volume or 0), flush=True)
+            else:
+                # Не оставляем старый тариф от другой базовой ставки: значение
+                # из Bitrix всё равно сохраняется в base_rate и видно в карточке.
+                if not locked:
+                    trip.tariff_id = None
+                    trip.sum_driver = None
+                    trip.sum_trip = None
+                print("BITRIX_INBOUND_SAMOSVAL_RATE_NOT_MATCHED", entity_type_id, item_id, _normalize(base_rate), float(trip.volume or 0), flush=True)
+    else:
+        tariff_name = str(_read_display_logical(item, "tariff_name", mapping, schema, settings.webhook_url) or "").strip()
+        if tariff_name:
+            tariff = _find_tariff_by_bitrix_value(db, kind, tariff_name)
+            if tariff:
+                trip.tariff_id = tariff.id
+            else:
+                print("BITRIX_INBOUND_TARIFF_NOT_MATCHED", entity_type_id, item_id, _normalize(tariff_name), flush=True)
 
     # Показания спидометра/топливо живут в отчёте дня водителя, но могут
     # редактироваться из Bitrix. Обновляем отчёт только если известны водитель,
