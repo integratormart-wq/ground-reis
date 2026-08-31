@@ -5,7 +5,7 @@
   <div class="card"><div class="card-title">Статус</div><span class="status status-{{ status_slug(req.status) }}">{{ req.status.value }}</span></div>
   <div class="card"><div class="card-title">Направление</div><div class="card-value">{{ req.kind.value }}</div></div>
   <div class="card"><div class="card-title">Подача машины</div><div class="card-value">{{ req.planned_date.strftime('%d.%m.%Y') }}{% if req.planned_time %}, {{ req.planned_time[:5] }}{% endif %}</div></div>
-  <div class="card"><div class="card-title">Сумма водителю</div><div class="card-value">{{ "%.0f"|format(req.sum_driver or 0) }} ₽</div></div>
+  <div class="card"><div class="card-title">Зарплата водителя</div><div class="card-value">{% if req.sum_driver is not none %}{{ "%.0f"|format(req.sum_driver) }} ₽{% else %}—{% endif %}</div></div>
 </div>
 <div class="request-form" style="margin-top:16px">
   <section class="form-section">
@@ -50,6 +50,7 @@
       <div><b>Тоннаж:</b> {{ req.tonnage if req.tonnage is not none else '—' }}{% if req.tonnage is not none %} т{% endif %}</div>
       <div><b>Рейсов:</b> {{ req.trips_count }}</div>
       <div><b>{% if req.kind.value == 'самосвал' %}Базовая ставка{% else %}Тариф{% endif %}:</b> {% if req.kind.value == 'самосвал' %}{{ req.base_rate or (req.tariff.title if req.tariff else '—') }}{% else %}{{ req.tariff.title if req.tariff else '—' }}{% endif %}</div>
+      <div><b>Зарплата водителя:</b> {% if req.sum_driver is not none %}{{ "%.0f"|format(req.sum_driver) }} ₽{% else %}—{% endif %}</div>
     </div>
   </section>
 
