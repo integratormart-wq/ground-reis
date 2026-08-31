@@ -137,13 +137,13 @@ FIELD_MAP = {
 }
 
 FIELD_TITLES = {
-    "planned_at": ("дата и время", "дата рейса", "плановая дата и время", "дата/время рейса", "подача машины", "дата"),
+    "planned_at": ("подача машины", "дата и время", "дата рейса", "плановая дата и время", "дата/время рейса", "дата"),
     "driver_name": ("водитель", "фио водителя", "водители"),
     # В Bitrix поле теперь называется именно «Госномер». Не подхватываем
     # старые поля «Машина/Машины/Автомобиль», чтобы они больше не могли
     # перехватить синхронизацию.
     "vehicle_name": ("госномер", "государственный номер"),
-    "load_address": ("адрес загрузки", "адрес подачи", "загрузка"),
+    "load_address": ("адрес подачи", "адрес загрузки", "загрузка"),
     "unload_address": ("адрес выгрузки", "выгрузка"),
     "route_name": ("маршрут",),
     "trips_count": ("количество рейсов", "число рейсов", "рейсов"),
@@ -154,7 +154,7 @@ FIELD_TITLES = {
     "tariff_name": ("тариф",),
     "base_rate": ("базовая ставка",),
     "km": ("километраж план", "плановый километраж", "километраж", "км план"),
-    "volume": ("объем план", "плановый объем", "объем", "кубатура"),
+    "volume": ("объем", "объем план", "плановый объем", "кубатура"),
     "tonnage": ("тоннаж план", "плановый тоннаж", "тонны план", "тоннаж"),
     "actual_km": ("фактический километраж", "факт км", "км факт"),
     "actual_volume": ("фактический объем", "факт объем", "объем факт"),
@@ -298,6 +298,14 @@ def get_element_fields(webhook_base: str, entity_id: str, force: bool = False) -
     return fields
 
 
+def _get_element_fields_fresh(webhook_base: str, entity_id) -> dict:
+    """Свежая схема для входящего события; fallback сохраняет совместимость тестов."""
+    try:
+        return get_element_fields(webhook_base, str(entity_id), force=True)
+    except TypeError:
+        return get_element_fields(webhook_base, str(entity_id))
+
+
 def fetch_item(webhook_base: str, entity_id: int, item_id: int) -> dict:
     response = _http_post(webhook_base, "crm.item.get", {"entityTypeId": int(entity_id), "id": int(item_id)})
     if "error" in response:
@@ -401,8 +409,10 @@ def _field_alias_score(title: str, aliases) -> int:
         if not normalized_alias:
             continue
         if normalized_title == normalized_alias:
-            # Более длинный/конкретный алиас чуть предпочтительнее.
-            best = max(best, 10000 + len(normalized_alias) * 10 - index)
+            # Порядок алиасов задаёт бизнес-приоритет. Например, для рейса
+            # «Адрес подачи» должен выигрывать у старого «Адрес загрузки», а
+            # «Объём» — у устаревшего «Объём план».
+            best = max(best, 12000 - index * 100 + min(len(normalized_alias), 99))
             continue
         # Частичное совпадение разрешаем только для достаточно конкретных
         # многословных названий. Алиас должен входить в полное название поля,
@@ -503,13 +513,35 @@ def _logical_candidate_codes(schema: dict, logical: str) -> list[str]:
     return result
 
 
+def _item_key_ci(item: dict, code: str):
+    """Возвращает фактический ключ item без зависимости от регистра Bitrix."""
+    if not isinstance(item, dict) or not code:
+        return None
+    if code in item:
+        return code
+    target = str(code).lower()
+    for key in item.keys():
+        if str(key).lower() == target:
+            return key
+    return None
+
+
+def _item_value_ci(item: dict, code: str):
+    key = _item_key_ci(item, code)
+    return item.get(key) if key is not None else None
+
+
+def _item_has_ci(item: dict, code: str) -> bool:
+    return _item_key_ci(item, code) is not None
+
+
 def resolve_field_map_for_item(schema: dict, item: dict) -> dict:
     """Как resolve_field_map, но среди дублей выбирает поле, реально заполненное в карточке."""
     resolved = resolve_field_map(schema)
     item = item or {}
     for logical in FIELD_TITLES:
         codes = _logical_candidate_codes(schema, logical)
-        filled = [code for code in codes if code in item and _raw_value_present(item.get(code))]
+        filled = [code for code in codes if _item_has_ci(item, code) and _raw_value_present(_item_value_ci(item, code))]
         if filled:
             resolved[logical] = filled[0]
     return resolved
@@ -527,10 +559,10 @@ def _logical_raw_candidates(item: dict, logical: str, mapping: dict, schema: dic
     if legacy:
         ordered.append(legacy)
     for code in ordered:
-        if not code or code in seen or code not in item:
+        if not code or code in seen or not _item_has_ci(item, code):
             continue
         seen.add(code)
-        raw = item.get(code)
+        raw = _item_value_ci(item, code)
         if _raw_value_present(raw):
             yield code, raw, (schema or {}).get(code, {})
 
@@ -574,6 +606,14 @@ def _polygon_cost_value(req, db=None):
                 models.PolygonTariff.polygon_id == req.polygon_id,
                 models.PolygonTariff.cargo_type_id == req.cargo_type_id,
             ).first()
+        if polygon_tariff is None:
+            # Если груз из Bitrix не выбран, но у полигона настроен ровно один
+            # тариф, это однозначная ставка — используем её вместо нулевой суммы.
+            polygon_rows = db.query(models.PolygonTariff).filter(
+                models.PolygonTariff.polygon_id == req.polygon_id
+            ).all()
+            if len(polygon_rows) == 1:
+                polygon_tariff = polygon_rows[0]
         if polygon_tariff:
             rate = float(polygon_tariff.rate or 0)
             unit = str(polygon_tariff.unit or "м³").lower()
@@ -944,36 +984,82 @@ def _display_field_value(webhook_base: str, raw, info: dict):
 
 
 def _read_display_logical(item: dict, logical: str, mapping: dict, schema: dict, webhook_base: str):
-    code = _field_code(mapping, logical)
-    if code and code in item:
-        return _display_field_value(webhook_base, item.get(code), schema.get(code, {}) if isinstance(schema, dict) else {})
-    fallback = FIELD_MAP.get(logical)
-    if fallback and fallback in item:
-        return _display_field_value(webhook_base, item.get(fallback), schema.get(fallback, {}) if isinstance(schema, dict) else {})
+    """Читает первое реально заполненное поле и разворачивает list/user/CRM ID."""
+    for _code, raw, info in _logical_raw_candidates(item, logical, mapping, schema):
+        display = _display_field_value(webhook_base, raw, info)
+        if str(display or "").strip():
+            return display
     return ""
 
 
-def _clean_address_value(webhook_base: str, item: dict, logical: str, mapping: dict, schema: dict) -> str:
-    value = _read_display_logical(item, logical, mapping, schema, webhook_base)
-    text = str(value or "").strip()
+def _clean_address_text(webhook_base: str, raw, info: dict) -> str:
+    text = str(_display_field_value(webhook_base, raw, info or {}) or "").strip()
     if not text:
         return ""
-    # JSON-строка от адресного поля: берём только читаемый адрес.
     if text.startswith("{") or text.startswith("["):
         try:
             parsed = json.loads(text)
-            displayed = _display_field_value(webhook_base, parsed, _field_info(schema, mapping, logical))
+            displayed = _display_field_value(webhook_base, parsed, info or {})
             if displayed:
                 text = str(displayed).strip()
         except (ValueError, TypeError):
             pass
-    # Не сохраняем служебный числовой ID, если Bitrix склеил его с адресом через |.
+    # Адресные поля Bitrix иногда возвращают служебный ID вместе с подписью.
+    # Сохраняем только человекочитаемую часть.
     if "|" in text:
         parts = [part.strip() for part in text.split("|") if part.strip()]
         readable = [part for part in parts if re.search(r"[A-Za-zА-Яа-яЁё]", part)]
         if readable:
             text = max(readable, key=len)
     return text
+
+
+def _clean_address_value(webhook_base: str, item: dict, logical: str, mapping: dict, schema: dict) -> str:
+    # В смарт-процессах 1088/1092 после переименований могут остаться дубли.
+    # Берём первое заполненное читаемое поле, а не первый технический UF-код.
+    for _code, raw, info in _logical_raw_candidates(item, logical, mapping, schema):
+        text = _clean_address_text(webhook_base, raw, info)
+        if text:
+            return text
+    return ""
+
+
+def _numeric_text(value):
+    """Извлекает число из значения Bitrix вроде '32', '32 м³', '1 250,50'."""
+    if value is None:
+        return None
+    text = str(value).strip().replace("\u00a0", " ")
+    if not text:
+        return None
+    match = re.search(r"[-+]?\d[\d\s]*(?:[.,]\d+)?", text)
+    if not match:
+        return None
+    candidate = match.group(0).replace(" ", "").replace(",", ".")
+    try:
+        return float(candidate)
+    except ValueError:
+        return None
+
+
+def _read_numeric_logical(item: dict, logical: str, mapping: dict, schema: dict, webhook_base: str):
+    """Читает числовое поле через его отображаемое значение.
+
+    Критично для Bitrix-полей типа «Список»: в item хранится ID варианта
+    (например 716), а менеджер выбрал отображаемое значение 32. Поэтому
+    сначала разворачиваем enumeration/userfield и только затем парсим число.
+    """
+    for _code, raw, info in _logical_raw_candidates(item, logical, mapping, schema):
+        display = _display_field_value(webhook_base, raw, info)
+        number = _numeric_text(display)
+        if number is not None:
+            return number
+        # Для обычного number/integer поля display совпадает с raw. Этот fallback
+        # нужен лишь если Bitrix вернул нестандартную структуру без подписи.
+        if not _field_options(info):
+            number = _numeric_text(_scalar(raw))
+            if number is not None:
+                return number
+    return None
 
 
 def _portal_timezone(webhook_base: str):
@@ -1118,8 +1204,11 @@ def _driver_binding_candidates(webhook_base: str, raw) -> list[str]:
         linked = fetch_item(webhook_base, entity_type_id, linked_id)
         if "_error" in linked:
             continue
+        preferred = _linked_item_preferred_label(webhook_base, entity_type_id, linked)
+        if preferred:
+            result.append(preferred)
         title = str(linked.get("title") or linked.get("TITLE") or "").strip()
-        if title:
+        if title and title not in result:
             result.append(title)
         linked_schema = get_element_fields(webhook_base, str(entity_type_id))
         if "_error" in linked_schema:
@@ -2067,12 +2156,25 @@ def _numeric_equal(a, b, tolerance=0.005):
         return str(_scalar(a) or "").strip() == str(b or "").strip()
 
 
-def sync_polygon_cost_to_bitrix(req, db, settings=None) -> dict:
-    """Точечно отправляет вычисленные «Затраты полигона» в тот же рейс Bitrix.
+def _calculated_field_codes(schema: dict, mapping: dict, logical: str) -> list[str]:
+    """Все реальные коды расчётного поля, включая дубли после переименований."""
+    result = []
+    preferred = (mapping or {}).get(logical)
+    if preferred and preferred in schema:
+        result.append(preferred)
+    for code in _logical_candidate_codes(schema, logical):
+        if code in schema and code not in result:
+            result.append(code)
+    return result
 
-    Вызывается после inbound-синхронизации. Полную карточку обратно не шлём,
-    поэтому не перетираем данные логиста и не создаём цикл. Перед update
-    сравниваем текущее значение и отправляем только если сумма реально изменилась.
+
+def sync_calculated_fields_to_bitrix(req, db, settings=None) -> dict:
+    """Возвращает в Bitrix расчётные значения приложения без перезаписи рейса.
+
+    После входящего изменения менеджером пересчитываем и точечно отправляем:
+    - «Затраты полигона»;
+    - «Зарплата водителя».
+    Значения сравниваются с Bitrix, поэтому echo-event не создаёт цикл.
     """
     settings = settings or get_integration_settings(db)
     if not settings or not settings.is_active or not settings.webhook_url:
@@ -2080,34 +2182,65 @@ def sync_polygon_cost_to_bitrix(req, db, settings=None) -> dict:
     if not getattr(req, "bitrix_element_id", None) or not getattr(req, "bitrix_entity_type_id", None):
         return {"skipped": True, "reason": "not_linked"}
     entity_id = int(req.bitrix_entity_type_id)
-    schema = get_element_fields(settings.webhook_url, str(entity_id))
+    schema = _get_element_fields_fresh(settings.webhook_url, entity_id)
     if "_error" in schema:
-        return {"error": schema["_error"], "action": "polygon_cost_fields"}
+        return {"error": schema["_error"], "action": "calculated_fields"}
     mapping = resolve_field_map(schema)
-    code = mapping.get("polygon_cost")
-    if not code or code not in schema:
-        print("BITRIX_POLYGON_COST_SKIP field_not_found", entity_id, req.id, flush=True)
-        return {"skipped": True, "reason": "polygon_cost_field_not_found"}
-    desired = _polygon_cost_value(req, db=db)
-    if desired in (None, ""):
-        print("BITRIX_POLYGON_COST_SKIP no_value", entity_id, req.id, flush=True)
-        return {"skipped": True, "reason": "polygon_cost_not_calculated"}
     remote = fetch_item(settings.webhook_url, entity_id, int(req.bitrix_element_id))
     if "_error" in remote:
-        return {"error": remote["_error"], "action": "polygon_cost_get"}
-    if _numeric_equal(remote.get(code), desired):
-        print("BITRIX_POLYGON_COST_OK unchanged", entity_id, req.id, float(desired), flush=True)
-        return {"ok": True, "action": "polygon_cost_unchanged", "value": float(desired)}
+        return {"error": remote["_error"], "action": "calculated_fields_get"}
+
+    desired_by_logical = {
+        "polygon_cost": _polygon_cost_value(req, db=db),
+        "sum_driver": req.sum_driver if getattr(req, "sum_driver", None) is not None else "",
+    }
+    updates = {}
+    sent = {}
+    for logical, desired in desired_by_logical.items():
+        if desired in (None, ""):
+            continue
+        codes = _calculated_field_codes(schema, mapping, logical)
+        if not codes:
+            print("BITRIX_CALCULATED_SKIP", logical, "field_not_found", entity_id, req.id, flush=True)
+            continue
+        changed = False
+        for code in codes:
+            current = _item_value_ci(remote, code)
+            if not _numeric_equal(current, desired):
+                updates[code] = float(desired)
+                changed = True
+        if changed:
+            sent[logical] = float(desired)
+        else:
+            print("BITRIX_CALCULATED_OK", logical, "unchanged", entity_id, req.id, float(desired), flush=True)
+
+    if not updates:
+        return {"ok": True, "action": "calculated_fields_unchanged", "values": sent}
     response = _http_post(settings.webhook_url, "crm.item.update", {
         "entityTypeId": entity_id,
         "id": int(req.bitrix_element_id),
-        "fields": {code: float(desired)},
+        "fields": updates,
     })
     if "error" in response:
-        print("BITRIX_POLYGON_COST_ERROR", entity_id, req.id, flush=True)
-        return {"error": response["error"], "action": "polygon_cost_update"}
-    print("BITRIX_POLYGON_COST_OK updated", entity_id, req.id, float(desired), flush=True)
-    return {"ok": True, "action": "polygon_cost_update", "value": float(desired)}
+        print("BITRIX_CALCULATED_ERROR", entity_id, req.id, flush=True)
+        return {"error": response["error"], "action": "calculated_fields_update"}
+    for logical, value in sent.items():
+        print("BITRIX_CALCULATED_OK", logical, "updated", entity_id, req.id, value, flush=True)
+    return {"ok": True, "action": "calculated_fields_update", "values": sent}
+
+
+def sync_polygon_cost_to_bitrix(req, db, settings=None) -> dict:
+    """Совместимый wrapper: теперь вместе с затратами отправляет и зарплату."""
+    result = sync_calculated_fields_to_bitrix(req, db, settings=settings)
+    if result.get("error"):
+        return result
+    values = result.get("values") or {}
+    if "polygon_cost" in values:
+        return {"ok": True, "action": "polygon_cost_update", "value": values["polygon_cost"]}
+    desired = _polygon_cost_value(req, db=db)
+    if desired in (None, ""):
+        return {"skipped": True, "reason": "polygon_cost_not_calculated"}
+    return {"ok": True, "action": "polygon_cost_unchanged", "value": float(desired)}
 
 
 def diagnose_trip_fields(webhook_base: str, entity_type_id: int, item_id: int) -> dict:
@@ -2256,13 +2389,13 @@ def _scalar(value):
 def _read_logical(item: dict, logical: str, mapping: dict):
     candidates = [mapping.get(logical), FIELD_MAP.get(logical)]
     for code in candidates:
-        if code and code in item:
-            return _scalar(item.get(code))
+        if code and _item_has_ci(item, code):
+            return _scalar(_item_value_ci(item, code))
     return ""
 
 
 def _has_logical(item: dict, logical: str, mapping: dict) -> bool:
-    return any(code and code in item for code in (mapping.get(logical), FIELD_MAP.get(logical)))
+    return any(code and _item_has_ci(item, code) for code in (mapping.get(logical), FIELD_MAP.get(logical)))
 
 
 def _to_float(value):
@@ -2414,7 +2547,10 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     item = fetch_item(settings.webhook_url, entity_type_id, item_id)
     if "_error" in item:
         return {"error": item["_error"]}
-    schema = get_element_fields(settings.webhook_url, str(entity_type_id))
+    # Входящее событие всегда читает свежую схему: поля в Bitrix часто
+    # переименовывают прямо во время настройки (1088/1092), и 5-минутный кэш
+    # не должен мешать новой подписи «Госномер», «Водитель», «Объём» и т.д.
+    schema = _get_element_fields_fresh(settings.webhook_url, entity_type_id)
     mapping = resolve_field_map_for_item(schema, item) if "_error" not in schema else FIELD_MAP
     if "_error" not in schema:
         _log_important_field_map(schema, mapping, entity_type_id, item_id)
@@ -2461,7 +2597,7 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     # Берём именно фактическое поле «Подача машины/Дата и время», а не
     # системную «Дату создания», и сохраняем дату/время в часовом поясе портала.
     planned_code = _field_code(mapping, "planned_at")
-    raw_planned_at = item.get(planned_code) if planned_code and planned_code in item else None
+    raw_planned_at = _item_value_ci(item, planned_code) if planned_code else None
     planned_date, planned_time = _parse_bitrix_planned_at(settings.webhook_url, raw_planned_at)
     if planned_date is not None:
         trip.planned_date = planned_date
@@ -2488,25 +2624,34 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
             print("BITRIX_INBOUND_FIELD_SKIPPED", logical, entity_type_id, item_id, flush=True)
             return None
 
-    km = inbound_value(_optional_nonnegative_float, "km", "km")
-    volume = inbound_value(_optional_nonnegative_float, "volume", "volume")
-    tonnage = inbound_value(_optional_nonnegative_float, "tonnage", "tonnage")
-    actual_km = inbound_value(_optional_nonnegative_float, "actual_km", "actual_km")
-    actual_volume = inbound_value(_optional_nonnegative_float, "actual_volume", "actual_volume")
-    actual_tonnage = inbound_value(_optional_nonnegative_float, "actual_tonnage", "actual_tonnage")
-    trips_count = inbound_value(_optional_nonnegative_int, "trips_count", "trips_count")
-    waste_bin_count = inbound_value(_optional_nonnegative_int, "waste_bin_count", "waste_bin_count")
-    odometer = inbound_value(_optional_nonnegative_float, "odometer", "odometer")
-    fuel_liters = inbound_value(_optional_nonnegative_float, "fuel_liters", "fuel_liters")
-    fuel_price = inbound_value(_optional_nonnegative_float, "fuel_price", "fuel_price")
-    fuel_cost = inbound_value(_optional_nonnegative_float, "fuel_cost", "fuel_cost")
+    def inbound_number(logical, integer=False):
+        value = _read_numeric_logical(item, logical, mapping, schema, settings.webhook_url)
+        if value is None:
+            return None
+        if not math.isfinite(float(value)) or float(value) < 0:
+            print("BITRIX_INBOUND_FIELD_SKIPPED", logical, entity_type_id, item_id, flush=True)
+            return None
+        return int(round(value)) if integer else float(value)
+
+    km = inbound_number("km")
+    volume = inbound_number("volume")
+    tonnage = inbound_number("tonnage")
+    actual_km = inbound_number("actual_km")
+    actual_volume = inbound_number("actual_volume")
+    actual_tonnage = inbound_number("actual_tonnage")
+    trips_count = inbound_number("trips_count", integer=True)
+    waste_bin_count = inbound_number("waste_bin_count", integer=True)
+    odometer = inbound_number("odometer")
+    fuel_liters = inbound_number("fuel_liters")
+    fuel_price = inbound_number("fuel_price")
+    fuel_cost = inbound_number("fuel_cost")
     started_at = inbound_value(_optional_datetime, "started_at", "started_at")
     finished_at = inbound_value(_optional_datetime, "finished_at", "finished_at")
     customer_bitrix_id = inbound_value(_optional_nonnegative_int, "customer_bitrix_id", "customer_bitrix_id")
     customer_inn = inbound_value(_optional_inn, "customer_inn", None)
     is_empty_run = inbound_value(_optional_bool, "is_empty_run", "is_empty_run")
     has_downtime = inbound_value(_optional_bool, "has_downtime", "has_downtime")
-    downtime_minutes = inbound_value(_optional_nonnegative_int, "downtime_minutes", "downtime_minutes")
+    downtime_minutes = inbound_number("downtime_minutes", integer=True)
 
     # Пустая карточка Bitrix часто отдаёт числовые поля как 0. Для количества
     # рейсов это не повод откатывать весь webhook: оставляем старое значение,
