@@ -37,6 +37,7 @@
 <body>
 <div class="wrap">
   <div id="status" class="status">Загрузка…</div>
+  <div id="debug" style="display:none;background:#fff8e1;border:1px solid #f0d68a;border-radius:4px;padding:8px 12px;margin-bottom:10px;font:11px/1.5 monospace;word-break:break-all;color:#7a6a1a;max-height:120px;overflow:auto;"></div>
   <div id="error" class="msg msg-err"></div>
   <div id="success" class="msg msg-ok"></div>
 
@@ -118,16 +119,33 @@ function getPlacementInfo(cb){
 
 function extractDealId(info){
   var o = (info && info.options) ? info.options : (info || {});
-  return o.ID || o.id || o.entityId || o.entity_id || o.ENTITY_ID || null;
+  var direct = o.ID || o.id || o.entityId || o.entity_id || o.ENTITY_ID || o.dealId || o.DEAL_ID;
+  if (direct) return direct;
+  // сканируем все значения options на числовой ID (3-8 цифр)
+  if (info && info.options) {
+    for (var k in info.options) {
+      var v = info.options[k];
+      if (typeof v === 'number' && v > 0) return v;
+      if (typeof v === 'string' && /^\d{3,8}$/.test(v)) return v;
+    }
+  }
+  // URL iframe (?ID= или ?id=)
+  var m = location.search.match(/[?&](?:ID|id|dealId|deal_id|ENTITY_ID)=(\d+)/);
+  if (m) return m[1];
+  return null;
 }
 
 function initWidget(){
   status('Читаю сделку…');
   getPlacementInfo(function(info){
+    try {
+      $('debug').textContent = 'placement.info=' + JSON.stringify(info) + '\nlocation.search=' + JSON.stringify(location.search);
+      show('debug', true);
+    } catch(e){}
     dealId = extractDealId(info);
     if(!dealId){
       status('ID сделки не определён');
-      err('Не удалось определить сделку. Покажите этот экран — подскажу дальше.');
+      err('Не удалось определить сделку (см. жёлтый блок с данными placement.info).');
       return;
     }
     status('Сделка ID ' + dealId + '. Читаю компанию…');
