@@ -40,6 +40,7 @@
   <div id="debug" style="display:none;background:#fff8e1;border:1px solid #f0d68a;border-radius:4px;padding:8px 12px;margin-bottom:10px;font:11px/1.5 monospace;word-break:break-all;color:#7a6a1a;max-height:120px;overflow:auto;"></div>
   <div id="error" class="msg msg-err"></div>
   <div id="success" class="msg msg-ok"></div>
+  <div id="selected" class="msg msg-ok"></div>
 
   <div class="card">
     <button class="btn btn-primary" id="btnPick">📍 Выбрать адрес объекта</button>
@@ -81,7 +82,8 @@ var CFG = {
   DEAL_CONTACT:    'UF_CRM_GROUND_CONTACT_OBJECT',
   DEAL_PHONE:      'UF_CRM_GROUND_PHONE_OBJECT',
   DEAL_ENTRANCE:   'UF_CRM_GROUND_ENTRANCE_COMMENT',
-  DEAL_ADDRESS:    'UF_CRM_GROUND_ADDRESS_PODACHA'
+  DEAL_ADDRESS:    'UF_CRM_GROUND_ADDRESS_PODACHA',
+  DEAL_PICKUP:     'UF_CRM_1733204776187'             // «Точка вывоза»
 };
 
 var dealId = null;
@@ -171,6 +173,11 @@ function loadCompany(){
       err('Сначала выберите компанию в сделке.');
       return;
     }
+    var current = cleanAddr(d[CFG.DEAL_PICKUP] || d[CFG.DEAL_ADDRESS]);
+    if(current){
+      $('selected').textContent = 'Сейчас выбрано: ' + current;
+      show('selected', true);
+    }
     status('Компания задана (ID ' + companyId + '). Готово к выбору адреса.');
   });
 }
@@ -227,14 +234,20 @@ function selectById(id){
 }
 
 function applyToDeal(it){
+  var address = cleanAddr(it[CFG.ADDR_FIELD]);
   var fields = {};
   fields[CFG.DEAL_CONTACT]  = it[CFG.CONTACT_FIELD]  || '';
   fields[CFG.DEAL_PHONE]    = it[CFG.PHONE_FIELD]    || '';
   fields[CFG.DEAL_ENTRANCE] = it[CFG.ENTRANCE_FIELD] || '';
-  fields[CFG.DEAL_ADDRESS]  = cleanAddr(it[CFG.ADDR_FIELD]) || '';
+  fields[CFG.DEAL_ADDRESS]  = address;
+  /* Для Bitrix-поля типа address нужен новый адрес без чужого внутреннего location ID. */
+  fields[CFG.DEAL_PICKUP]   = address ? address + '|;|' : '';
   BX24.callMethod('crm.deal.update', {id: dealId, fields: fields}, function(res){
-    if(res.error()){ err('Не удалось записать в сделку: ' + res.error()); return; }
-    ok('Адрес выбран и записан в сделку. Обновляю карточку…');
+    if(res.error()){ err('Не удалось записать точку вывоза: ' + res.error()); return; }
+    $('selected').textContent = 'Выбрано: ' + address;
+    show('selected', true);
+    ok('Точка вывоза и данные объекта записаны. Обновляю карточку…');
+    closeAll();
     setTimeout(function(){
       try { BX24.reloadWindow(); } catch(e){}
     }, 900);
@@ -262,9 +275,12 @@ function saveNewAddress(){
     fields: Object.assign({ title: addr }, fields)
   }, function(res){
     if(res.error()){ err('Не удалось сохранить адрес: ' + res.error()); return; }
-    ok('Новый адрес сохранён.');
+    var created = (res.answer.result && res.answer.result.item) || res.answer.result || {};
+    var newId = created.id || created.ID;
     $('fAddr').value=''; $('fContact').value=''; $('fPhone').value=''; $('fComm').value='';
-    closeAll();
+    if(!newId){ err('Адрес создан, но его ID не получен. Откройте список адресов.'); openPicker(); return; }
+    ok('Новый адрес сохранён. Записываю его как точку вывоза…');
+    selectById(newId);
   });
 }
 
