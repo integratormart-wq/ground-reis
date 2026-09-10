@@ -286,6 +286,10 @@ def healthz():
         return JSONResponse(payload, status_code=503)
     return payload
 
+@app.get("/_debug/bitrix", include_in_schema=False)
+def debug_bitrix():
+    return JSONResponse(BITRIX_LAST_EVENT)
+
 def get_db():
     if not _DB_READY.is_set():
         raise HTTPException(status_code=503, detail="База данных запускается")
