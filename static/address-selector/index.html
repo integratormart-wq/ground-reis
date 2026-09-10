@@ -139,7 +139,7 @@ function initWidget(){
   status('Читаю сделку…');
   getPlacementInfo(function(info){
     try {
-      $('debug').textContent = 'placement.info=' + JSON.stringify(info) + '\nlocation.search=' + JSON.stringify(location.search);
+      $('debug').textContent = 'placement.info=' + JSON.stringify(info) + '\nlocation.search=' + JSON.stringify(location.search) + '\nCTX=' + JSON.stringify(window.__CTX__ || null);
       show('debug', true);
     } catch(e){}
     dealId = extractDealId(info);

@@ -49,8 +49,15 @@ root_dir = os.path.dirname(os.path.abspath(__file__))
 # поэтому отдаём HTML и по GET, и по POST (иначе CSRF-защита режет POST и виджет не открывается).
 _address_widget = os.path.join(root_dir, "static", "address-selector", "index.html")
 @app.api_route("/static/address-selector/index.html", methods=["GET", "POST"], include_in_schema=False)
-async def _address_selector_widget():
-    return FileResponse(_address_widget, media_type="text/html")
+async def _address_selector_widget(request: Request):
+    _html = open(_address_widget, encoding="utf-8").read()
+    _body = ""
+    try:
+        _body = (await request.body()).decode("utf-8", "ignore")
+    except Exception:
+        _body = ""
+    _ctx = json.dumps({"query": request.url.query, "body": _body[:3000], "ctype": request.headers.get("content-type", "")}, ensure_ascii=False)
+    return HTMLResponse("<script>window.__CTX__=" + _ctx + ";</script>" + _html)
 app.mount("/static", StaticFiles(directory=os.path.join(root_dir, "static"), html=True), name="static")
 jinja_env = Environment(loader=FileSystemLoader(os.path.join(root_dir, "templates")), autoescape=select_autoescape(["html", "xml"]))
 STATUS_SLUGS = {
