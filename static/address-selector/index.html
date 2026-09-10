@@ -21,7 +21,6 @@
                justify-content:space-between; align-items:center; gap:10px; }
   .addr-name { font-weight:600; }
   .addr-meta { color:#697079; font-size:12px; margin-top:2px; line-height:1.45; }
-  .badge { display:inline-block; background:#eafbf2; color:#1f9d55; padding:2px 8px; border-radius:10px; font-size:11px; }
   label { display:block; font-size:12px; color:var(--gray); margin:10px 0 4px; }
   input, textarea { width:100%; padding:8px 10px; border:1px solid var(--border); border-radius:4px; font-size:14px; font-family:inherit; }
   input:focus, textarea:focus { outline:none; border-color:var(--c1); }
@@ -30,18 +29,20 @@
   .msg { padding:10px 12px; border-radius:4px; margin-bottom:10px; display:none; }
   .msg-ok { background:#eafbf2; color:#1f9d55; border:1px solid #c1ecd4; }
   .msg-err { background:#fdeeee; color:#d33; border:1px solid #f4caca; }
+  .status { background:#f0f7ff; border:1px solid #d5e6fb; border-radius:4px; padding:8px 12px; margin-bottom:10px;
+            font-size:12px; color:#0b66c3; min-height:16px; }
   .spinner { color:var(--gray); padding:12px; }
 </style>
 </head>
 <body>
 <div class="wrap">
+  <div id="status" class="status">Загрузка…</div>
   <div id="error" class="msg msg-err"></div>
   <div id="success" class="msg msg-ok"></div>
 
   <div class="card">
-    <div id="companyInfo" class="muted" style="margin-bottom:8px;"></div>
-    <button class="btn btn-primary" id="btnPick" onclick="openPicker()">📍 Выбрать адрес объекта</button>
-    <button class="btn btn-ghost" id="btnAdd" onclick="openAddForm()">+ Добавить новый адрес</button>
+    <button class="btn btn-primary" id="btnPick">📍 Выбрать адрес объекта</button>
+    <button class="btn btn-ghost" id="btnAdd">+ Добавить новый адрес</button>
   </div>
 
   <div class="card" id="pickerCard" style="display:none;">
@@ -60,8 +61,8 @@
     <label>Комментарий по подъезду</label>
     <textarea id="fComm" rows="2" placeholder="Номер подъезда, как зайти"></textarea>
     <div style="margin-top:12px;">
-      <button class="btn btn-primary" onclick="saveNewAddress()">Сохранить</button>
-      <button class="btn btn-ghost" onclick="closeAll()">Отмена</button>
+      <button class="btn btn-primary" id="btnSaveNew">Сохранить</button>
+      <button class="btn btn-ghost" id="btnCancelNew">Отмена</button>
     </div>
   </div>
 </div>
@@ -71,17 +72,15 @@
 /* ============ НАСТРОЙКИ ПОЛЕЙ (проверены для ГРАУНД b24-7h3u4x) ============ */
 var ENTITY_ADDRESS = 1106;               // смарт-процесс «Адрес объекта»
 var CFG = {
-  // — справочник 1106 (откуда читаем) —
   ADDR_FIELD:      'ufCrm36_1788962453750', // «Адрес»
   CONTACT_FIELD:   'ufCrm36_1788962655732', // «Контактное лицо»
   PHONE_FIELD:     'ufCrm36_1788962624616', // «Номер контактного лица»
   ENTRANCE_FIELD:  'ufCrm36EntranceComment', // «Комментарий по подъезду»
   COMPANY_FIELD:   'companyId',             // «Компания» (для фильтра)
-  // — поля сделки (куда пишем) —
-  DEAL_CONTACT:    'UF_CRM_GROUND_CONTACT_OBJECT',   // «Контакт на объекте»
-  DEAL_PHONE:      'UF_CRM_GROUND_PHONE_OBJECT',     // «Телефон на объекте»
-  DEAL_ENTRANCE:   'UF_CRM_GROUND_ENTRANCE_COMMENT', // «Комментарий по подъезду»
-  DEAL_ADDRESS:    'UF_CRM_GROUND_ADDRESS_PODACHA',     // «Адрес подачи» (текст)
+  DEAL_CONTACT:    'UF_CRM_GROUND_CONTACT_OBJECT',
+  DEAL_PHONE:      'UF_CRM_GROUND_PHONE_OBJECT',
+  DEAL_ENTRANCE:   'UF_CRM_GROUND_ENTRANCE_COMMENT',
+  DEAL_ADDRESS:    'UF_CRM_GROUND_ADDRESS_PODACHA'
 };
 
 var dealId = null;
@@ -90,40 +89,71 @@ var companyTitle = '';
 
 function $(id){ return document.getElementById(id); }
 function show(id, v){ $(id).style.display = v ? '' : 'none'; }
+function status(m){ $('status').textContent = m || ''; }
 function err(m){ var e=$('error'); e.textContent=m; show('error', !!m); show('success', false); }
 function ok(m){ var s=$('success'); s.textContent=m; show('success', !!m); show('error', false); }
 
-if (typeof BX24 !== 'undefined') {
-  BX24.init(function(){
-    BX24.placement.info().then(function(info){
-      dealId = info.options && info.options.ID;
-      if(!dealId){ err('Не удалось определить сделку (no placement ID).'); return; }
-      loadCompany();
-    }).catch(function(){ err('Ошибка чтения placement.info'); });
+/* Любые JS-ошибки выводим на экран — чтобы видеть, что ломается */
+window.onerror = function(msg, src, line, col){
+  try { status('JS-ошибка: ' + msg + ' (строка ' + line + ')'); } catch(e){}
+  return false;
+};
+
+/* Универсальное получение данных placement.info: поддерживает и колбэк, и промис */
+function getPlacementInfo(cb){
+  var done = false;
+  function finish(info){ if(!done){ done = true; cb(info); } }
+  try {
+    var r = BX24.placement.info(finish);   // колбэк-стиль
+    if (r && typeof r.then === 'function') { r.then(finish).catch(function(){ finish(null); }); }
+  } catch(e) {
+    try {
+      var r2 = BX24.placement.info();       // промис-стиль
+      if (r2 && typeof r2.then === 'function') { r2.then(finish).catch(function(){ finish(null); }); }
+      else { finish(null); }
+    } catch(e2) { finish(null); }
+  }
+  setTimeout(function(){ finish(null); }, 6000); // таймаут
+}
+
+function extractDealId(info){
+  var o = (info && info.options) ? info.options : (info || {});
+  return o.ID || o.id || o.entityId || o.entity_id || o.ENTITY_ID || null;
+}
+
+function initWidget(){
+  status('Читаю сделку…');
+  getPlacementInfo(function(info){
+    dealId = extractDealId(info);
+    if(!dealId){
+      status('ID сделки не определён');
+      err('Не удалось определить сделку. Покажите этот экран — подскажу дальше.');
+      return;
+    }
+    status('Сделка ID ' + dealId + '. Читаю компанию…');
+    loadCompany();
   });
-} else {
-  err('Не загрузился SDK Bitrix24. Обновите страницу.');
 }
 
 function loadCompany(){
   BX24.callMethod('crm.deal.get', {id: dealId}, function(res){
-    if(res.error()){ err('Ошибка чтения сделки: ' + res.error()); return; }
+    if(res.error()){ status('Ошибка чтения сделки'); err('Ошибка чтения сделки: ' + res.error()); return; }
     var d = res.answer.result;
     companyId = d.COMPANY_ID || null;
     companyTitle = d.TITLE || '';
     if(!companyId){
+      status('Компания в сделке не выбрана');
       err('Сначала выберите компанию в сделке.');
-      $('companyInfo').textContent = 'Компания не выбрана.';
       return;
     }
-    $('companyInfo').textContent = 'Компания задана (ID ' + companyId + ').';
+    status('Компания задана (ID ' + companyId + '). Готово к выбору адреса.');
   });
 }
 
 function openPicker(){
   closeAll();
-  if(!dealId){ err('Нет сделки.'); return; }
-  if(!companyId){ loadCompany(); err('Сначала выберите компанию в сделке.'); return; }
+  if(!dealId){ err('Нет сделки. Обновите вкладку.'); return; }
+  if(!companyId){ status('Читаю компанию…'); loadCompany(); err('Компания не определена. Выберите её в сделке.'); return; }
   show('pickerCard', true);
   $('list').innerHTML = '<div class="spinner">Загрузка адресов…</div>';
   BX24.callMethod('crm.item.list', {
@@ -141,7 +171,8 @@ function renderList(items){
   var el = $('list');
   if(!items.length){
     el.innerHTML = '<div class="muted">У этой компании нет адресов.</div>' +
-                   '<button class="btn btn-primary btn-sm" style="margin-top:8px;" onclick="openAddForm()">+ Добавить новый адрес</button>';
+                   '<button class="btn btn-primary btn-sm" style="margin-top:8px;" id="btnAddEmpty">+ Добавить новый адрес</button>';
+    document.getElementById('btnAddEmpty').addEventListener('click', openAddForm);
     return;
   }
   var html = '';
@@ -153,18 +184,19 @@ function renderList(items){
     html += '<div class="addr-item">' +
               '<div><div class="addr-name">' + esc(addr) + '</div>' +
               '<div class="addr-meta">Контакт: ' + esc(contact) + '<br>Телефон: ' + esc(phone) + '<br>Подъезд: ' + esc(entrance) + '</div></div>' +
-              '<button class="btn btn-primary btn-sm" data-id="' + it.id + '" onclick="selectById(this)">Выбрать</button>' +
+              '<button class="btn btn-primary btn-sm" data-id="' + it.id + '">Выбрать</button>' +
             '</div>';
   });
   el.innerHTML = html;
+  el.querySelectorAll('button[data-id]').forEach(function(b){
+    b.addEventListener('click', function(){ selectById(b.getAttribute('data-id')); });
+  });
 }
 
-function selectById(btn){
-  var id = btn.getAttribute('data-id');
+function selectById(id){
   BX24.callMethod('crm.item.get', {entityTypeId: ENTITY_ADDRESS, id: id}, function(res){
     if(res.error()){ err('Ошибка чтения адреса: ' + res.error()); return; }
-    var it = res.answer.result.item;
-    applyToDeal(it);
+    applyToDeal(res.answer.result.item);
   });
 }
 
@@ -217,6 +249,24 @@ function esc(s){
   return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
   });
+}
+
+/* ============ ИНИЦИАЛИЗАЦИЯ ============ */
+document.getElementById('btnPick').addEventListener('click', openPicker);
+document.getElementById('btnAdd').addEventListener('click', openAddForm);
+document.getElementById('btnSaveNew').addEventListener('click', saveNewAddress);
+document.getElementById('btnCancelNew').addEventListener('click', closeAll);
+
+if (typeof BX24 === 'undefined') {
+  status('SDK Bitrix24 не загрузился');
+  err('SDK Bitrix24 не загрузился. Обновите страницу.');
+} else {
+  try {
+    BX24.init(initWidget);
+  } catch(e) {
+    // если init недоступен — пробуем сразу
+    initWidget();
+  }
 }
 </script>
 </body>
