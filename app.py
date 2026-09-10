@@ -33,7 +33,7 @@ BITRIX_RECONCILE_LOCK = threading.Lock()
 
 @app.middleware("http")
 async def reject_cross_origin_writes(request: Request, call_next):
-    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/webhook/bitrix24":
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/webhook/bitrix24" and not request.url.path.startswith("/static/address-selector"):
         source = request.headers.get("origin") or request.headers.get("referer")
         if not source:
             return JSONResponse({"detail": "Запрос отклонен защитой CSRF"}, status_code=403)
@@ -45,6 +45,12 @@ async def reject_cross_origin_writes(request: Request, call_next):
     return await call_next(request)
 
 root_dir = os.path.dirname(os.path.abspath(__file__))
+# Виджет «Выбор адреса объекта» для Bitrix24: серверное приложение грузит обработчик POST-запросом,
+# поэтому отдаём HTML и по GET, и по POST (иначе CSRF-защита режет POST и виджет не открывается).
+_address_widget = os.path.join(root_dir, "static", "address-selector", "index.html")
+@app.api_route("/static/address-selector/index.html", methods=["GET", "POST"], include_in_schema=False)
+async def _address_selector_widget():
+    return FileResponse(_address_widget, media_type="text/html")
 app.mount("/static", StaticFiles(directory=os.path.join(root_dir, "static"), html=True), name="static")
 jinja_env = Environment(loader=FileSystemLoader(os.path.join(root_dir, "templates")), autoescape=select_autoescape(["html", "xml"]))
 STATUS_SLUGS = {
