@@ -60,8 +60,6 @@ async def _address_selector_widget(request: Request):
         ctx = {
             "deal_id": placement_options.get("ID"),
             "placement": form.get("PLACEMENT", ""),
-            "auth_id": form.get("AUTH_ID", ""),
-            "server_endpoint": form.get("SERVER_ENDPOINT", ""),
         }
     except Exception:
         ctx = {}
