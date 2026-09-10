@@ -51,13 +51,21 @@ _address_widget = os.path.join(root_dir, "static", "address-selector", "index.ht
 @app.api_route("/static/address-selector/index.html", methods=["GET", "POST"], include_in_schema=False)
 async def _address_selector_widget(request: Request):
     _html = open(_address_widget, encoding="utf-8").read()
-    _body = ""
+    ctx = {}
     try:
-        _body = (await request.body()).decode("utf-8", "ignore")
+        raw = (await request.body()).decode("utf-8", "ignore")
+        form = dict(urllib.parse.parse_qsl(raw))
+        po = form.get("PLACEMENT_OPTIONS", "")
+        placement_options = json.loads(po) if po else {}
+        ctx = {
+            "deal_id": placement_options.get("ID"),
+            "placement": form.get("PLACEMENT", ""),
+            "auth_id": form.get("AUTH_ID", ""),
+            "server_endpoint": form.get("SERVER_ENDPOINT", ""),
+        }
     except Exception:
-        _body = ""
-    _ctx = json.dumps({"query": request.url.query, "body": _body[:3000], "ctype": request.headers.get("content-type", "")}, ensure_ascii=False)
-    return HTMLResponse("<script>window.__CTX__=" + _ctx + ";</script>" + _html)
+        ctx = {}
+    return HTMLResponse("<script>window.__CTX__=" + json.dumps(ctx, ensure_ascii=False) + ";</script>" + _html)
 app.mount("/static", StaticFiles(directory=os.path.join(root_dir, "static"), html=True), name="static")
 jinja_env = Environment(loader=FileSystemLoader(os.path.join(root_dir, "templates")), autoescape=select_autoescape(["html", "xml"]))
 STATUS_SLUGS = {

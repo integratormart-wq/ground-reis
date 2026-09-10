@@ -137,6 +137,13 @@ function extractDealId(info){
 
 function initWidget(){
   status('Читаю сделку…');
+  var injectedId = (window.__CTX__ && window.__CTX__.deal_id) || null;
+  if (injectedId) {
+    dealId = injectedId;
+    status('Сделка ID ' + dealId + ' (из POST). Читаю компанию…');
+    loadCompany();
+    return;
+  }
   getPlacementInfo(function(info){
     try {
       $('debug').textContent = 'placement.info=' + JSON.stringify(info) + '\nlocation.search=' + JSON.stringify(location.search) + '\nCTX=' + JSON.stringify(window.__CTX__ || null);
