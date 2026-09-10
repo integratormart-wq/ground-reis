@@ -202,19 +202,20 @@ function renderList(items){
   }
   var html = '';
   items.forEach(function(it){
-    var addr = it[CFG.ADDR_FIELD] || '(без адреса)';
+    var addr = cleanAddr(it[CFG.ADDR_FIELD]) || '(без адреса)';
     var contact = it[CFG.CONTACT_FIELD] || '—';
     var phone = it[CFG.PHONE_FIELD] || '—';
     var entrance = it[CFG.ENTRANCE_FIELD] || '—';
-    html += '<div class="addr-item">' +
+    html += '<div class="addr-item" data-id="' + it.id + '" style="cursor:pointer;" title="Нажмите, чтобы выбрать этот адрес">' +
               '<div><div class="addr-name">' + esc(addr) + '</div>' +
               '<div class="addr-meta">Контакт: ' + esc(contact) + '<br>Телефон: ' + esc(phone) + '<br>Подъезд: ' + esc(entrance) + '</div></div>' +
-              '<button class="btn btn-primary btn-sm" data-id="' + it.id + '">Выбрать</button>' +
+              '<button class="btn btn-primary btn-sm">Выбрать</button>' +
             '</div>';
   });
   el.innerHTML = html;
-  el.querySelectorAll('button[data-id]').forEach(function(b){
-    b.addEventListener('click', function(){ selectById(b.getAttribute('data-id')); });
+  status('Найдено адресов: ' + items.length + '. Нажмите на нужный.');
+  el.querySelectorAll('.addr-item').forEach(function(item){
+    item.addEventListener('click', function(){ selectById(item.getAttribute('data-id')); });
   });
 }
 
@@ -230,11 +231,13 @@ function applyToDeal(it){
   fields[CFG.DEAL_CONTACT]  = it[CFG.CONTACT_FIELD]  || '';
   fields[CFG.DEAL_PHONE]    = it[CFG.PHONE_FIELD]    || '';
   fields[CFG.DEAL_ENTRANCE] = it[CFG.ENTRANCE_FIELD] || '';
-  fields[CFG.DEAL_ADDRESS]  = it[CFG.ADDR_FIELD]     || '';
+  fields[CFG.DEAL_ADDRESS]  = cleanAddr(it[CFG.ADDR_FIELD]) || '';
   BX24.callMethod('crm.deal.update', {id: dealId, fields: fields}, function(res){
     if(res.error()){ err('Не удалось записать в сделку: ' + res.error()); return; }
-    ok('Адрес выбран и записан в сделку.');
-    closeAll();
+    ok('Адрес выбран и записан в сделку. Обновляю карточку…');
+    setTimeout(function(){
+      try { BX24.reloadWindow(); } catch(e){}
+    }, 900);
   });
 }
 
@@ -274,6 +277,11 @@ function esc(s){
   return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
   });
+}
+
+/* Очищает значение location-поля «Адрес» от служебного хвоста (напр. «Первоуральск|0;0» → «Первоуральск») */
+function cleanAddr(v){
+  return String(v == null ? '' : v).split('|')[0].trim();
 }
 
 /* ============ ИНИЦИАЛИЗАЦИЯ ============ */
