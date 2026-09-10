@@ -2799,6 +2799,24 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
 
     vehicle = None
     vehicle_text = ""
+    # Госномер приходит не текстовым полем, а привязкой к смарт-процессу «Машины»
+    # (parentId1048 → элемент СП 1048): название машины и есть госномер.
+    parent_vehicle_id = _first_id(item.get("parentId1048") or item.get("PARENTID1048"))
+    if parent_vehicle_id:
+        try:
+            parent_vehicle_id_int = int(parent_vehicle_id)
+        except (TypeError, ValueError):
+            parent_vehicle_id_int = None
+        if parent_vehicle_id_int:
+            machine_item = fetch_item(settings.webhook_url, 1048, parent_vehicle_id_int)
+            if isinstance(machine_item, dict) and "_error" not in machine_item:
+                machine_title = str(machine_item.get("title") or machine_item.get("TITLE") or "").strip()
+                if machine_title:
+                    vehicle_text = machine_title
+                    vehicle, _created_vehicle = _ensure_vehicle_from_bitrix_plate(db, kind, machine_title)
+                    if vehicle:
+                        print("BITRIX_INBOUND_VEHICLE_BY_PARENT1048", entity_type_id, item_id,
+                              parent_vehicle_id_int, _normalize_plate(machine_title), flush=True)
     for vehicle_code, raw_vehicle, vehicle_info in _logical_raw_candidates(item, "vehicle_name", mapping, schema):
         candidate_text = str(_display_field_value(settings.webhook_url, raw_vehicle, vehicle_info) or "").strip()
         print(
@@ -3120,7 +3138,8 @@ TRIP_FIELDS = {
     "1088": {  # Рейсы пухтовозы
         "company": "companyId",
         "contact": "contactId",
-        "waste_type": "ufCrm30_1788753308",        # crm → SPA 1040 «Виды мусора»
+        "cargo_type": "ufCrm30_1788118084754",     # «Тип груза» (enumeration) — основной тип мусора
+        "waste_type": "ufCrm30_1788753308",        # «Тип мусора» (crm → SPA 1040 «Виды мусора»)
         "polygon": "ufCrm30_1786395095607",         # enumeration
         "volume": "ufCrm30_1786395144602",          # string
         "tonnage": "ufCrm30_1788102038144",         # string
@@ -3131,7 +3150,7 @@ TRIP_FIELDS = {
     "1092": {  # Рейсы самосвалы
         "company": "companyId",
         "contact": "contactId",
-        "waste_type": "ufCrm32_1788169245150",      # enumeration
+        "cargo_type": "ufCrm32_1788169245150",      # «Тип мусора» (enumeration)
         "polygon": "ufCrm32_1786382983949",         # enumeration
         "volume": "ufCrm32_1786383182599",          # string
         "delivery_dt": "ufCrm32_1786382469521",     # datetime
@@ -3156,14 +3175,13 @@ _POLYGON_MAP = {
     "756": ("642", None),    # Лен Эко Тех
 }
 
-# Сопоставление значения списка «Тип мусора» сделки → ID списка «Тип мусора» в 1092 (по названию).
-# Для 1088 «Тип мусора» ссылается на SPA 1040 «Виды мусора» — копируем напрямую из поля
-# сделки «Вид мусора» (crm → 1040), без маппинга по названию.
-_WASTE_TYPE_MAP_1092 = {
-    "620": "726",    # Грунт → Грунт
-    "622": "724",    # Строймусор → Строймусор
-    "628": "728",    # Замусоренный грунт → Смешанный
-    "630": "732",    # Бой бетона → Бой
+# Сопоставление значения списка «Тип мусора» сделки → (ID «Тип груза» в 1088, ID «Тип мусора» в 1092).
+# Для 1088 «Вид мусора» (crm → 1040) копируем напрямую из поля сделки «Вид мусора», без маппинга.
+_CARGO_TYPE_MAP = {
+    "620": ("674", "726"),    # Грунт
+    "622": ("672", "724"),    # Строймусор
+    "628": ("676", "728"),    # Замусоренный грунт → Смешанный
+    "630": ("680", "732"),    # Бой бетона → Бой
 }
 
 
@@ -3263,19 +3281,21 @@ def enrich_trip_from_deal(webhook_base: str, entity_type_id, element_id) -> dict
         if target:
             updates[trip_fields["polygon"]] = target
 
-    # --- Тип мусора ---
-    # 1088: «Вид мусора» сделки (crm → 1040) копируем напрямую в «Тип мусора» рейса (crm → 1040).
-    # 1092: «Тип мусора» сделки (список) → «Тип мусора» 1092 (список), по названию.
-    if entity_id == "1088":
+    # --- Тип груза / тип мусора (список сделки → список рейса, по названию) ---
+    # 1088: «Тип груза» (список) ← «Тип мусора» сделки. 1092: «Тип мусора» (список) ← то же.
+    if "cargo_type" in trip_fields:
+        cargo_id = _first_id(deal.get(DEAL_F_WASTE_TYPE))
+        if cargo_id and not trip_item.get(trip_fields.get("cargo_type")):
+            mapped = _CARGO_TYPE_MAP.get(cargo_id)
+            target = mapped[0] if entity_id == "1088" else (mapped[1] if mapped else None)
+            if target:
+                updates[trip_fields["cargo_type"]] = target
+
+    # --- «Виды мусора» (crm → 1040), только 1088: копируем из «Вид мусора» сделки ---
+    if entity_id == "1088" and "waste_type" in trip_fields:
         waste_value = deal.get(DEAL_F_WASTE_TYPE_CRM)
         if waste_value and not trip_item.get(trip_fields.get("waste_type")):
             updates[trip_fields["waste_type"]] = _first_id(waste_value)
-    else:
-        waste_type_id = _first_id(deal.get(DEAL_F_WASTE_TYPE))
-        if waste_type_id and not trip_item.get(trip_fields.get("waste_type")):
-            target = _WASTE_TYPE_MAP_1092.get(waste_type_id)
-            if target:
-                updates[trip_fields["waste_type"]] = target
 
     if not updates:
         return {"status": "skipped", "reason": "nothing_to_fill", "deal_id": deal_id}
