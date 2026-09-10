@@ -3105,7 +3105,8 @@ def extract_event_identifiers(payload: dict):
 # --- Поля сделки (источник). crm.deal.get возвращает их в result на верхнем уровне ---
 DEAL_F_COMPANY = "COMPANY_ID"
 DEAL_F_CONTACT = "CONTACT_ID"
-DEAL_F_WASTE_TYPE = "UF_CRM_1786903524677"               # Тип мусора (enumeration, multiple)
+DEAL_F_WASTE_TYPE = "UF_CRM_1786903524677"               # Тип мусора (enumeration, multiple) — для 1092
+DEAL_F_WASTE_TYPE_CRM = "UF_CRM_1732094975"               # Вид мусора (crm → SPA 1040) — для 1088
 DEAL_F_POLYGON = "UF_CRM_1788718754770"                  # Полигон (enumeration)
 DEAL_F_VOLUME = "UF_CRM_1788949563512"                   # Объем (double)
 DEAL_F_TONNAGE = "UF_CRM_1788949587990"                  # Тонн (double)
@@ -3155,15 +3156,14 @@ _POLYGON_MAP = {
     "756": ("642", None),    # Лен Эко Тех
 }
 
-# Сопоставление значения списка «Тип мусора» по ID сделки → (ID для 1088-«Виды мусора», ID для 1092).
-# 1088: поле «Тип мусора» ссылается на SPA 1040 «Виды мусора» (другая таксономия) — по умолчанию None (пропуск).
-_WASTE_TYPE_MAP = {
-    # Для 1088 «Тип мусора» ссылается на SPA 1040 «Виды мусора» (другая таксономия),
-    # поэтому маппинг для 1088 отключён (None) — поле заполняется вручную.
-    "620": (None, "726"),    # Грунт → 1092 «Грунт»
-    "622": (None, "724"),    # Строймусор → 1092 «Строймусор»
-    "628": (None, "728"),    # Замусоренный грунт → 1092 «Смешанный»
-    "630": (None, "732"),    # Бой бетона → 1092 «Бой»
+# Сопоставление значения списка «Тип мусора» сделки → ID списка «Тип мусора» в 1092 (по названию).
+# Для 1088 «Тип мусора» ссылается на SPA 1040 «Виды мусора» — копируем напрямую из поля
+# сделки «Вид мусора» (crm → 1040), без маппинга по названию.
+_WASTE_TYPE_MAP_1092 = {
+    "620": "726",    # Грунт → Грунт
+    "622": "724",    # Строймусор → Строймусор
+    "628": "728",    # Замусоренный грунт → Смешанный
+    "630": "732",    # Бой бетона → Бой
 }
 
 
@@ -3263,12 +3263,17 @@ def enrich_trip_from_deal(webhook_base: str, entity_type_id, element_id) -> dict
         if target:
             updates[trip_fields["polygon"]] = target
 
-    # --- Тип мусора (enumeration; для 1092 по имени; для 1088 crm→1040 — пропускаем) ---
-    waste_type_id = _first_id(deal.get(DEAL_F_WASTE_TYPE))
-    if waste_type_id and not trip_item.get(trip_fields.get("waste_type")):
-        mapped = _WASTE_TYPE_MAP.get(waste_type_id)
-        if mapped:
-            target = mapped[0] if entity_id == "1088" else mapped[1]
+    # --- Тип мусора ---
+    # 1088: «Вид мусора» сделки (crm → 1040) копируем напрямую в «Тип мусора» рейса (crm → 1040).
+    # 1092: «Тип мусора» сделки (список) → «Тип мусора» 1092 (список), по названию.
+    if entity_id == "1088":
+        waste_value = deal.get(DEAL_F_WASTE_TYPE_CRM)
+        if waste_value and not trip_item.get(trip_fields.get("waste_type")):
+            updates[trip_fields["waste_type"]] = _first_id(waste_value)
+    else:
+        waste_type_id = _first_id(deal.get(DEAL_F_WASTE_TYPE))
+        if waste_type_id and not trip_item.get(trip_fields.get("waste_type")):
+            target = _WASTE_TYPE_MAP_1092.get(waste_type_id)
             if target:
                 updates[trip_fields["waste_type"]] = target
 
