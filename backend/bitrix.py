@@ -142,20 +142,20 @@ FIELD_TITLES = {
     # В Bitrix поле теперь называется именно «Госномер». Не подхватываем
     # старые поля «Машина/Машины/Автомобиль», чтобы они больше не могли
     # перехватить синхронизацию.
-    "vehicle_name": ("госномер", "государственный номер"),
+    "vehicle_name": ("госномер", "гос номер", "гос. номер", "государственный номер", "номер автомобиля", "регистрационный номер"),
     "load_address": ("адрес загрузки", "адрес подачи", "загрузка"),
     "unload_address": ("адрес выгрузки", "выгрузка"),
     "route_name": ("маршрут",),
     "trips_count": ("количество рейсов", "число рейсов", "рейсов"),
-    "cargo_type_name": ("тип груза", "груз"),
+    "cargo_type_name": ("тип груза", "тип мусора", "вид мусора", "тип отходов", "вид отходов", "груз"),
     # Пухтовозы продолжают использовать «Тариф», самосвалы — отдельное поле
     # «Базовая ставка». Это два разных логических поля, чтобы значения не
     # перехватывали друг друга между смарт-процессами.
-    "tariff_name": ("тариф",),
+    "tariff_name": ("тариф", "тариф водителя", "тариф рейса", "тариф на рейс"),
     "base_rate": ("базовая ставка",),
     "km": ("километраж план", "плановый километраж", "километраж", "км план"),
-    "volume": ("объем план", "плановый объем", "объем", "кубатура"),
-    "tonnage": ("тоннаж план", "плановый тоннаж", "тонны план", "тоннаж"),
+    "volume": ("объем план", "плановый объем", "объем м3", "объем м³", "объем, м3", "объем, м³", "объем кузова", "объем", "кубатура"),
+    "tonnage": ("тоннаж план", "плановый тоннаж", "тонны план", "тоннаж т", "тоннаж, т", "вес т", "вес, т", "тоннаж"),
     "actual_km": ("фактический километраж", "факт км", "км факт"),
     "actual_volume": ("фактический объем", "факт объем", "объем факт"),
     "actual_tonnage": ("фактический тоннаж", "тоннаж факт", "тонны факт"),
@@ -300,17 +300,22 @@ def _enrich_schema_with_userfield_config(webhook_base: str, entity_id: str, fiel
     """
     if not isinstance(fields, dict) or not fields:
         return fields
-    # Не добавляем лишний REST-вызов для обычных схем. Конфигурация нужна
-    # только когда есть list/enumeration без опубликованных вариантов.
-    needs_enum = False
-    for field_info in fields.values():
+    # crm.item.fields на разных порталах описывает одно и то же пользовательское
+    # поле по-разному: список может прийти как enumeration/list, а иногда как
+    # обычный custom field без items. Поэтому при отсутствии опубликованных
+    # вариантов один раз (схема кэшируется) пробуем userfieldconfig.list для UF.
+    # Это нужно, чтобы внутренний ID Bitrix вроде 716 не попадал в приложение
+    # вместо отображаемого значения вроде 32.
+    needs_config = False
+    for field_code, field_info in fields.items():
         if not isinstance(field_info, dict):
             continue
-        ftype = _field_type(field_info)
-        if ftype in {"enumeration", "list"} and not _field_options(field_info):
-            needs_enum = True
+        code_key = str(field_code or "").lower().replace("_", "")
+        is_custom = code_key.startswith("uf")
+        if is_custom and not _field_options(field_info):
+            needs_config = True
             break
-    if not needs_enum:
+    if not needs_config:
         return fields
     try:
         info = _type_info_by_entity(webhook_base, int(entity_id))
@@ -1049,12 +1054,26 @@ def _display_field_value(webhook_base: str, raw, info: dict):
 
 
 def _read_display_logical(item: dict, logical: str, mapping: dict, schema: dict, webhook_base: str):
-    code = _field_code(mapping, logical)
-    if code and code in item:
-        return _display_field_value(webhook_base, item.get(code), schema.get(code, {}) if isinstance(schema, dict) else {})
-    fallback = FIELD_MAP.get(logical)
-    if fallback and fallback in item:
-        return _display_field_value(webhook_base, item.get(fallback), schema.get(fallback, {}) if isinstance(schema, dict) else {})
+    """Читает первое пригодное человекочитаемое значение логического поля.
+
+    После переименований в Bitrix могут оставаться дубли полей. Кроме того,
+    list/enumeration без доступной схемы возвращает голый внутренний ID. Такой
+    ID нельзя принимать за госномер, тариф, объём и т.п.: лучше пропустить его
+    и попробовать следующий заполненный кандидат, чем записать техническое
+    значение в Ground.
+    """
+    for code, raw, info in _logical_raw_candidates(item, logical, mapping, schema):
+        display = _display_field_value(webhook_base, raw, info)
+        text = str(display or "").strip()
+        if not text:
+            continue
+        field_type = _field_type(info)
+        if field_type in {"enumeration", "list"} and not _field_options(info):
+            raw_text = str(_scalar(raw) or "").strip()
+            if raw_text and text == raw_text and re.fullmatch(r"\d+", raw_text):
+                print("BITRIX_UNRESOLVED_ENUM_SKIP", logical, code, flush=True)
+                continue
+        return display
     return ""
 
 
@@ -1591,7 +1610,7 @@ def _preferred_link_field_code(schema: dict, logical: str):
         "polygon_name": ("название полигона", "полигон"),
         "tariff_name": ("название тарифа", "тариф"),
         "base_rate": ("базовая ставка",),
-        "cargo_type_name": ("тип груза", "груз"),
+        "cargo_type_name": ("тип груза", "тип мусора", "вид мусора", "тип отходов", "вид отходов", "груз"),
     }
     aliases = tuple(_normalize(x) for x in aliases_by_logical.get(logical, ()))
     for code, info in (schema or {}).items():
@@ -2223,7 +2242,7 @@ def diagnose_trip_fields(webhook_base: str, entity_type_id: int, item_id: int) -
         return {"ok": False, "item_id": int(item_id)}
     mapping = resolve_field_map_for_item(schema, item)
     result = {"ok": True, "item_id": int(item_id), "fields": {}}
-    for logical in ("driver_name", "vehicle_name", "load_address", "base_rate", "volume", "polygon_cost"):
+    for logical in ("driver_name", "vehicle_name", "load_address", "cargo_type_name", "tariff_name", "base_rate", "volume", "tonnage", "polygon_cost"):
         rows = []
         for code, raw, info in _logical_raw_candidates(item, logical, mapping, schema):
             display = str(_display_field_value(webhook_base, raw, info) or "").strip()
@@ -2955,201 +2974,3 @@ def extract_event_identifiers(payload: dict):
     except (TypeError, ValueError):
         entity_id = None
     return event, item_id, entity_id
-
-
-# ===== Восстановлено: автозаполнение рейса из родительской сделки (REST, Вариант B) =====
-DEAL_F_COMPANY = "COMPANY_ID"
-DEAL_F_CONTACT = "CONTACT_ID"
-DEAL_F_WASTE_TYPE = "UF_CRM_1786903524677"               # Тип мусора (enumeration, multiple) — для 1092
-DEAL_F_WASTE_TYPE_CRM = "UF_CRM_1732094975"               # Вид мусора (crm → SPA 1040) — для 1088
-DEAL_F_POLYGON = "UF_CRM_1788718754770"                  # Полигон (enumeration)
-DEAL_F_VOLUME = "UF_CRM_1788949563512"                   # Объем (double)
-DEAL_F_TONNAGE = "UF_CRM_1788949587990"                  # Тонн (double)
-DEAL_F_DELIVERY_DT = "UF_CRM_1733804506197"              # Дата и время доставки (datetime)
-DEAL_F_ADDRESS_OBJECT = "UF_CRM_1788962896801"           # Адреса объекта (address)
-DEAL_F_ADDRESS_PODACHA = "UF_CRM_GROUND_ADDRESS_PODACHA"  # Адрес подачи (string, виджет)
-DEAL_F_CONTACT_OBJECT = "UF_CRM_GROUND_CONTACT_OBJECT"    # Контакт на объекте (string)
-
-# --- Поля рейса (назначение) по entityTypeId ---
-TRIP_FIELDS = {
-    "1088": {  # Рейсы пухтовозы
-        "company": "companyId",
-        "contact": "contactId",
-        "cargo_type": "ufCrm30_1788118084754",     # «Тип груза» (enumeration) — основной тип мусора
-        "waste_type": "ufCrm30_1788753308",        # «Тип мусора» (crm → SPA 1040 «Виды мусора»)
-        "polygon": "ufCrm30_1786395095607",         # enumeration
-        "volume": "ufCrm30_1786395144602",          # string
-        "tonnage": "ufCrm30_1788102038144",         # string
-        "delivery_dt": "ufCrm30_1786395006418",     # datetime
-        "address": "ufCrm30_1786395026081",         # address
-        "contact_object": "ufCrm30_1789035566",     # string (первый из 6 дублей)
-    },
-    "1092": {  # Рейсы самосвалы
-        "company": "companyId",
-        "contact": "contactId",
-        "cargo_type": "ufCrm32_1788169245150",      # «Тип мусора» (enumeration)
-        "polygon": "ufCrm32_1786382983949",         # enumeration
-        "volume": "ufCrm32_1786383182599",          # string
-        "delivery_dt": "ufCrm32_1786382469521",     # datetime
-        "address": "ufCrm32_1786382759986",         # address
-    },
-}
-
-# Сопоставление значения списка «Полигон» по ID сделки → (ID для 1088, ID для 1092).
-# 1088: названия идентичны сделке. 1092: названия отличаются — заданы явно.
-_POLYGON_MAP = {
-    "734": ("604", "592"),   # Кабельгрупп / Кабель Групп
-    "736": ("606", "594"),   # Раритет
-    "738": ("608", "596"),   # СПЭК
-    "740": ("610", "598"),   # Полигон отходов Северная Самарка / Северная Самарка
-    "742": ("612", "600"),   # ТЭК
-    "744": ("614", "602"),   # Эко-Васт (парнас) / Эко-Васт
-    "746": ("632", None),    # Полигон ТБО ООО «Новый Свет — ЭКО» (нет аналога в 1092)
-    "748": ("634", None),    # ООО "Полигон ТБО"
-    "750": ("636", None),    # ООО УК
-    "752": ("638", None),    # Эко технологии
-    "754": ("640", None),    # Эко-Васт (софийка)
-    "756": ("642", None),    # Лен Эко Тех
-}
-
-# Сопоставление значения списка «Тип мусора» сделки → (ID «Тип груза» в 1088, ID «Тип мусора» в 1092).
-# Для 1088 «Вид мусора» (crm → 1040) копируем напрямую из поля сделки «Вид мусора», без маппинга.
-_CARGO_TYPE_MAP = {
-    "620": ("674", "726"),    # Грунт
-    "622": ("672", "724"),    # Строймусор
-    "628": ("676", "728"),    # Замусоренный грунт → Смешанный
-    "630": ("680", "732"),    # Бой бетона → Бой
-}
-
-
-def _first_id(value) -> str:
-    """Нормализует значение поля к одному ID (списки — берём первый)."""
-    if isinstance(value, (list, tuple, set)):
-        value = value[0] if value else None
-    if value is None or value == "" or value is False:
-        return ""
-    return str(value)
-
-
-def _get_deal_linked_to_trip(webhook_base: str, trip_entity_type_id: int, trip_element_id: int) -> dict:
-    """Возвращает ID сделки-родителя из поля parentId2 элемента рейса."""
-    item = fetch_item(webhook_base, trip_entity_type_id, trip_element_id)
-    if not isinstance(item, dict):
-        return {"deal_id": None, "error": "item_not_found"}
-    parent = item.get("parentId2")
-    deal_id = _first_id(parent)
-    return {"deal_id": deal_id or None}
-
-
-def enrich_trip_from_deal(webhook_base: str, entity_type_id, element_id) -> dict:
-    """Переносит данные из родительской сделки в созданный рейс (заполняет пустые поля).
-
-    Возвращает словарь со статусом и списком обновлённых полей.
-    """
-    entity_id = str(int(entity_type_id))
-    try:
-        element_id_int = int(element_id)
-    except (TypeError, ValueError):
-        return {"status": "error", "error": "bad_element_id"}
-
-    trip_fields = TRIP_FIELDS.get(entity_id)
-    if not trip_fields:
-        return {"status": "skipped", "reason": "unknown_entity_type", "entity_type_id": entity_id}
-
-    # 1) Находим сделку-родителя.
-    deal_link = _get_deal_linked_to_trip(webhook_base, int(entity_id), element_id_int)
-    deal_id = deal_link.get("deal_id")
-    if not deal_id:
-        return {"status": "skipped", "reason": "no_deal_linkage"}
-
-    # 2) Читаем сделку и текущий элемент рейса.
-    deal_response = _http_post(webhook_base, "crm.deal.get", {"id": int(deal_id)})
-    if "error" in deal_response or "result" not in deal_response:
-        return {"status": "error", "error": "deal_get_failed",
-                "detail": deal_response.get("error") or deal_response.get("error_description")}
-    deal = deal_response.get("result", {})
-
-    trip_item = fetch_item(webhook_base, int(entity_id), element_id_int)
-    if not isinstance(trip_item, dict):
-        return {"status": "error", "error": "trip_item_not_found"}
-
-    updates = {}
-
-    # --- Компания / Контакт (нативные привязки, ID) ---
-    company_id = _first_id(deal.get(DEAL_F_COMPANY))
-    if company_id and not trip_item.get(trip_fields.get("company")):
-        updates[trip_fields["company"]] = int(company_id)
-
-    contact_id = _first_id(deal.get(DEAL_F_CONTACT))
-    if contact_id and not trip_item.get(trip_fields.get("contact")):
-        updates[trip_fields["contact"]] = int(contact_id)
-
-    # --- Объем / Тоннаж (число → строка) ---
-    volume = deal.get(DEAL_F_VOLUME)
-    if volume not in (None, "", False) and not trip_item.get(trip_fields.get("volume")):
-        updates[trip_fields["volume"]] = str(volume)
-
-    if "tonnage" in trip_fields:
-        tonnage = deal.get(DEAL_F_TONNAGE)
-        if tonnage not in (None, "", False) and not trip_item.get(trip_fields.get("tonnage")):
-            updates[trip_fields["tonnage"]] = str(tonnage)
-
-    # --- Дата и время доставки (datetime) ---
-    delivery_dt = deal.get(DEAL_F_DELIVERY_DT)
-    if delivery_dt and not trip_item.get(trip_fields.get("delivery_dt")):
-        updates[trip_fields["delivery_dt"]] = delivery_dt
-
-    # --- Адрес подачи (string виджета → address; фолбэк на «Адреса объекта») ---
-    address_value = deal.get(DEAL_F_ADDRESS_PODACHA) or deal.get(DEAL_F_ADDRESS_OBJECT)
-    if address_value and not trip_item.get(trip_fields.get("address")):
-        updates[trip_fields["address"]] = str(address_value)
-
-    # --- Контакт на объекте (string) ---
-    if "contact_object" in trip_fields:
-        contact_object = deal.get(DEAL_F_CONTACT_OBJECT)
-        if contact_object and not trip_item.get(trip_fields.get("contact_object")):
-            updates[trip_fields["contact_object"]] = str(contact_object)
-
-    # --- Полигон (enumeration → enumeration, по имени) ---
-    polygon_id = _first_id(deal.get(DEAL_F_POLYGON))
-    if polygon_id and not trip_item.get(trip_fields.get("polygon")):
-        mapped = _POLYGON_MAP.get(polygon_id)
-        target = mapped[0] if entity_id == "1088" else (mapped[1] if mapped else None)
-        if target:
-            updates[trip_fields["polygon"]] = target
-
-    # --- Тип груза / тип мусора (список сделки → список рейса, по названию) ---
-    # 1088: «Тип груза» (список) ← «Тип мусора» сделки. 1092: «Тип мусора» (список) ← то же.
-    if "cargo_type" in trip_fields:
-        cargo_id = _first_id(deal.get(DEAL_F_WASTE_TYPE))
-        if cargo_id and not trip_item.get(trip_fields.get("cargo_type")):
-            mapped = _CARGO_TYPE_MAP.get(cargo_id)
-            target = mapped[0] if entity_id == "1088" else (mapped[1] if mapped else None)
-            if target:
-                updates[trip_fields["cargo_type"]] = target
-
-    # --- «Виды мусора» (crm → 1040), только 1088: копируем из «Вид мусора» сделки ---
-    if entity_id == "1088" and "waste_type" in trip_fields:
-        waste_value = deal.get(DEAL_F_WASTE_TYPE_CRM)
-        if waste_value and not trip_item.get(trip_fields.get("waste_type")):
-            updates[trip_fields["waste_type"]] = _first_id(waste_value)
-
-    if not updates:
-        return {"status": "skipped", "reason": "nothing_to_fill", "deal_id": deal_id}
-
-    response = _http_post(webhook_base, "crm.item.update", {
-        "entityTypeId": int(entity_id),
-        "id": element_id_int,
-        "fields": updates,
-    })
-    if "error" in response:
-        return {"status": "error", "error": "item_update_failed",
-                "detail": response.get("error") or response.get("error_description")}
-
-    return {
-        "status": "success",
-        "deal_id": deal_id,
-        "entity_type_id": entity_id,
-        "element_id": element_id_int,
-        "fields_updated": list(updates.keys()),
-    }
