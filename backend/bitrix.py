@@ -137,32 +137,32 @@ FIELD_MAP = {
 }
 
 FIELD_TITLES = {
-    "planned_at": ("подача машины", "дата и время", "дата рейса", "плановая дата и время", "дата/время рейса", "дата"),
-    "driver_name": ("водитель", "фио водителя", "водители", "фио"),
+    "planned_at": ("дата и время", "дата рейса", "плановая дата и время", "дата/время рейса", "подача машины", "дата"),
+    "driver_name": ("водитель", "фио водителя", "водители"),
     # В Bitrix поле теперь называется именно «Госномер». Не подхватываем
     # старые поля «Машина/Машины/Автомобиль», чтобы они больше не могли
     # перехватить синхронизацию.
-    "vehicle_name": ("госномер", "гос номер", "государственный номер", "номер автомобиля", "номер машины", "регистрационный номер"),
-    "load_address": ("адрес подачи", "адрес загрузки", "загрузка"),
+    "vehicle_name": ("госномер", "государственный номер"),
+    "load_address": ("адрес загрузки", "адрес подачи", "загрузка"),
     "unload_address": ("адрес выгрузки", "выгрузка"),
     "route_name": ("маршрут",),
     "trips_count": ("количество рейсов", "число рейсов", "рейсов"),
-    "cargo_type_name": ("тип груза", "груз", "тип мусора"),
+    "cargo_type_name": ("тип груза", "груз"),
     # Пухтовозы продолжают использовать «Тариф», самосвалы — отдельное поле
     # «Базовая ставка». Это два разных логических поля, чтобы значения не
     # перехватывали друг друга между смарт-процессами.
     "tariff_name": ("тариф",),
     "base_rate": ("базовая ставка",),
     "km": ("километраж план", "плановый километраж", "километраж", "км план"),
-    "volume": ("объем", "объем план", "плановый объем", "кубатура"),
+    "volume": ("объем план", "плановый объем", "объем", "кубатура"),
     "tonnage": ("тоннаж план", "плановый тоннаж", "тонны план", "тоннаж"),
     "actual_km": ("фактический километраж", "факт км", "км факт"),
     "actual_volume": ("фактический объем", "факт объем", "объем факт"),
     "actual_tonnage": ("фактический тоннаж", "тоннаж факт", "тонны факт"),
     "status": ("статус заявки", "статус рейса", "статус"),
-    "customer_name": ("заказчик", "клиент", "компания", "клиент компания", "клиент / компания"),
+    "customer_name": ("заказчик", "клиент", "компания"),
     "customer_bitrix_id": ("id компании битрикс", "bitrix id клиента", "id клиента битрикс"),
-    "customer_inn": ("инн заказчика", "инн клиента", "инн компании", "инн"),
+    "customer_inn": ("инн заказчика", "инн клиента", "инн"),
     "customer_contact_name": ("контакт заказчика", "контакт клиента", "контактное лицо заказчика"),
     "customer_contact_phone": ("телефон заказчика", "телефон клиента", "телефон компании"),
     "customer_address": ("адрес заказчика", "адрес клиента", "адрес компании"),
@@ -284,6 +284,84 @@ def resolve_process_entity(webhook_base: str, kind) -> Optional[str]:
     return None
 
 
+def _field_code_key(value) -> str:
+    """Сопоставляет UF_CRM_7_FIELD и ufCrm7Field как один код поля."""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _enrich_schema_with_userfield_config(webhook_base: str, entity_id: str, fields: dict) -> dict:
+    """Добавляет enum/labels из userfieldconfig.list к crm.item.fields.
+
+    У смарт-процессов crm.item.get часто возвращает для списка только ID
+    выбранного варианта (например 716), а crm.item.fields на некоторых
+    порталах не содержит сам список вариантов. Тогда объём 32 ошибочно
+    превращался в 716. userfieldconfig.list возвращает enum со значениями.
+    При отсутствии scope userfieldconfig просто оставляем исходную схему.
+    """
+    if not isinstance(fields, dict) or not fields:
+        return fields
+    # Не добавляем лишний REST-вызов для обычных схем. Конфигурация нужна
+    # только когда есть list/enumeration без опубликованных вариантов.
+    needs_enum = False
+    for field_info in fields.values():
+        if not isinstance(field_info, dict):
+            continue
+        ftype = _field_type(field_info)
+        if ftype in {"enumeration", "list"} and not _field_options(field_info):
+            needs_enum = True
+            break
+    if not needs_enum:
+        return fields
+    try:
+        info = _type_info_by_entity(webhook_base, int(entity_id))
+        type_id = info.get("id") if isinstance(info, dict) else None
+        if not type_id:
+            return fields
+        response = _http_post(webhook_base, "userfieldconfig.list", {
+            "moduleId": "crm",
+            "filter": {"entityId": f"CRM_{int(type_id)}"},
+        })
+        if not isinstance(response, dict) or "error" in response:
+            return fields
+        result = response.get("result") or {}
+        rows = result.get("fields") if isinstance(result, dict) else None
+        if not isinstance(rows, list):
+            return fields
+        by_key = {_field_code_key(code): code for code in fields}
+        enriched = dict(fields)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            field_name = row.get("fieldName") or row.get("FIELD_NAME")
+            code = by_key.get(_field_code_key(field_name))
+            if not code:
+                continue
+            current = dict(enriched.get(code) or {})
+            enum = row.get("enum") or row.get("ENUM")
+            if isinstance(enum, list) and enum:
+                # _field_options умеет читать ключ enum.
+                current["enum"] = enum
+            user_type = row.get("userTypeId") or row.get("USER_TYPE_ID")
+            if user_type and not current.get("userTypeId"):
+                current["userTypeId"] = user_type
+            for src, dst in (
+                ("editFormLabel", "formLabel"),
+                ("listColumnLabel", "listLabel"),
+                ("EDIT_FORM_LABEL", "formLabel"),
+                ("LIST_COLUMN_LABEL", "listLabel"),
+            ):
+                if row.get(src):
+                    # userfieldconfig.list отражает актуальное видимое имя после
+                    # переименований в Bitrix, поэтому оно приоритетнее кешированного
+                    # label из crm.item.fields.
+                    current[dst] = row.get(src)
+            enriched[code] = current
+        return enriched
+    except Exception as exc:
+        print("BITRIX_USERFIELD_SCHEMA_ENRICH_SKIP", entity_id, type(exc).__name__, flush=True)
+        return fields
+
+
 def get_element_fields(webhook_base: str, entity_id: str, force: bool = False) -> dict:
     cache_key = (_normalize_webhook_base(webhook_base), str(entity_id))
     if not force:
@@ -294,16 +372,9 @@ def get_element_fields(webhook_base: str, entity_id: str, force: bool = False) -
     if "error" in response:
         return {"_error": response["error"]}
     fields = response.get("result", {}).get("fields", {})
+    fields = _enrich_schema_with_userfield_config(webhook_base, str(entity_id), fields)
     _cache_put(_FIELD_SCHEMA_CACHE, cache_key, fields)
     return fields
-
-
-def _get_element_fields_fresh(webhook_base: str, entity_id) -> dict:
-    """Свежая схема для входящего события; fallback сохраняет совместимость тестов."""
-    try:
-        return get_element_fields(webhook_base, str(entity_id), force=True)
-    except TypeError:
-        return get_element_fields(webhook_base, str(entity_id))
 
 
 def fetch_item(webhook_base: str, entity_id: int, item_id: int) -> dict:
@@ -409,10 +480,8 @@ def _field_alias_score(title: str, aliases) -> int:
         if not normalized_alias:
             continue
         if normalized_title == normalized_alias:
-            # Порядок алиасов задаёт бизнес-приоритет. Например, для рейса
-            # «Адрес подачи» должен выигрывать у старого «Адрес загрузки», а
-            # «Объём» — у устаревшего «Объём план».
-            best = max(best, 12000 - index * 100 + min(len(normalized_alias), 99))
+            # Более длинный/конкретный алиас чуть предпочтительнее.
+            best = max(best, 10000 + len(normalized_alias) * 10 - index)
             continue
         # Частичное совпадение разрешаем только для достаточно конкретных
         # многословных названий. Алиас должен входить в полное название поля,
@@ -513,35 +582,13 @@ def _logical_candidate_codes(schema: dict, logical: str) -> list[str]:
     return result
 
 
-def _item_key_ci(item: dict, code: str):
-    """Возвращает фактический ключ item без зависимости от регистра Bitrix."""
-    if not isinstance(item, dict) or not code:
-        return None
-    if code in item:
-        return code
-    target = str(code).lower()
-    for key in item.keys():
-        if str(key).lower() == target:
-            return key
-    return None
-
-
-def _item_value_ci(item: dict, code: str):
-    key = _item_key_ci(item, code)
-    return item.get(key) if key is not None else None
-
-
-def _item_has_ci(item: dict, code: str) -> bool:
-    return _item_key_ci(item, code) is not None
-
-
 def resolve_field_map_for_item(schema: dict, item: dict) -> dict:
     """Как resolve_field_map, но среди дублей выбирает поле, реально заполненное в карточке."""
     resolved = resolve_field_map(schema)
     item = item or {}
     for logical in FIELD_TITLES:
         codes = _logical_candidate_codes(schema, logical)
-        filled = [code for code in codes if _item_has_ci(item, code) and _raw_value_present(_item_value_ci(item, code))]
+        filled = [code for code in codes if code in item and _raw_value_present(item.get(code))]
         if filled:
             resolved[logical] = filled[0]
     return resolved
@@ -559,10 +606,10 @@ def _logical_raw_candidates(item: dict, logical: str, mapping: dict, schema: dic
     if legacy:
         ordered.append(legacy)
     for code in ordered:
-        if not code or code in seen or not _item_has_ci(item, code):
+        if not code or code in seen or code not in item:
             continue
         seen.add(code)
-        raw = _item_value_ci(item, code)
+        raw = item.get(code)
         if _raw_value_present(raw):
             yield code, raw, (schema or {}).get(code, {})
 
@@ -606,14 +653,6 @@ def _polygon_cost_value(req, db=None):
                 models.PolygonTariff.polygon_id == req.polygon_id,
                 models.PolygonTariff.cargo_type_id == req.cargo_type_id,
             ).first()
-        if polygon_tariff is None:
-            # Если груз из Bitrix не выбран, но у полигона настроен ровно один
-            # тариф, это однозначная ставка — используем её вместо нулевой суммы.
-            polygon_rows = db.query(models.PolygonTariff).filter(
-                models.PolygonTariff.polygon_id == req.polygon_id
-            ).all()
-            if len(polygon_rows) == 1:
-                polygon_tariff = polygon_rows[0]
         if polygon_tariff:
             rate = float(polygon_tariff.rate or 0)
             unit = str(polygon_tariff.unit or "м³").lower()
@@ -876,6 +915,32 @@ def check_user_directory_access(webhook_base: str) -> dict:
     return {"ok": True}
 
 
+def check_userfield_config_access(webhook_base: str, entity_id: int = SAMOSVAL_ENTITY_TYPE_ID) -> dict:
+    """Проверяет чтение настроек пользовательских полей смарт-процесса.
+
+    Для полей типа список Bitrix присылает в карточке ID варианта. Без
+    userfieldconfig.list невозможно надежно превратить, например, 716 в
+    отображаемый объём 32.
+    """
+    info = _type_info_by_entity(webhook_base, int(entity_id))
+    type_id = info.get("id") if isinstance(info, dict) else None
+    if not type_id:
+        return {"ok": False, "reason": "type_info_unavailable"}
+    response = _http_post(webhook_base, "userfieldconfig.list", {
+        "moduleId": "crm",
+        "filter": {"entityId": f"CRM_{int(type_id)}"},
+    })
+    if not isinstance(response, dict):
+        return {"ok": False, "reason": "invalid_response"}
+    if "error" in response:
+        error_code = str(response.get("error") or "").strip()
+        description = str(response.get("error_description") or "").strip()
+        lower = f"{error_code} {description}".lower()
+        reason = "insufficient_scope" if "scope" in lower or "permission" in lower else "access_error"
+        return {"ok": False, "reason": reason, "error": error_code[:80]}
+    return {"ok": True}
+
+
 def _bitrix_user_full_name(row: dict) -> str:
     if not isinstance(row, dict):
         return ""
@@ -898,7 +963,6 @@ def _user_display_name(webhook_base: str, raw):
 
 
 def _crm_binding_parts(value):
-    """Разбирает стандартное строковое значение CRM-привязки Bitrix (CO_12/T444_7)."""
     text = str(_scalar(value) or "").strip()
     match = re.fullmatch(r"([A-Za-z0-9]+)_(\d+)", text)
     if not match:
@@ -913,87 +977,6 @@ def _crm_binding_parts(value):
             return int(prefix_upper[1:], 16), int(item_id)
         except ValueError:
             return None, None
-    return None, None
-
-
-def _crm_entity_ids_from_info(info: dict) -> list[int]:
-    """Возвращает допустимые типы сущностей CRM из схемы пользовательского поля.
-
-    У разных порталов Bitrix24 одно и то же поле CRM приходит по-разному:
-    иногда как ``T444_12``, иногда как голый ``12`` + DYNAMIC_444 в settings.
-    """
-    info = info or {}
-    ids = _extract_dynamic_entity_ids(info)
-
-    def contains_key(node, needle):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                key_norm = str(key or "").upper()
-                if needle in key_norm and str(value or "").strip().upper() not in {"", "N", "NO", "FALSE", "0"}:
-                    return True
-                if contains_key(value, needle):
-                    return True
-        elif isinstance(node, (list, tuple, set)):
-            return any(contains_key(value, needle) for value in node)
-        return False
-
-    field_type = _field_type(info)
-    if "company" in field_type or contains_key(info, "COMPANY"):
-        ids.append(4)
-    if "contact" in field_type or contains_key(info, "CONTACT"):
-        ids.append(3)
-    if "deal" in field_type or contains_key(info, "DEAL"):
-        ids.append(2)
-    if "lead" in field_type or contains_key(info, "LEAD"):
-        ids.append(1)
-    result = []
-    for entity_id in ids:
-        try:
-            entity_id = int(entity_id)
-        except (TypeError, ValueError):
-            continue
-        if entity_id > 0 and entity_id not in result:
-            result.append(entity_id)
-    return result
-
-
-def _crm_binding_parts_with_info(value, info: dict = None):
-    """Разбирает CRM-привязку с учётом метаданных поля Bitrix."""
-    if isinstance(value, dict):
-        entity_type = (
-            value.get("entityTypeId") or value.get("entity_type_id") or value.get("typeId")
-            or value.get("ENTITY_TYPE_ID") or value.get("TYPE_ID")
-        )
-        item_id = (
-            value.get("id") or value.get("ID") or value.get("itemId") or value.get("ITEM_ID")
-            or value.get("entityId") or value.get("ENTITY_ID")
-        )
-        try:
-            if int(entity_type or 0) > 0 and int(item_id or 0) > 0:
-                return int(entity_type), int(item_id)
-        except (TypeError, ValueError):
-            pass
-        for key in ("value", "VALUE", "binding", "BINDING"):
-            if key in value:
-                parsed = _crm_binding_parts_with_info(value.get(key), info)
-                if parsed[0] and parsed[1]:
-                    return parsed
-
-    parsed = _crm_binding_parts(value)
-    if parsed[0] and parsed[1]:
-        return parsed
-
-    # Некоторые CRM-поля отдают только числовой ID. Использовать его безопасно
-    # можно лишь когда схема однозначно говорит, к какому типу сущности он относится.
-    entity_ids = _crm_entity_ids_from_info(info or {})
-    if len(entity_ids) == 1:
-        scalar = _scalar(value)
-        try:
-            item_id = int(str(scalar).strip())
-        except (TypeError, ValueError):
-            item_id = 0
-        if item_id > 0:
-            return entity_ids[0], item_id
     return None, None
 
 
@@ -1019,11 +1002,11 @@ def _linked_item_preferred_label(webhook_base: str, entity_type_id: int, item: d
     return title
 
 
-def _crm_binding_display(webhook_base: str, raw, info: dict = None):
+def _crm_binding_display(webhook_base: str, raw):
     raw_values = raw if isinstance(raw, list) else [raw]
     labels = []
     for value in raw_values:
-        entity_type_id, item_id = _crm_binding_parts_with_info(value, info or {})
+        entity_type_id, item_id = _crm_binding_parts(value)
         if not entity_type_id or not item_id:
             continue
         linked = fetch_item(webhook_base, entity_type_id, item_id)
@@ -1043,9 +1026,9 @@ def _display_field_value(webhook_base: str, raw, info: dict):
     if field_type in {"user", "employee"}:
         return _user_display_name(webhook_base, raw)
     raw_values = raw if isinstance(raw, list) else [raw]
-    looks_like_crm_binding = any(_crm_binding_parts_with_info(value, info or {})[0] for value in raw_values)
-    if field_type in {"crm", "crm_entity", "crm_company", "crm_contact"} or looks_like_crm_binding or _crm_entity_ids_from_info(info or {}):
-        linked = _crm_binding_display(webhook_base, raw, info or {})
+    looks_like_crm_binding = any(_crm_binding_parts(value)[0] for value in raw_values)
+    if field_type in {"crm", "crm_entity"} or looks_like_crm_binding:
+        linked = _crm_binding_display(webhook_base, raw)
         if linked:
             return linked
     if isinstance(raw, dict):
@@ -1055,7 +1038,7 @@ def _display_field_value(webhook_base: str, raw, info: dict):
     if isinstance(raw, list):
         values = [str(_scalar(v) or "").strip() for v in raw]
         return ", ".join(v for v in values if v)
-    text = str(raw or "").strip()
+    text = str("" if raw is None else raw).strip()
     # Некоторые CRM-поля возвращают «ID_123|читаемое значение» или наоборот.
     if "|" in text:
         parts = [part.strip() for part in text.split("|") if part.strip()]
@@ -1066,82 +1049,36 @@ def _display_field_value(webhook_base: str, raw, info: dict):
 
 
 def _read_display_logical(item: dict, logical: str, mapping: dict, schema: dict, webhook_base: str):
-    """Читает первое реально заполненное поле и разворачивает list/user/CRM ID."""
-    for _code, raw, info in _logical_raw_candidates(item, logical, mapping, schema):
-        display = _display_field_value(webhook_base, raw, info)
-        if str(display or "").strip():
-            return display
+    code = _field_code(mapping, logical)
+    if code and code in item:
+        return _display_field_value(webhook_base, item.get(code), schema.get(code, {}) if isinstance(schema, dict) else {})
+    fallback = FIELD_MAP.get(logical)
+    if fallback and fallback in item:
+        return _display_field_value(webhook_base, item.get(fallback), schema.get(fallback, {}) if isinstance(schema, dict) else {})
     return ""
 
 
-def _clean_address_text(webhook_base: str, raw, info: dict) -> str:
-    text = str(_display_field_value(webhook_base, raw, info or {}) or "").strip()
+def _clean_address_value(webhook_base: str, item: dict, logical: str, mapping: dict, schema: dict) -> str:
+    value = _read_display_logical(item, logical, mapping, schema, webhook_base)
+    text = str(value or "").strip()
     if not text:
         return ""
+    # JSON-строка от адресного поля: берём только читаемый адрес.
     if text.startswith("{") or text.startswith("["):
         try:
             parsed = json.loads(text)
-            displayed = _display_field_value(webhook_base, parsed, info or {})
+            displayed = _display_field_value(webhook_base, parsed, _field_info(schema, mapping, logical))
             if displayed:
                 text = str(displayed).strip()
         except (ValueError, TypeError):
             pass
-    # Адресные поля Bitrix иногда возвращают служебный ID вместе с подписью.
-    # Сохраняем только человекочитаемую часть.
+    # Не сохраняем служебный числовой ID, если Bitrix склеил его с адресом через |.
     if "|" in text:
         parts = [part.strip() for part in text.split("|") if part.strip()]
         readable = [part for part in parts if re.search(r"[A-Za-zА-Яа-яЁё]", part)]
         if readable:
             text = max(readable, key=len)
     return text
-
-
-def _clean_address_value(webhook_base: str, item: dict, logical: str, mapping: dict, schema: dict) -> str:
-    # В смарт-процессах 1088/1092 после переименований могут остаться дубли.
-    # Берём первое заполненное читаемое поле, а не первый технический UF-код.
-    for _code, raw, info in _logical_raw_candidates(item, logical, mapping, schema):
-        text = _clean_address_text(webhook_base, raw, info)
-        if text:
-            return text
-    return ""
-
-
-def _numeric_text(value):
-    """Извлекает число из значения Bitrix вроде '32', '32 м³', '1 250,50'."""
-    if value is None:
-        return None
-    text = str(value).strip().replace("\u00a0", " ")
-    if not text:
-        return None
-    match = re.search(r"[-+]?\d[\d\s]*(?:[.,]\d+)?", text)
-    if not match:
-        return None
-    candidate = match.group(0).replace(" ", "").replace(",", ".")
-    try:
-        return float(candidate)
-    except ValueError:
-        return None
-
-
-def _read_numeric_logical(item: dict, logical: str, mapping: dict, schema: dict, webhook_base: str):
-    """Читает числовое поле через его отображаемое значение.
-
-    Критично для Bitrix-полей типа «Список»: в item хранится ID варианта
-    (например 716), а менеджер выбрал отображаемое значение 32. Поэтому
-    сначала разворачиваем enumeration/userfield и только затем парсим число.
-    """
-    for _code, raw, info in _logical_raw_candidates(item, logical, mapping, schema):
-        display = _display_field_value(webhook_base, raw, info)
-        number = _numeric_text(display)
-        if number is not None:
-            return number
-        # Для обычного number/integer поля display совпадает с raw. Этот fallback
-        # нужен лишь если Bitrix вернул нестандартную структуру без подписи.
-        if not _field_options(info):
-            number = _numeric_text(_scalar(raw))
-            if number is not None:
-                return number
-    return None
 
 
 def _portal_timezone(webhook_base: str):
@@ -1237,15 +1174,7 @@ def _driver_text_candidates(webhook_base: str, raw, info: dict) -> list[str]:
 
     add(_display_field_value(webhook_base, raw, info or {}))
 
-    field_type = _field_type(info or {})
-    crm_entities = _crm_entity_ids_from_info(info or {})
-    # Голый числовой ID в CRM-привязке — это ID связанной сущности, а не
-    # сотрудника Bitrix. user.get вызываем только для настоящих user/employee
-    # полей (или старого integer-поля без CRM-настроек).
-    may_be_user = field_type in {"user", "employee"} or (
-        field_type in {"integer", "int"} and not crm_entities
-    ) or bool(re.fullmatch(r"(?:U|USER|EMPLOYEE|STAFF|WORKER|СОТРУДНИК)[_:\- ]*\d+", str(_scalar(raw) or "").strip(), re.I))
-    user_id = _extract_bitrix_user_id(raw) if may_be_user else None
+    user_id = _extract_bitrix_user_id(raw)
     if user_id:
         row = _bitrix_user_record(webhook_base, user_id)
         if row:
@@ -1280,7 +1209,7 @@ def _driver_text_candidates(webhook_base: str, raw, info: dict) -> list[str]:
     return candidates
 
 
-def _driver_binding_candidates(webhook_base: str, raw, info: dict = None) -> list[str]:
+def _driver_binding_candidates(webhook_base: str, raw) -> list[str]:
     """ФИО из CRM-привязки, если поле «Водитель» связано с другим смарт-процессом."""
     result = []
     values = raw if isinstance(raw, list) else [raw]
@@ -1288,17 +1217,14 @@ def _driver_binding_candidates(webhook_base: str, raw, info: dict = None) -> lis
         "водитель", "фио", "фио водителя", "полное имя", "фамилия имя", "фамилия", "сотрудник",
     ))
     for value in values:
-        entity_type_id, linked_id = _crm_binding_parts_with_info(value, info or {})
+        entity_type_id, linked_id = _crm_binding_parts(value)
         if not entity_type_id or not linked_id:
             continue
         linked = fetch_item(webhook_base, entity_type_id, linked_id)
         if "_error" in linked:
             continue
-        preferred = _linked_item_preferred_label(webhook_base, entity_type_id, linked)
-        if preferred:
-            result.append(preferred)
         title = str(linked.get("title") or linked.get("TITLE") or "").strip()
-        if title and title not in result:
+        if title:
             result.append(title)
         linked_schema = get_element_fields(webhook_base, str(entity_type_id))
         if "_error" in linked_schema:
@@ -1326,7 +1252,7 @@ def _resolve_local_driver(db, webhook_base: str, item: dict, mapping: dict, sche
     all_candidates = []
     for code, raw, info in _logical_raw_candidates(item, "driver_name", mapping, schema):
         field_candidates = _driver_text_candidates(webhook_base, raw, info)
-        binding_candidates = _driver_binding_candidates(webhook_base, raw, info)
+        binding_candidates = _driver_binding_candidates(webhook_base, raw)
         safe_display = next((str(x).strip() for x in field_candidates + binding_candidates if str(x).strip()), "")
         print(
             "BITRIX_INBOUND_DRIVER_FIELD", code, _normalize(_field_label(info, code)),
@@ -1349,13 +1275,20 @@ def _company_id_from_field(raw, info: dict):
     """Извлекает company ID из штатной или пользовательской CRM-привязки."""
     values = raw if isinstance(raw, list) else [raw]
     for value in values:
-        entity_type, item_id = _crm_binding_parts_with_info(value, info or {})
+        if isinstance(value, dict):
+            entity_type = value.get("entityTypeId") or value.get("entity_type_id") or value.get("typeId")
+            item_id = value.get("id") or value.get("itemId") or value.get("entityId") or value.get("value")
+            try:
+                if int(entity_type or 4) == 4 and int(item_id) > 0:
+                    return int(item_id)
+            except (TypeError, ValueError):
+                pass
+        entity_type, item_id = _crm_binding_parts(value)
         if entity_type == 4 and item_id:
             return int(item_id)
-    # Поле с типом crm_company иногда вообще не содержит настроек сущности и
-    # возвращает голый числовой ID. В этом конкретном типе это однозначно компания.
     field_type = _field_type(info)
-    if "company" in field_type:
+    # crm_company нередко возвращает просто числовой ID.
+    if "company" in field_type or field_type in {"crm", "crm_entity"}:
         scalar = _scalar(raw)
         try:
             candidate = int(str(scalar).strip())
@@ -2239,25 +2172,12 @@ def _numeric_equal(a, b, tolerance=0.005):
         return str(_scalar(a) or "").strip() == str(b or "").strip()
 
 
-def _calculated_field_codes(schema: dict, mapping: dict, logical: str) -> list[str]:
-    """Все реальные коды расчётного поля, включая дубли после переименований."""
-    result = []
-    preferred = (mapping or {}).get(logical)
-    if preferred and preferred in schema:
-        result.append(preferred)
-    for code in _logical_candidate_codes(schema, logical):
-        if code in schema and code not in result:
-            result.append(code)
-    return result
+def sync_polygon_cost_to_bitrix(req, db, settings=None) -> dict:
+    """Точечно отправляет вычисленные «Затраты полигона» в тот же рейс Bitrix.
 
-
-def sync_calculated_fields_to_bitrix(req, db, settings=None) -> dict:
-    """Возвращает в Bitrix расчётные значения приложения без перезаписи рейса.
-
-    После входящего изменения менеджером пересчитываем и точечно отправляем:
-    - «Затраты полигона»;
-    - «Зарплата водителя».
-    Значения сравниваются с Bitrix, поэтому echo-event не создаёт цикл.
+    Вызывается после inbound-синхронизации. Полную карточку обратно не шлём,
+    поэтому не перетираем данные логиста и не создаём цикл. Перед update
+    сравниваем текущее значение и отправляем только если сумма реально изменилась.
     """
     settings = settings or get_integration_settings(db)
     if not settings or not settings.is_active or not settings.webhook_url:
@@ -2265,65 +2185,34 @@ def sync_calculated_fields_to_bitrix(req, db, settings=None) -> dict:
     if not getattr(req, "bitrix_element_id", None) or not getattr(req, "bitrix_entity_type_id", None):
         return {"skipped": True, "reason": "not_linked"}
     entity_id = int(req.bitrix_entity_type_id)
-    schema = _get_element_fields_fresh(settings.webhook_url, entity_id)
+    schema = get_element_fields(settings.webhook_url, str(entity_id))
     if "_error" in schema:
-        return {"error": schema["_error"], "action": "calculated_fields"}
+        return {"error": schema["_error"], "action": "polygon_cost_fields"}
     mapping = resolve_field_map(schema)
+    code = mapping.get("polygon_cost")
+    if not code or code not in schema:
+        print("BITRIX_POLYGON_COST_SKIP field_not_found", entity_id, req.id, flush=True)
+        return {"skipped": True, "reason": "polygon_cost_field_not_found"}
+    desired = _polygon_cost_value(req, db=db)
+    if desired in (None, ""):
+        print("BITRIX_POLYGON_COST_SKIP no_value", entity_id, req.id, flush=True)
+        return {"skipped": True, "reason": "polygon_cost_not_calculated"}
     remote = fetch_item(settings.webhook_url, entity_id, int(req.bitrix_element_id))
     if "_error" in remote:
-        return {"error": remote["_error"], "action": "calculated_fields_get"}
-
-    desired_by_logical = {
-        "polygon_cost": _polygon_cost_value(req, db=db),
-        "sum_driver": req.sum_driver if getattr(req, "sum_driver", None) is not None else "",
-    }
-    updates = {}
-    sent = {}
-    for logical, desired in desired_by_logical.items():
-        if desired in (None, ""):
-            continue
-        codes = _calculated_field_codes(schema, mapping, logical)
-        if not codes:
-            print("BITRIX_CALCULATED_SKIP", logical, "field_not_found", entity_id, req.id, flush=True)
-            continue
-        changed = False
-        for code in codes:
-            current = _item_value_ci(remote, code)
-            if not _numeric_equal(current, desired):
-                updates[code] = float(desired)
-                changed = True
-        if changed:
-            sent[logical] = float(desired)
-        else:
-            print("BITRIX_CALCULATED_OK", logical, "unchanged", entity_id, req.id, float(desired), flush=True)
-
-    if not updates:
-        return {"ok": True, "action": "calculated_fields_unchanged", "values": sent}
+        return {"error": remote["_error"], "action": "polygon_cost_get"}
+    if _numeric_equal(remote.get(code), desired):
+        print("BITRIX_POLYGON_COST_OK unchanged", entity_id, req.id, float(desired), flush=True)
+        return {"ok": True, "action": "polygon_cost_unchanged", "value": float(desired)}
     response = _http_post(settings.webhook_url, "crm.item.update", {
         "entityTypeId": entity_id,
         "id": int(req.bitrix_element_id),
-        "fields": updates,
+        "fields": {code: float(desired)},
     })
     if "error" in response:
-        print("BITRIX_CALCULATED_ERROR", entity_id, req.id, flush=True)
-        return {"error": response["error"], "action": "calculated_fields_update"}
-    for logical, value in sent.items():
-        print("BITRIX_CALCULATED_OK", logical, "updated", entity_id, req.id, value, flush=True)
-    return {"ok": True, "action": "calculated_fields_update", "values": sent}
-
-
-def sync_polygon_cost_to_bitrix(req, db, settings=None) -> dict:
-    """Совместимый wrapper: теперь вместе с затратами отправляет и зарплату."""
-    result = sync_calculated_fields_to_bitrix(req, db, settings=settings)
-    if result.get("error"):
-        return result
-    values = result.get("values") or {}
-    if "polygon_cost" in values:
-        return {"ok": True, "action": "polygon_cost_update", "value": values["polygon_cost"]}
-    desired = _polygon_cost_value(req, db=db)
-    if desired in (None, ""):
-        return {"skipped": True, "reason": "polygon_cost_not_calculated"}
-    return {"ok": True, "action": "polygon_cost_unchanged", "value": float(desired)}
+        print("BITRIX_POLYGON_COST_ERROR", entity_id, req.id, flush=True)
+        return {"error": response["error"], "action": "polygon_cost_update"}
+    print("BITRIX_POLYGON_COST_OK updated", entity_id, req.id, float(desired), flush=True)
+    return {"ok": True, "action": "polygon_cost_update", "value": float(desired)}
 
 
 def diagnose_trip_fields(webhook_base: str, entity_type_id: int, item_id: int) -> dict:
@@ -2334,7 +2223,7 @@ def diagnose_trip_fields(webhook_base: str, entity_type_id: int, item_id: int) -
         return {"ok": False, "item_id": int(item_id)}
     mapping = resolve_field_map_for_item(schema, item)
     result = {"ok": True, "item_id": int(item_id), "fields": {}}
-    for logical in ("driver_name", "vehicle_name", "base_rate", "volume", "polygon_cost"):
+    for logical in ("driver_name", "vehicle_name", "load_address", "base_rate", "volume", "polygon_cost"):
         rows = []
         for code, raw, info in _logical_raw_candidates(item, logical, mapping, schema):
             display = str(_display_field_value(webhook_base, raw, info) or "").strip()
@@ -2472,13 +2361,13 @@ def _scalar(value):
 def _read_logical(item: dict, logical: str, mapping: dict):
     candidates = [mapping.get(logical), FIELD_MAP.get(logical)]
     for code in candidates:
-        if code and _item_has_ci(item, code):
-            return _scalar(_item_value_ci(item, code))
+        if code and code in item:
+            return _scalar(item.get(code))
     return ""
 
 
 def _has_logical(item: dict, logical: str, mapping: dict) -> bool:
-    return any(code and _item_has_ci(item, code) for code in (mapping.get(logical), FIELD_MAP.get(logical)))
+    return any(code and code in item for code in (mapping.get(logical), FIELD_MAP.get(logical)))
 
 
 def _to_float(value):
@@ -2630,10 +2519,7 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     item = fetch_item(settings.webhook_url, entity_type_id, item_id)
     if "_error" in item:
         return {"error": item["_error"]}
-    # Входящее событие всегда читает свежую схему: поля в Bitrix часто
-    # переименовывают прямо во время настройки (1088/1092), и 5-минутный кэш
-    # не должен мешать новой подписи «Госномер», «Водитель», «Объём» и т.д.
-    schema = _get_element_fields_fresh(settings.webhook_url, entity_type_id)
+    schema = get_element_fields(settings.webhook_url, str(entity_type_id))
     mapping = resolve_field_map_for_item(schema, item) if "_error" not in schema else FIELD_MAP
     if "_error" not in schema:
         _log_important_field_map(schema, mapping, entity_type_id, item_id)
@@ -2680,7 +2566,7 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
     # Берём именно фактическое поле «Подача машины/Дата и время», а не
     # системную «Дату создания», и сохраняем дату/время в часовом поясе портала.
     planned_code = _field_code(mapping, "planned_at")
-    raw_planned_at = _item_value_ci(item, planned_code) if planned_code else None
+    raw_planned_at = item.get(planned_code) if planned_code and planned_code in item else None
     planned_date, planned_time = _parse_bitrix_planned_at(settings.webhook_url, raw_planned_at)
     if planned_date is not None:
         trip.planned_date = planned_date
@@ -2698,43 +2584,45 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
             else:
                 value = str(_read_display_logical(item, logical, mapping, schema, settings.webhook_url) or "")
             setattr(trip, attr, value[:limit] if limit else value)
+    if kind == TripType.SAMOSVAL:
+        print(
+            "BITRIX_INBOUND_SAMOSVAL_CORE", entity_type_id, item_id,
+            "address=" + _normalize(getattr(trip, "load_address", "")),
+            flush=True,
+        )
     def inbound_value(parser, logical, field):
-        """Плохое одно поле Bitrix не должно отменять создание/обновление всего рейса."""
-        raw = _read_logical(item, logical, mapping)
+        """Читает фактическое отображаемое значение поля Bitrix.
+
+        Для list/enumeration Bitrix хранит ID варианта. Поэтому raw=716 может
+        означать отображаемый объём 32. В расчёты всегда передаём подпись
+        варианта, а не внутренний ID Bitrix.
+        """
+        raw = _read_display_logical(item, logical, mapping, schema, settings.webhook_url)
         try:
             return parser(raw, field) if field is not None else parser(raw)
         except ValueError:
-            print("BITRIX_INBOUND_FIELD_SKIPPED", logical, entity_type_id, item_id, flush=True)
+            print("BITRIX_INBOUND_FIELD_SKIPPED", logical, entity_type_id, item_id, _normalize(raw), flush=True)
             return None
 
-    def inbound_number(logical, integer=False):
-        value = _read_numeric_logical(item, logical, mapping, schema, settings.webhook_url)
-        if value is None:
-            return None
-        if not math.isfinite(float(value)) or float(value) < 0:
-            print("BITRIX_INBOUND_FIELD_SKIPPED", logical, entity_type_id, item_id, flush=True)
-            return None
-        return int(round(value)) if integer else float(value)
-
-    km = inbound_number("km")
-    volume = inbound_number("volume")
-    tonnage = inbound_number("tonnage")
-    actual_km = inbound_number("actual_km")
-    actual_volume = inbound_number("actual_volume")
-    actual_tonnage = inbound_number("actual_tonnage")
-    trips_count = inbound_number("trips_count", integer=True)
-    waste_bin_count = inbound_number("waste_bin_count", integer=True)
-    odometer = inbound_number("odometer")
-    fuel_liters = inbound_number("fuel_liters")
-    fuel_price = inbound_number("fuel_price")
-    fuel_cost = inbound_number("fuel_cost")
+    km = inbound_value(_optional_nonnegative_float, "km", "km")
+    volume = inbound_value(_optional_nonnegative_float, "volume", "volume")
+    tonnage = inbound_value(_optional_nonnegative_float, "tonnage", "tonnage")
+    actual_km = inbound_value(_optional_nonnegative_float, "actual_km", "actual_km")
+    actual_volume = inbound_value(_optional_nonnegative_float, "actual_volume", "actual_volume")
+    actual_tonnage = inbound_value(_optional_nonnegative_float, "actual_tonnage", "actual_tonnage")
+    trips_count = inbound_value(_optional_nonnegative_int, "trips_count", "trips_count")
+    waste_bin_count = inbound_value(_optional_nonnegative_int, "waste_bin_count", "waste_bin_count")
+    odometer = inbound_value(_optional_nonnegative_float, "odometer", "odometer")
+    fuel_liters = inbound_value(_optional_nonnegative_float, "fuel_liters", "fuel_liters")
+    fuel_price = inbound_value(_optional_nonnegative_float, "fuel_price", "fuel_price")
+    fuel_cost = inbound_value(_optional_nonnegative_float, "fuel_cost", "fuel_cost")
     started_at = inbound_value(_optional_datetime, "started_at", "started_at")
     finished_at = inbound_value(_optional_datetime, "finished_at", "finished_at")
     customer_bitrix_id = inbound_value(_optional_nonnegative_int, "customer_bitrix_id", "customer_bitrix_id")
     customer_inn = inbound_value(_optional_inn, "customer_inn", None)
     is_empty_run = inbound_value(_optional_bool, "is_empty_run", "is_empty_run")
     has_downtime = inbound_value(_optional_bool, "has_downtime", "has_downtime")
-    downtime_minutes = inbound_number("downtime_minutes", integer=True)
+    downtime_minutes = inbound_value(_optional_nonnegative_int, "downtime_minutes", "downtime_minutes")
 
     # Пустая карточка Bitrix часто отдаёт числовые поля как 0. Для количества
     # рейсов это не повод откатывать весь webhook: оставляем старое значение,
@@ -2799,24 +2687,6 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
 
     vehicle = None
     vehicle_text = ""
-    # Госномер приходит не текстовым полем, а привязкой к смарт-процессу «Машины»
-    # (parentId1048 → элемент СП 1048): название машины и есть госномер.
-    parent_vehicle_id = _first_id(item.get("parentId1048") or item.get("PARENTID1048"))
-    if parent_vehicle_id:
-        try:
-            parent_vehicle_id_int = int(parent_vehicle_id)
-        except (TypeError, ValueError):
-            parent_vehicle_id_int = None
-        if parent_vehicle_id_int:
-            machine_item = fetch_item(settings.webhook_url, 1048, parent_vehicle_id_int)
-            if isinstance(machine_item, dict) and "_error" not in machine_item:
-                machine_title = str(machine_item.get("title") or machine_item.get("TITLE") or "").strip()
-                if machine_title:
-                    vehicle_text = machine_title
-                    vehicle, _created_vehicle = _ensure_vehicle_from_bitrix_plate(db, kind, machine_title)
-                    if vehicle:
-                        print("BITRIX_INBOUND_VEHICLE_BY_PARENT1048", entity_type_id, item_id,
-                              parent_vehicle_id_int, _normalize_plate(machine_title), flush=True)
     for vehicle_code, raw_vehicle, vehicle_info in _logical_raw_candidates(item, "vehicle_name", mapping, schema):
         candidate_text = str(_display_field_value(settings.webhook_url, raw_vehicle, vehicle_info) or "").strip()
         print(
@@ -2861,35 +2731,19 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
             print("BITRIX_INBOUND_POLYGON_NOT_MATCHED", entity_type_id, item_id, _normalize(polygon_name), flush=True)
     customer_name = str(_read_display_logical(item, "customer_name", mapping, schema, settings.webhook_url) or "").strip()
     custom_company_ref_id = None
-
-    # В самосвалах поле в интерфейсе Bitrix называется «Клиент», а приложение
-    # хранит его как «Заказчик». Не завязываемся на конкретный UF-код: проверяем
-    # все заполненные поля с алиасами Клиент/Заказчик/Компания и штатный companyId.
-    for customer_field_code, raw_customer, customer_info in _logical_raw_candidates(
-        item, "customer_name", mapping, schema
-    ):
-        candidate_company_id = _company_id_from_field(raw_customer, customer_info)
-        if candidate_company_id:
-            custom_company_ref_id = candidate_company_id
-            customer_bitrix_id = candidate_company_id
-            break
-
-    client_field_present = any(_item_has_ci(item, key) for key in ("companyId", "contactId", "contactIds"))
-    raw_company_id = _item_value_ci(item, "companyId")
-    built_in_company_id = (
-        _optional_nonnegative_int(raw_company_id, "companyId")
-        if raw_company_id not in (None, "", 0, "0") else None
-    )
-    raw_contact_ids = _item_value_ci(item, "contactIds")
-    raw_contact_id = _item_value_ci(item, "contactId")
-    if raw_contact_ids in (None, "", []):
-        raw_contact_ids = [] if raw_contact_id in (None, "", 0, "0") else [raw_contact_id]
+    customer_field_code = _field_code(mapping, "customer_name")
+    if customer_field_code and customer_field_code in item:
+        customer_info = schema.get(customer_field_code, {}) if isinstance(schema, dict) else {}
+        custom_company_ref_id = _company_id_from_field(item.get(customer_field_code), customer_info)
+        if custom_company_ref_id:
+            customer_bitrix_id = custom_company_ref_id
+    client_field_present = any(key in item for key in ("companyId", "contactId", "contactIds"))
+    built_in_company_id = _optional_nonnegative_int(item.get("companyId"), "companyId") if item.get("companyId") not in (None, "", 0, "0") else None
+    raw_contact_ids = item.get("contactIds") or ([] if item.get("contactId") in (None, "", 0, "0") else [item.get("contactId")])
     if not isinstance(raw_contact_ids, list):
         raw_contact_ids = [raw_contact_ids]
     built_in_contact_id = None
     for raw_contact_id in raw_contact_ids:
-        if isinstance(raw_contact_id, dict):
-            raw_contact_id = raw_contact_id.get("id") or raw_contact_id.get("ID") or raw_contact_id.get("value") or raw_contact_id.get("VALUE")
         try:
             candidate = int(raw_contact_id)
         except (TypeError, ValueError):
@@ -2897,18 +2751,7 @@ def sync_from_bitrix(item_id: int, entity_type_id: int, db, settings=None) -> di
         if candidate > 0:
             built_in_contact_id = candidate
             break
-
     company_lookup_id = built_in_company_id or custom_company_ref_id
-
-    # Если карточка самосвала передала только ИНН, находим по нему компанию в
-    # Bitrix (реквизиты) и затем подтягиваем название/ID. Это та же логика,
-    # которую ожидаем от пухтовозов: ИНН становится полноценной связью с компанией.
-    if not company_lookup_id and customer_inn:
-        company_lookup_id = _find_company_by_inn(settings.webhook_url, customer_inn)
-        if company_lookup_id:
-            customer_bitrix_id = int(company_lookup_id)
-            print("BITRIX_INBOUND_CUSTOMER_BY_INN", entity_type_id, item_id, company_lookup_id, customer_inn, flush=True)
-
     company_item = fetch_item(settings.webhook_url, 4, company_lookup_id) if company_lookup_id else {}
     contact_item = fetch_item(settings.webhook_url, 3, built_in_contact_id) if built_in_contact_id else {}
     if company_lookup_id and "_error" not in company_item:
@@ -3112,207 +2955,3 @@ def extract_event_identifiers(payload: dict):
     except (TypeError, ValueError):
         entity_id = None
     return event, item_id, entity_id
-
-
-# Автозаполнение рейса из сделки (REST / Вариант B).
-# Коды полей сверены с живой схемой Bitrix24 2026-09-10 (входящий вебхук user 226).
-# При создании элемента смарт-процесса (рейса) из сделки переносим данные сделки
-# в рейс, заполняя ТОЛЬКО пустые поля рейса (не затираем ручной ввод).
-# =========================================================================
-
-# --- Поля сделки (источник). crm.deal.get возвращает их в result на верхнем уровне ---
-DEAL_F_COMPANY = "COMPANY_ID"
-DEAL_F_CONTACT = "CONTACT_ID"
-DEAL_F_WASTE_TYPE = "UF_CRM_1786903524677"               # Тип мусора (enumeration, multiple) — для 1092
-DEAL_F_WASTE_TYPE_CRM = "UF_CRM_1732094975"               # Вид мусора (crm → SPA 1040) — для 1088
-DEAL_F_POLYGON = "UF_CRM_1788718754770"                  # Полигон (enumeration)
-DEAL_F_VOLUME = "UF_CRM_1788949563512"                   # Объем (double)
-DEAL_F_TONNAGE = "UF_CRM_1788949587990"                  # Тонн (double)
-DEAL_F_DELIVERY_DT = "UF_CRM_1733804506197"              # Дата и время доставки (datetime)
-DEAL_F_ADDRESS_OBJECT = "UF_CRM_1788962896801"           # Адреса объекта (address)
-DEAL_F_ADDRESS_PODACHA = "UF_CRM_GROUND_ADDRESS_PODACHA"  # Адрес подачи (string, виджет)
-DEAL_F_CONTACT_OBJECT = "UF_CRM_GROUND_CONTACT_OBJECT"    # Контакт на объекте (string)
-
-# --- Поля рейса (назначение) по entityTypeId ---
-TRIP_FIELDS = {
-    "1088": {  # Рейсы пухтовозы
-        "company": "companyId",
-        "contact": "contactId",
-        "cargo_type": "ufCrm30_1788118084754",     # «Тип груза» (enumeration) — основной тип мусора
-        "waste_type": "ufCrm30_1788753308",        # «Тип мусора» (crm → SPA 1040 «Виды мусора»)
-        "polygon": "ufCrm30_1786395095607",         # enumeration
-        "volume": "ufCrm30_1786395144602",          # string
-        "tonnage": "ufCrm30_1788102038144",         # string
-        "delivery_dt": "ufCrm30_1786395006418",     # datetime
-        "address": "ufCrm30_1786395026081",         # address
-        "contact_object": "ufCrm30_1789035566",     # string (первый из 6 дублей)
-    },
-    "1092": {  # Рейсы самосвалы
-        "company": "companyId",
-        "contact": "contactId",
-        "cargo_type": "ufCrm32_1788169245150",      # «Тип мусора» (enumeration)
-        "polygon": "ufCrm32_1786382983949",         # enumeration
-        "volume": "ufCrm32_1786383182599",          # string
-        "delivery_dt": "ufCrm32_1786382469521",     # datetime
-        "address": "ufCrm32_1786382759986",         # address
-    },
-}
-
-# Сопоставление значения списка «Полигон» по ID сделки → (ID для 1088, ID для 1092).
-# 1088: названия идентичны сделке. 1092: названия отличаются — заданы явно.
-_POLYGON_MAP = {
-    "734": ("604", "592"),   # Кабельгрупп / Кабель Групп
-    "736": ("606", "594"),   # Раритет
-    "738": ("608", "596"),   # СПЭК
-    "740": ("610", "598"),   # Полигон отходов Северная Самарка / Северная Самарка
-    "742": ("612", "600"),   # ТЭК
-    "744": ("614", "602"),   # Эко-Васт (парнас) / Эко-Васт
-    "746": ("632", None),    # Полигон ТБО ООО «Новый Свет — ЭКО» (нет аналога в 1092)
-    "748": ("634", None),    # ООО "Полигон ТБО"
-    "750": ("636", None),    # ООО УК
-    "752": ("638", None),    # Эко технологии
-    "754": ("640", None),    # Эко-Васт (софийка)
-    "756": ("642", None),    # Лен Эко Тех
-}
-
-# Сопоставление значения списка «Тип мусора» сделки → (ID «Тип груза» в 1088, ID «Тип мусора» в 1092).
-# Для 1088 «Вид мусора» (crm → 1040) копируем напрямую из поля сделки «Вид мусора», без маппинга.
-_CARGO_TYPE_MAP = {
-    "620": ("674", "726"),    # Грунт
-    "622": ("672", "724"),    # Строймусор
-    "628": ("676", "728"),    # Замусоренный грунт → Смешанный
-    "630": ("680", "732"),    # Бой бетона → Бой
-}
-
-
-def _first_id(value) -> str:
-    """Нормализует значение поля к одному ID (списки — берём первый)."""
-    if isinstance(value, (list, tuple, set)):
-        value = value[0] if value else None
-    if value is None or value == "" or value is False:
-        return ""
-    return str(value)
-
-
-def _get_deal_linked_to_trip(webhook_base: str, trip_entity_type_id: int, trip_element_id: int) -> dict:
-    """Возвращает ID сделки-родителя из поля parentId2 элемента рейса."""
-    item = fetch_item(webhook_base, trip_entity_type_id, trip_element_id)
-    if not isinstance(item, dict):
-        return {"deal_id": None, "error": "item_not_found"}
-    parent = item.get("parentId2")
-    deal_id = _first_id(parent)
-    return {"deal_id": deal_id or None}
-
-
-def enrich_trip_from_deal(webhook_base: str, entity_type_id, element_id) -> dict:
-    """Переносит данные из родительской сделки в созданный рейс (заполняет пустые поля).
-
-    Возвращает словарь со статусом и списком обновлённых полей.
-    """
-    entity_id = str(int(entity_type_id))
-    try:
-        element_id_int = int(element_id)
-    except (TypeError, ValueError):
-        return {"status": "error", "error": "bad_element_id"}
-
-    trip_fields = TRIP_FIELDS.get(entity_id)
-    if not trip_fields:
-        return {"status": "skipped", "reason": "unknown_entity_type", "entity_type_id": entity_id}
-
-    # 1) Находим сделку-родителя.
-    deal_link = _get_deal_linked_to_trip(webhook_base, int(entity_id), element_id_int)
-    deal_id = deal_link.get("deal_id")
-    if not deal_id:
-        return {"status": "skipped", "reason": "no_deal_linkage"}
-
-    # 2) Читаем сделку и текущий элемент рейса.
-    deal_response = _http_post(webhook_base, "crm.deal.get", {"id": int(deal_id)})
-    if "error" in deal_response or "result" not in deal_response:
-        return {"status": "error", "error": "deal_get_failed",
-                "detail": deal_response.get("error") or deal_response.get("error_description")}
-    deal = deal_response.get("result", {})
-
-    trip_item = fetch_item(webhook_base, int(entity_id), element_id_int)
-    if not isinstance(trip_item, dict):
-        return {"status": "error", "error": "trip_item_not_found"}
-
-    updates = {}
-
-    # --- Компания / Контакт (нативные привязки, ID) ---
-    company_id = _first_id(deal.get(DEAL_F_COMPANY))
-    if company_id and not trip_item.get(trip_fields.get("company")):
-        updates[trip_fields["company"]] = int(company_id)
-
-    contact_id = _first_id(deal.get(DEAL_F_CONTACT))
-    if contact_id and not trip_item.get(trip_fields.get("contact")):
-        updates[trip_fields["contact"]] = int(contact_id)
-
-    # --- Объем / Тоннаж (число → строка) ---
-    volume = deal.get(DEAL_F_VOLUME)
-    if volume not in (None, "", False) and not trip_item.get(trip_fields.get("volume")):
-        updates[trip_fields["volume"]] = str(volume)
-
-    if "tonnage" in trip_fields:
-        tonnage = deal.get(DEAL_F_TONNAGE)
-        if tonnage not in (None, "", False) and not trip_item.get(trip_fields.get("tonnage")):
-            updates[trip_fields["tonnage"]] = str(tonnage)
-
-    # --- Дата и время доставки (datetime) ---
-    delivery_dt = deal.get(DEAL_F_DELIVERY_DT)
-    if delivery_dt and not trip_item.get(trip_fields.get("delivery_dt")):
-        updates[trip_fields["delivery_dt"]] = delivery_dt
-
-    # --- Адрес подачи (string виджета → address; фолбэк на «Адреса объекта») ---
-    address_value = deal.get(DEAL_F_ADDRESS_PODACHA) or deal.get(DEAL_F_ADDRESS_OBJECT)
-    if address_value and not trip_item.get(trip_fields.get("address")):
-        updates[trip_fields["address"]] = str(address_value)
-
-    # --- Контакт на объекте (string) ---
-    if "contact_object" in trip_fields:
-        contact_object = deal.get(DEAL_F_CONTACT_OBJECT)
-        if contact_object and not trip_item.get(trip_fields.get("contact_object")):
-            updates[trip_fields["contact_object"]] = str(contact_object)
-
-    # --- Полигон (enumeration → enumeration, по имени) ---
-    polygon_id = _first_id(deal.get(DEAL_F_POLYGON))
-    if polygon_id and not trip_item.get(trip_fields.get("polygon")):
-        mapped = _POLYGON_MAP.get(polygon_id)
-        target = mapped[0] if entity_id == "1088" else (mapped[1] if mapped else None)
-        if target:
-            updates[trip_fields["polygon"]] = target
-
-    # --- Тип груза / тип мусора (список сделки → список рейса, по названию) ---
-    # 1088: «Тип груза» (список) ← «Тип мусора» сделки. 1092: «Тип мусора» (список) ← то же.
-    if "cargo_type" in trip_fields:
-        cargo_id = _first_id(deal.get(DEAL_F_WASTE_TYPE))
-        if cargo_id and not trip_item.get(trip_fields.get("cargo_type")):
-            mapped = _CARGO_TYPE_MAP.get(cargo_id)
-            target = mapped[0] if entity_id == "1088" else (mapped[1] if mapped else None)
-            if target:
-                updates[trip_fields["cargo_type"]] = target
-
-    # --- «Виды мусора» (crm → 1040), только 1088: копируем из «Вид мусора» сделки ---
-    if entity_id == "1088" and "waste_type" in trip_fields:
-        waste_value = deal.get(DEAL_F_WASTE_TYPE_CRM)
-        if waste_value and not trip_item.get(trip_fields.get("waste_type")):
-            updates[trip_fields["waste_type"]] = _first_id(waste_value)
-
-    if not updates:
-        return {"status": "skipped", "reason": "nothing_to_fill", "deal_id": deal_id}
-
-    response = _http_post(webhook_base, "crm.item.update", {
-        "entityTypeId": int(entity_id),
-        "id": element_id_int,
-        "fields": updates,
-    })
-    if "error" in response:
-        return {"status": "error", "error": "item_update_failed",
-                "detail": response.get("error") or response.get("error_description")}
-
-    return {
-        "status": "success",
-        "deal_id": deal_id,
-        "entity_type_id": entity_id,
-        "element_id": element_id_int,
-        "fields_updated": list(updates.keys()),
-    }
