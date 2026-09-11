@@ -33,7 +33,9 @@ BITRIX_RECONCILE_LOCK = threading.Lock()
 
 @app.middleware("http")
 async def reject_cross_origin_writes(request: Request, call_next):
-    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/webhook/bitrix24":
+    # This exact POST only renders public HTML; it never writes CRM/app data.
+    widget_bootstrap = request.method == "POST" and request.url.path == "/static/address-selector/index.html"
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/webhook/bitrix24" and not widget_bootstrap:
         source = request.headers.get("origin") or request.headers.get("referer")
         if not source:
             return JSONResponse({"detail": "Запрос отклонен защитой CSRF"}, status_code=403)
@@ -45,6 +47,28 @@ async def reject_cross_origin_writes(request: Request, call_next):
     return await call_next(request)
 
 root_dir = os.path.dirname(os.path.abspath(__file__))
+
+@app.api_route("/static/address-selector/index.html", methods=["GET", "POST"], include_in_schema=False)
+async def address_selector_widget(request: Request):
+    # Bitrix placement bootstrap, not an authenticated data endpoint.
+    # Allowlist context: never reflect auth tokens or arbitrary script content.
+    ctx = {}
+    if request.method == "POST":
+        form = await request.form()
+        try:
+            options = json.loads(form.get("PLACEMENT_OPTIONS", "{}"))
+            value = options.get("ID") if isinstance(options, dict) else None
+            if isinstance(value, (str, int)) and str(value).isascii() and str(value).isdigit() and 0 < len(str(value)) <= 18:
+                ctx["deal_id"] = str(value)
+            if form.get("PLACEMENT") == "CRM_DEAL_DETAIL_TAB":
+                ctx["placement"] = "CRM_DEAL_DETAIL_TAB"
+        except (ValueError, TypeError):
+            pass
+    with open(os.path.join(root_dir, "static", "address-selector", "index.html"), encoding="utf-8") as source:
+        html = source.read()
+    return HTMLResponse("<script>window.__CTX__=" + json.dumps(ctx) + ";</script>" + html,
+                        headers={"Cache-Control": "no-store"})
+
 app.mount("/static", StaticFiles(directory=os.path.join(root_dir, "static"), html=True), name="static")
 jinja_env = Environment(loader=FileSystemLoader(os.path.join(root_dir, "templates")), autoescape=select_autoescape(["html", "xml"]))
 STATUS_SLUGS = {

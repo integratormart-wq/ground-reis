@@ -3,3 +3,7 @@ __pycache__/
 uploads/
 ground.db
 *.pyc
+test_requirements.db
+test_requirements.db
+test_editing.db
+test_*.db
