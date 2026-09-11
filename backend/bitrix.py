@@ -2955,3 +2955,201 @@ def extract_event_identifiers(payload: dict):
     except (TypeError, ValueError):
         entity_id = None
     return event, item_id, entity_id
+
+
+# ===== Восстановлено: автозаполнение рейса из родительской сделки (REST, Вариант B) =====
+DEAL_F_COMPANY = "COMPANY_ID"
+DEAL_F_CONTACT = "CONTACT_ID"
+DEAL_F_WASTE_TYPE = "UF_CRM_1786903524677"               # Тип мусора (enumeration, multiple) — для 1092
+DEAL_F_WASTE_TYPE_CRM = "UF_CRM_1732094975"               # Вид мусора (crm → SPA 1040) — для 1088
+DEAL_F_POLYGON = "UF_CRM_1788718754770"                  # Полигон (enumeration)
+DEAL_F_VOLUME = "UF_CRM_1788949563512"                   # Объем (double)
+DEAL_F_TONNAGE = "UF_CRM_1788949587990"                  # Тонн (double)
+DEAL_F_DELIVERY_DT = "UF_CRM_1733804506197"              # Дата и время доставки (datetime)
+DEAL_F_ADDRESS_OBJECT = "UF_CRM_1788962896801"           # Адреса объекта (address)
+DEAL_F_ADDRESS_PODACHA = "UF_CRM_GROUND_ADDRESS_PODACHA"  # Адрес подачи (string, виджет)
+DEAL_F_CONTACT_OBJECT = "UF_CRM_GROUND_CONTACT_OBJECT"    # Контакт на объекте (string)
+
+# --- Поля рейса (назначение) по entityTypeId ---
+TRIP_FIELDS = {
+    "1088": {  # Рейсы пухтовозы
+        "company": "companyId",
+        "contact": "contactId",
+        "cargo_type": "ufCrm30_1788118084754",     # «Тип груза» (enumeration) — основной тип мусора
+        "waste_type": "ufCrm30_1788753308",        # «Тип мусора» (crm → SPA 1040 «Виды мусора»)
+        "polygon": "ufCrm30_1786395095607",         # enumeration
+        "volume": "ufCrm30_1786395144602",          # string
+        "tonnage": "ufCrm30_1788102038144",         # string
+        "delivery_dt": "ufCrm30_1786395006418",     # datetime
+        "address": "ufCrm30_1786395026081",         # address
+        "contact_object": "ufCrm30_1789035566",     # string (первый из 6 дублей)
+    },
+    "1092": {  # Рейсы самосвалы
+        "company": "companyId",
+        "contact": "contactId",
+        "cargo_type": "ufCrm32_1788169245150",      # «Тип мусора» (enumeration)
+        "polygon": "ufCrm32_1786382983949",         # enumeration
+        "volume": "ufCrm32_1786383182599",          # string
+        "delivery_dt": "ufCrm32_1786382469521",     # datetime
+        "address": "ufCrm32_1786382759986",         # address
+    },
+}
+
+# Сопоставление значения списка «Полигон» по ID сделки → (ID для 1088, ID для 1092).
+# 1088: названия идентичны сделке. 1092: названия отличаются — заданы явно.
+_POLYGON_MAP = {
+    "734": ("604", "592"),   # Кабельгрупп / Кабель Групп
+    "736": ("606", "594"),   # Раритет
+    "738": ("608", "596"),   # СПЭК
+    "740": ("610", "598"),   # Полигон отходов Северная Самарка / Северная Самарка
+    "742": ("612", "600"),   # ТЭК
+    "744": ("614", "602"),   # Эко-Васт (парнас) / Эко-Васт
+    "746": ("632", None),    # Полигон ТБО ООО «Новый Свет — ЭКО» (нет аналога в 1092)
+    "748": ("634", None),    # ООО "Полигон ТБО"
+    "750": ("636", None),    # ООО УК
+    "752": ("638", None),    # Эко технологии
+    "754": ("640", None),    # Эко-Васт (софийка)
+    "756": ("642", None),    # Лен Эко Тех
+}
+
+# Сопоставление значения списка «Тип мусора» сделки → (ID «Тип груза» в 1088, ID «Тип мусора» в 1092).
+# Для 1088 «Вид мусора» (crm → 1040) копируем напрямую из поля сделки «Вид мусора», без маппинга.
+_CARGO_TYPE_MAP = {
+    "620": ("674", "726"),    # Грунт
+    "622": ("672", "724"),    # Строймусор
+    "628": ("676", "728"),    # Замусоренный грунт → Смешанный
+    "630": ("680", "732"),    # Бой бетона → Бой
+}
+
+
+def _first_id(value) -> str:
+    """Нормализует значение поля к одному ID (списки — берём первый)."""
+    if isinstance(value, (list, tuple, set)):
+        value = value[0] if value else None
+    if value is None or value == "" or value is False:
+        return ""
+    return str(value)
+
+
+def _get_deal_linked_to_trip(webhook_base: str, trip_entity_type_id: int, trip_element_id: int) -> dict:
+    """Возвращает ID сделки-родителя из поля parentId2 элемента рейса."""
+    item = fetch_item(webhook_base, trip_entity_type_id, trip_element_id)
+    if not isinstance(item, dict):
+        return {"deal_id": None, "error": "item_not_found"}
+    parent = item.get("parentId2")
+    deal_id = _first_id(parent)
+    return {"deal_id": deal_id or None}
+
+
+def enrich_trip_from_deal(webhook_base: str, entity_type_id, element_id) -> dict:
+    """Переносит данные из родительской сделки в созданный рейс (заполняет пустые поля).
+
+    Возвращает словарь со статусом и списком обновлённых полей.
+    """
+    entity_id = str(int(entity_type_id))
+    try:
+        element_id_int = int(element_id)
+    except (TypeError, ValueError):
+        return {"status": "error", "error": "bad_element_id"}
+
+    trip_fields = TRIP_FIELDS.get(entity_id)
+    if not trip_fields:
+        return {"status": "skipped", "reason": "unknown_entity_type", "entity_type_id": entity_id}
+
+    # 1) Находим сделку-родителя.
+    deal_link = _get_deal_linked_to_trip(webhook_base, int(entity_id), element_id_int)
+    deal_id = deal_link.get("deal_id")
+    if not deal_id:
+        return {"status": "skipped", "reason": "no_deal_linkage"}
+
+    # 2) Читаем сделку и текущий элемент рейса.
+    deal_response = _http_post(webhook_base, "crm.deal.get", {"id": int(deal_id)})
+    if "error" in deal_response or "result" not in deal_response:
+        return {"status": "error", "error": "deal_get_failed",
+                "detail": deal_response.get("error") or deal_response.get("error_description")}
+    deal = deal_response.get("result", {})
+
+    trip_item = fetch_item(webhook_base, int(entity_id), element_id_int)
+    if not isinstance(trip_item, dict):
+        return {"status": "error", "error": "trip_item_not_found"}
+
+    updates = {}
+
+    # --- Компания / Контакт (нативные привязки, ID) ---
+    company_id = _first_id(deal.get(DEAL_F_COMPANY))
+    if company_id and not trip_item.get(trip_fields.get("company")):
+        updates[trip_fields["company"]] = int(company_id)
+
+    contact_id = _first_id(deal.get(DEAL_F_CONTACT))
+    if contact_id and not trip_item.get(trip_fields.get("contact")):
+        updates[trip_fields["contact"]] = int(contact_id)
+
+    # --- Объем / Тоннаж (число → строка) ---
+    volume = deal.get(DEAL_F_VOLUME)
+    if volume not in (None, "", False) and not trip_item.get(trip_fields.get("volume")):
+        updates[trip_fields["volume"]] = str(volume)
+
+    if "tonnage" in trip_fields:
+        tonnage = deal.get(DEAL_F_TONNAGE)
+        if tonnage not in (None, "", False) and not trip_item.get(trip_fields.get("tonnage")):
+            updates[trip_fields["tonnage"]] = str(tonnage)
+
+    # --- Дата и время доставки (datetime) ---
+    delivery_dt = deal.get(DEAL_F_DELIVERY_DT)
+    if delivery_dt and not trip_item.get(trip_fields.get("delivery_dt")):
+        updates[trip_fields["delivery_dt"]] = delivery_dt
+
+    # --- Адрес подачи (string виджета → address; фолбэк на «Адреса объекта») ---
+    address_value = deal.get(DEAL_F_ADDRESS_PODACHA) or deal.get(DEAL_F_ADDRESS_OBJECT)
+    if address_value and not trip_item.get(trip_fields.get("address")):
+        updates[trip_fields["address"]] = str(address_value)
+
+    # --- Контакт на объекте (string) ---
+    if "contact_object" in trip_fields:
+        contact_object = deal.get(DEAL_F_CONTACT_OBJECT)
+        if contact_object and not trip_item.get(trip_fields.get("contact_object")):
+            updates[trip_fields["contact_object"]] = str(contact_object)
+
+    # --- Полигон (enumeration → enumeration, по имени) ---
+    polygon_id = _first_id(deal.get(DEAL_F_POLYGON))
+    if polygon_id and not trip_item.get(trip_fields.get("polygon")):
+        mapped = _POLYGON_MAP.get(polygon_id)
+        target = mapped[0] if entity_id == "1088" else (mapped[1] if mapped else None)
+        if target:
+            updates[trip_fields["polygon"]] = target
+
+    # --- Тип груза / тип мусора (список сделки → список рейса, по названию) ---
+    # 1088: «Тип груза» (список) ← «Тип мусора» сделки. 1092: «Тип мусора» (список) ← то же.
+    if "cargo_type" in trip_fields:
+        cargo_id = _first_id(deal.get(DEAL_F_WASTE_TYPE))
+        if cargo_id and not trip_item.get(trip_fields.get("cargo_type")):
+            mapped = _CARGO_TYPE_MAP.get(cargo_id)
+            target = mapped[0] if entity_id == "1088" else (mapped[1] if mapped else None)
+            if target:
+                updates[trip_fields["cargo_type"]] = target
+
+    # --- «Виды мусора» (crm → 1040), только 1088: копируем из «Вид мусора» сделки ---
+    if entity_id == "1088" and "waste_type" in trip_fields:
+        waste_value = deal.get(DEAL_F_WASTE_TYPE_CRM)
+        if waste_value and not trip_item.get(trip_fields.get("waste_type")):
+            updates[trip_fields["waste_type"]] = _first_id(waste_value)
+
+    if not updates:
+        return {"status": "skipped", "reason": "nothing_to_fill", "deal_id": deal_id}
+
+    response = _http_post(webhook_base, "crm.item.update", {
+        "entityTypeId": int(entity_id),
+        "id": element_id_int,
+        "fields": updates,
+    })
+    if "error" in response:
+        return {"status": "error", "error": "item_update_failed",
+                "detail": response.get("error") or response.get("error_description")}
+
+    return {
+        "status": "success",
+        "deal_id": deal_id,
+        "entity_type_id": entity_id,
+        "element_id": element_id_int,
+        "fields_updated": list(updates.keys()),
+    }

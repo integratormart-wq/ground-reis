@@ -2782,6 +2782,18 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
         BITRIX_LAST_EVENT["result"] = "missing_item_or_entity"
         return JSONResponse({"ok": False, "error": "missing_item_or_entity"}, status_code=400)
 
+    # Автозаполнение рейса из родительской сделки (Вариант B / REST).
+    # Только при создании элемента; не затирает уже заполненные поля и не трогает UPDATE.
+    if event == "ONCRMDYNAMICITEMADD":
+        try:
+            enrich_result = bitrix.enrich_trip_from_deal(settings.webhook_url, entity_type_id, item_id)
+            BITRIX_LAST_EVENT["enrich"] = _safe_bitrix_result(enrich_result)
+            print("BITRIX_ENRICH", enrich_result.get("status"), entity_type_id, item_id,
+                  enrich_result.get("fields_updated", []), flush=True)
+        except Exception as exc:
+            BITRIX_LAST_EVENT["enrich"] = {"status": "exception", "detail": type(exc).__name__}
+            print("BITRIX_ENRICH_EXCEPTION", type(exc).__name__, flush=True)
+
     trip = db.query(models.TripRequest).filter(
         models.TripRequest.bitrix_element_id == item_id,
         models.TripRequest.bitrix_entity_type_id == entity_type_id,
