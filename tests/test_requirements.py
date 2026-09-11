@@ -2082,12 +2082,14 @@ def test_bitrix_outbound_writes_real_named_fields_and_custom_company(monkeypatch
     db.close()
 
 
-def test_trip_list_pages_schedule_bitrix_reconcile_without_blocking_request():
+def test_trip_list_pages_do_not_start_bitrix_reconcile_on_navigation():
     import inspect
     for endpoint in (app_module.requests_list, app_module.pukhtovoz_list, app_module.samosval_list):
         source = inspect.getsource(endpoint)
-        assert "_schedule_bitrix_reconcile()" in source
-        assert "_maybe_reconcile_bitrix(db)" not in source
+        assert "_schedule_bitrix_reconcile()" not in source
+        assert "_maybe_reconcile_bitrix(" not in source
+    app_source = Path("app.py").read_text(encoding="utf-8")
+    assert '@app.post("/settings/bitrix/sync-now")' in app_source
 
 
 def test_bitrix_known_process_resolution_does_not_require_network(monkeypatch):
@@ -2466,3 +2468,45 @@ def test_samosval_inbound_resolves_driver_plate_address_volume_and_salary(monkey
     assert trip.tariff_id == tariff.id
     assert trip.sum_driver == 10000
     db.close()
+
+
+def test_bitrix_field_aliases_cover_real_world_gosnomer_waste_tariff_and_units():
+    schema = {
+        "ufPlate": {"title": "Гос номер", "type": "enumeration"},
+        "ufWaste": {"title": "Тип мусора", "type": "enumeration"},
+        "ufTariff": {"title": "Тариф водителя", "type": "enumeration"},
+        "ufVolume": {"title": "Объём, м³", "type": "enumeration"},
+        "ufTonnage": {"title": "Тоннаж, т", "type": "double"},
+    }
+    mapping = app_module.bitrix.resolve_field_map(schema)
+    assert mapping["vehicle_name"] == "ufPlate"
+    assert mapping["cargo_type_name"] == "ufWaste"
+    assert mapping["tariff_name"] == "ufTariff"
+    assert mapping["volume"] == "ufVolume"
+    assert mapping["tonnage"] == "ufTonnage"
+
+
+def test_bitrix_unresolved_numeric_enum_is_not_treated_as_business_value():
+    schema = {"ufVolume": {"title": "Объём, м³", "type": "enumeration"}}
+    item = {"ufVolume": 716}
+    mapping = app_module.bitrix.resolve_field_map_for_item(schema, item)
+    value = app_module.bitrix._read_display_logical(
+        item, "volume", mapping, schema, "https://example/rest/1/token/"
+    )
+    assert value == ""
+
+
+def test_bitrix_display_reader_uses_filled_duplicate_candidate_with_options():
+    schema = {
+        "ufVolumeBroken": {"title": "Объём, м³", "type": "enumeration"},
+        "ufVolumeReal": {
+            "title": "Объём, м³", "type": "enumeration",
+            "items": [{"ID": "716", "VALUE": "32"}],
+        },
+    }
+    item = {"ufVolumeBroken": 999, "ufVolumeReal": 716}
+    mapping = app_module.bitrix.resolve_field_map_for_item(schema, item)
+    value = app_module.bitrix._read_display_logical(
+        item, "volume", mapping, schema, "https://example/rest/1/token/"
+    )
+    assert str(value) == "32"
