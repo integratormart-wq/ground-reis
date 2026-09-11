@@ -33,7 +33,7 @@ BITRIX_RECONCILE_LOCK = threading.Lock()
 
 @app.middleware("http")
 async def reject_cross_origin_writes(request: Request, call_next):
-    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/webhook/bitrix24" and not request.url.path.startswith("/static/address-selector"):
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/webhook/bitrix24":
         source = request.headers.get("origin") or request.headers.get("referer")
         if not source:
             return JSONResponse({"detail": "Запрос отклонен защитой CSRF"}, status_code=403)
@@ -45,25 +45,6 @@ async def reject_cross_origin_writes(request: Request, call_next):
     return await call_next(request)
 
 root_dir = os.path.dirname(os.path.abspath(__file__))
-# Виджет «Выбор адреса объекта» для Bitrix24: серверное приложение грузит обработчик POST-запросом,
-# поэтому отдаём HTML и по GET, и по POST (иначе CSRF-защита режет POST и виджет не открывается).
-_address_widget = os.path.join(root_dir, "static", "address-selector", "index.html")
-@app.api_route("/static/address-selector/index.html", methods=["GET", "POST"], include_in_schema=False)
-async def _address_selector_widget(request: Request):
-    _html = open(_address_widget, encoding="utf-8").read()
-    ctx = {}
-    try:
-        raw = (await request.body()).decode("utf-8", "ignore")
-        form = dict(urllib.parse.parse_qsl(raw))
-        po = form.get("PLACEMENT_OPTIONS", "")
-        placement_options = json.loads(po) if po else {}
-        ctx = {
-            "deal_id": placement_options.get("ID"),
-            "placement": form.get("PLACEMENT", ""),
-        }
-    except Exception:
-        ctx = {}
-    return HTMLResponse("<script>window.__CTX__=" + json.dumps(ctx, ensure_ascii=False) + ";</script>" + _html)
 app.mount("/static", StaticFiles(directory=os.path.join(root_dir, "static"), html=True), name="static")
 jinja_env = Environment(loader=FileSystemLoader(os.path.join(root_dir, "templates")), autoescape=select_autoescape(["html", "xml"]))
 STATUS_SLUGS = {
@@ -2680,7 +2661,7 @@ def save_integrations(provider: str = Form("bitrix24"), webhook_url: str = Form(
 def bitrix_test(request: Request, current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
     row = db.query(models.IntegrationSetting).filter(models.IntegrationSetting.provider == "bitrix24").first()
-    info = {"configured": bool(row and row.webhook_url), "processes": [], "error": None, "user_access": None, "field_diagnostics": []}
+    info = {"configured": bool(row and row.webhook_url), "processes": [], "error": None, "user_access": None, "userfield_access": None, "field_diagnostics": []}
     if row and row.webhook_url:
         try:
             types = bitrix.find_smart_process_ids(row.webhook_url)
@@ -2689,6 +2670,7 @@ def bitrix_test(request: Request, current_user: models.User = Depends(require_ro
             else:
                 info["processes"] = [{"id": k, "title": v} for k, v in types.items()]
             info["user_access"] = bitrix.check_user_directory_access(row.webhook_url)
+            info["userfield_access"] = bitrix.check_userfield_config_access(row.webhook_url, int(bitrix.SAMOSVAL_ENTITY_TYPE_ID))
             for entity_id in (int(bitrix.PUKHTOVOZ_ENTITY_TYPE_ID), int(bitrix.SAMOSVAL_ENTITY_TYPE_ID)):
                 recent_ids = bitrix.list_recent_trip_ids(row.webhook_url, entity_id, limit=1)
                 if recent_ids:
@@ -2775,18 +2757,6 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
     if not item_id or not entity_type_id:
         BITRIX_LAST_EVENT["result"] = "missing_item_or_entity"
         return JSONResponse({"ok": False, "error": "missing_item_or_entity"}, status_code=400)
-
-    # Автозаполнение рейса из родительской сделки (Вариант B / REST).
-    # Только при создании элемента; не затирает уже заполненные поля и не трогает UPDATE.
-    if event == "ONCRMDYNAMICITEMADD":
-        try:
-            enrich_result = bitrix.enrich_trip_from_deal(settings.webhook_url, entity_type_id, item_id)
-            BITRIX_LAST_EVENT["enrich"] = _safe_bitrix_result(enrich_result)
-            print("BITRIX_ENRICH", enrich_result.get("status"), entity_type_id, item_id,
-                  enrich_result.get("fields_updated", []), flush=True)
-        except Exception as exc:
-            BITRIX_LAST_EVENT["enrich"] = {"status": "exception", "detail": type(exc).__name__}
-            print("BITRIX_ENRICH_EXCEPTION", type(exc).__name__, flush=True)
 
     trip = db.query(models.TripRequest).filter(
         models.TripRequest.bitrix_element_id == item_id,
