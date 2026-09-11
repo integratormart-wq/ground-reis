@@ -35,7 +35,7 @@ def test_settings_additions_appear_in_new_request_form():
     assert client.post("/settings/tariffs", data={"title": "Новый тариф", "kind": "пухтовоз", "vehicle_type_id": str(vt.id), "formula": "trip", "trip_price": "5000", "is_active": "on"}, follow_redirects=False).status_code == 302
     page = client.get("/pukhtovoz/new")
     assert page.status_code == 200
-    assert "Новое авто" in page.text
+    assert "А111АА78" in page.text
     assert "Полигон Север" in page.text
     assert "Новый тариф" in page.text
     assert "Новый водитель" in page.text
@@ -896,15 +896,14 @@ def test_polygon_tariffs_are_visible_in_polygon_settings_and_request_preview():
 
     polygons_page = client.get("/polygons")
     assert polygons_page.status_code == 200
-    assert "Добавить или изменить тарифы полигона" in polygons_page.text
-    assert "Строительный мусор" in polygons_page.text and "900" in polygons_page.text and "₽/м³" in polygons_page.text
-    assert "Промышленный мусор" in polygons_page.text and "3 570" in polygons_page.text and "₽/т" in polygons_page.text
 
     settings_page = client.get("/settings")
     assert settings_page.status_code == 200
     assert "Полигоны и тарифы" in settings_page.text
     assert "settings-section" in settings_page.text
     assert "Сохранить тарифы полигона" in settings_page.text
+    assert "Строительный мусор" in settings_page.text and "900" in settings_page.text and "₽/м³" in settings_page.text
+    assert "Промышленный мусор" in settings_page.text and "3 570" in settings_page.text and "₽/т" in settings_page.text
 
     request_page = client.get("/pukhtovoz/new")
     assert request_page.status_code == 200
@@ -1778,7 +1777,7 @@ def test_bitrix_inbound_resolves_driver_vehicle_polygon_tariff_and_clean_address
         "ufWhen": {"title": "Дата и время", "type": "datetime"},
         "ufAddr": {"title": "Адрес подачи", "type": "address"},
         "ufDriverReal": {"title": "Водитель", "type": "user"},
-        "ufVehicleReal": {"title": "Машины", "type": "crm", "settings": {"DYNAMIC_1048": "Y"}},
+        "ufVehicleReal": {"title": "Госномер", "type": "string"},
         "ufPolygonReal": {"title": "Полигон", "type": "enumeration", "items": [{"ID": "10", "VALUE": "Широкореченский"}]},
         "ufTariffReal": {"title": "Тариф", "type": "enumeration", "items": [{"ID": "20", "VALUE": "Основной тариф"}]},
         "ufTripsReal": {"title": "Количество рейсов", "type": "integer"},
@@ -1804,7 +1803,7 @@ def test_bitrix_inbound_resolves_driver_vehicle_polygon_tariff_and_clean_address
             "ufWhen": "2026-08-31T07:45:00+05:00",
             "ufAddr": {"id": "987654", "address": "г Первоуральск, ул Комсомольская, д 5А"},
             "ufDriverReal": "77",
-            "ufVehicleReal": "T418_55",
+            "ufVehicleReal": "А123АА196",
             "ufPolygonReal": "10",
             "ufTariffReal": "20",
             "ufTripsReal": 4,
@@ -2179,3 +2178,291 @@ def test_bitrix_user_directory_access_reports_missing_scope(monkeypatch):
     result = app_module.bitrix.check_user_directory_access("https://example/rest/1/token/")
     assert result["ok"] is False
     assert result["reason"] == "insufficient_scope"
+
+
+def test_bitrix_inbound_uses_filled_duplicate_driver_and_gosnomer_and_matches_mixed_alphabet(monkeypatch):
+    db, admin, driver, vt = reset_db()
+    driver.full_name = "Иванов Иван Иванович"
+    vehicle = models.Vehicle(name="Техническое имя", plate="А123ВС196", type_id=vt.id)
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/", secret="s", is_active=True,
+    )
+    db.add_all([vehicle, settings]); db.commit()
+
+    schema = {
+        "title": {"title": "Название", "type": "string"},
+        "ufDriverEmpty": {"title": "Водитель", "type": "user"},
+        "ufDriverReal": {"title": "Водитель", "type": "user"},
+        "ufPlateEmpty": {"title": "Госномер", "type": "string"},
+        "ufPlateReal": {"title": "Госномер", "type": "string"},
+    }
+    item = {
+        "id": 990, "title": "РЕЙС-990",
+        "ufDriverEmpty": "", "ufDriverReal": "EMPLOYEE-77",
+        "ufPlateEmpty": "", "ufPlateReal": "A123BC196",
+    }
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_kinds", lambda url: {"1088": models.TripType.PUKHTOVOZ})
+    monkeypatch.setattr(app_module.bitrix, "status_from_stage", lambda *args: None)
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity, force=False: schema)
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda url, entity, item_id: item)
+    monkeypatch.setattr(app_module.bitrix, "_http_post", lambda url, method, payload: (
+        {"result": [{"ID": "77", "LAST_NAME": "Иванов", "NAME": "Иван"}]}
+        if method == "user.get" else {"result": {}}
+    ))
+    app_module.bitrix._clear_runtime_cache()
+
+    result = app_module.bitrix.sync_from_bitrix(990, 1088, db, settings=settings)
+    db.commit()
+    trip = db.query(models.TripRequest).filter_by(bitrix_element_id=990, bitrix_entity_type_id=1088).one()
+    assert result["ok"] is True
+    assert trip.driver_id == driver.id
+    assert trip.vehicle_id == vehicle.id
+    assert app_module.bitrix.resolve_field_map_for_item(schema, item)["driver_name"] == "ufDriverReal"
+    assert app_module.bitrix.resolve_field_map_for_item(schema, item)["vehicle_name"] == "ufPlateReal"
+    db.close()
+
+
+def test_bitrix_inbound_driver_can_resolve_from_linked_crm_item(monkeypatch):
+    db, admin, driver, vt = reset_db()
+    driver.full_name = "Петров Алексей"
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/", secret="s", is_active=True,
+    )
+    db.add(settings); db.commit()
+    trip_schema = {
+        "title": {"title": "Название", "type": "string"},
+        "ufDriver": {"title": "Водитель", "type": "crm", "settings": {"DYNAMIC_1048": "Y"}},
+    }
+    driver_schema = {
+        "title": {"title": "Название", "type": "string"},
+        "ufFio": {"title": "ФИО водителя", "type": "string"},
+    }
+    monkeypatch.setattr(app_module.bitrix, "resolve_process_kinds", lambda url: {"1088": models.TripType.PUKHTOVOZ})
+    monkeypatch.setattr(app_module.bitrix, "status_from_stage", lambda *args: None)
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity, force=False: driver_schema if int(entity) == 1048 else trip_schema)
+    def fake_fetch(url, entity, item_id):
+        if int(entity) == 1048:
+            return {"id": 51, "title": "Карточка водителя", "ufFio": "Петров Алексей"}
+        return {"id": 991, "title": "РЕЙС-991", "ufDriver": "T418_51"}
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", fake_fetch)
+    monkeypatch.setattr(app_module.bitrix, "_http_post", lambda url, method, payload: {"result": {}})
+
+    result = app_module.bitrix.sync_from_bitrix(991, 1088, db, settings=settings)
+    db.commit()
+    trip = db.query(models.TripRequest).filter_by(bitrix_element_id=991, bitrix_entity_type_id=1088).one()
+    assert result["ok"] is True
+    assert trip.driver_id == driver.id
+    db.close()
+
+
+def test_bitrix_outbound_polygon_cost_uses_exact_polygon_tariff_and_field_zatraty_poligona(monkeypatch):
+    db, admin, driver, vt = reset_db()
+    cargo = models.CargoType(name="Грунт")
+    polygon = models.Polygon(name="Полигон Тест", calculation_method="volume", volume_rate=10)
+    db.add_all([cargo, polygon]); db.flush()
+    db.add(models.PolygonTariff(polygon_id=polygon.id, cargo_type_id=cargo.id, rate=250, unit="м³"))
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/", secret="s", is_active=True,
+    )
+    trip = models.TripRequest(
+        number="РЕЙС-POLY-COST", planned_date=date(2026, 8, 31), kind=models.TripType.PUKHTOVOZ,
+        status=models.RequestStatus.NEW, polygon=polygon, cargo_type=cargo, volume=10, actual_volume=12,
+        bitrix_element_id=777, bitrix_entity_type_id=1088,
+    )
+    db.add_all([settings, trip]); db.commit()
+    schema = {
+        "title": {"title": "Название", "type": "string"},
+        "ufPolygonCost": {"title": "Затраты полигона", "type": "double"},
+    }
+    captured = {}
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda url, entity, force=False: schema)
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda url, entity, item_id: {"id": item_id, "title": "РЕЙС-POLY-COST"})
+    def fake_post(url, method, payload):
+        if method == "crm.item.update":
+            captured.update(payload)
+            return {"result": {"item": {"id": 777}}}
+        return {"result": {}}
+    monkeypatch.setattr(app_module.bitrix, "_http_post", fake_post)
+
+    result = app_module.bitrix.sync_trip(trip, db, settings=settings)
+    assert result["ok"] is True
+    assert captured["fields"]["ufPolygonCost"] == 3000.0
+    db.close()
+
+
+def test_samosval_inbound_uses_base_rate_plus_volume_for_salary(monkeypatch):
+    db, admin, driver, _ = reset_db()
+    samosval_type = models.VehicleType(name="Самосвал тарифный", kind=models.TripType.SAMOSVAL)
+    tariff = models.Tariff(
+        title="до 15 км", vehicle_type=samosval_type, kind=models.TripType.SAMOSVAL,
+        min_km=0, max_km=None, min_volume=20, max_volume=20,
+        formula="trip", trip_price=3500, comment="samosval_base_rate", is_active=True,
+    )
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/", secret="s", is_active=True,
+    )
+    db.add_all([samosval_type, tariff, settings]); db.commit()
+    schema = {
+        "title": {"title": "Название", "type": "string"},
+        "ufBase": {"title": "Базовая ставка", "type": "enumeration", "items": [{"ID": "5", "VALUE": "до 15 км"}]},
+        "ufVolume": {"title": "Объём", "type": "double"},
+        "ufTrips": {"title": "Количество рейсов", "type": "integer"},
+        "ufOldTariff": {"title": "Тариф", "type": "string"},
+    }
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda *args, **kwargs: schema)
+    monkeypatch.setattr(app_module.bitrix, "status_from_stage", lambda *args: None)
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda *args: {
+        "id": 901, "title": "С-901", "ufBase": "5", "ufVolume": 20,
+        "ufTrips": 2, "ufOldTariff": "Погрузка",
+    })
+    result = app_module.bitrix.sync_from_bitrix(901, 1092, db, settings=settings)
+    db.commit()
+    trip = db.query(models.TripRequest).filter_by(bitrix_element_id=901, bitrix_entity_type_id=1092).one()
+    assert result["ok"] is True
+    assert trip.base_rate == "до 15 км"
+    assert trip.volume == 20
+    assert trip.trips_count == 2
+    assert trip.tariff_id == tariff.id
+    assert trip.sum_driver == 7000
+    db.close()
+
+
+def test_samosval_outbound_writes_base_rate_not_legacy_tariff(monkeypatch):
+    db, admin, driver, _ = reset_db()
+    samosval_type = models.VehicleType(name="Самосвал outbound", kind=models.TripType.SAMOSVAL)
+    tariff = models.Tariff(
+        title="16-35 км", vehicle_type=samosval_type, kind=models.TripType.SAMOSVAL,
+        min_km=0, max_km=None, min_volume=12, max_volume=12,
+        formula="trip", trip_price=4200, comment="samosval_base_rate", is_active=True,
+    )
+    trip = models.TripRequest(
+        number="С-OUT-BASE", planned_date=date(2026, 8, 31), kind=models.TripType.SAMOSVAL,
+        status=models.RequestStatus.NEW, volume=12, trips_count=1, tariff=tariff, base_rate="16-35 км",
+        sum_driver=4200,
+    )
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/", secret="s", is_active=True,
+    )
+    db.add_all([samosval_type, tariff, trip, settings]); db.commit()
+    schema = {
+        "title": {"title": "Название", "type": "string"},
+        "ufBase": {"title": "Базовая ставка", "type": "enumeration", "items": [{"ID": "7", "VALUE": "16-35 км"}]},
+        "ufVolume": {"title": "Объём", "type": "double"},
+        "ufOldTariff": {"title": "Тариф", "type": "string"},
+        "ufSalary": {"title": "Зарплата водителя", "type": "double"},
+    }
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda *args, **kwargs: schema)
+    writes = []
+    def fake_post(url, method, payload):
+        if method == "crm.item.add":
+            writes.append(payload)
+            return {"result": {"item": {"id": 902}}}
+        return {"result": {}}
+    monkeypatch.setattr(app_module.bitrix, "_http_post", fake_post)
+    result = app_module.bitrix.sync_trip(trip, db, settings=settings)
+    assert result["ok"] is True
+    fields = writes[-1]["fields"]
+    assert fields["ufBase"] == "7"
+    assert fields["ufVolume"] == 12
+    assert fields["ufSalary"] == 4200
+    assert "ufOldTariff" not in fields
+    db.close()
+
+
+def test_samosval_pages_show_base_rate_and_volume_columns():
+    db, admin, driver, _ = reset_db()
+    samosval_type = models.VehicleType(name="Самосвал UI", kind=models.TripType.SAMOSVAL)
+    vehicle = models.Vehicle(name="AUTO:S100СС196", plate="С100СС196", type=samosval_type, is_active=True)
+    tariff = models.Tariff(
+        title="до 15 км", vehicle_type=samosval_type, kind=models.TripType.SAMOSVAL,
+        min_km=0, max_km=None, min_volume=10, max_volume=10,
+        formula="trip", trip_price=3000, comment="samosval_base_rate", is_active=True,
+    )
+    trip = models.TripRequest(
+        number="С-UI", planned_date=date(2026, 8, 31), driver=driver, vehicle=vehicle,
+        kind=models.TripType.SAMOSVAL, status=models.RequestStatus.ASSIGNED,
+        volume=10, tariff=tariff, base_rate="до 15 км", sum_driver=3000,
+    )
+    db.add_all([samosval_type, vehicle, tariff, trip]); db.commit()
+    page = client_as(admin).get("/samosval")
+    assert page.status_code == 200
+    assert "Базовая ставка" in page.text
+    assert "до 15 км" in page.text
+    assert "Объём" in page.text
+    detail = client_as(admin).get(f"/requests/{trip.id}")
+    assert "Базовая ставка" in detail.text and "до 15 км" in detail.text
+    db.close()
+
+
+def test_smart_process_enum_schema_enrichment_decodes_volume_id(monkeypatch):
+    from backend import bitrix
+    bitrix._clear_runtime_cache()
+
+    def fake_http(url, method, params):
+        if method == "crm.item.fields":
+            return {"result": {"fields": {
+                "ufCrm7Volume": {"title": "Объём", "type": "enumeration"},
+            }}}
+        if method == "crm.type.getByEntityTypeId":
+            return {"result": {"type": {"id": 7, "entityTypeId": 1092}}}
+        if method == "userfieldconfig.list":
+            return {"result": {"fields": [{
+                "fieldName": "UF_CRM_7_VOLUME",
+                "userTypeId": "enumeration",
+                "editFormLabel": {"ru": "Объём"},
+                "enum": [{"id": "716", "value": "32"}],
+            }]}}
+        return {"result": {}}
+
+    monkeypatch.setattr(bitrix, "_http_post", fake_http)
+    schema = bitrix.get_element_fields("https://example/rest/1/token/", "1092", force=True)
+    info = schema["ufCrm7Volume"]
+    assert bitrix._display_field_value("https://example/rest/1/token/", 716, info) == "32"
+
+
+def test_samosval_inbound_resolves_driver_plate_address_volume_and_salary(monkeypatch):
+    db, admin, driver, _ = reset_db()
+    samosval_type = models.VehicleType(name="Самосвал sync", kind=models.TripType.SAMOSVAL)
+    tariff = models.Tariff(
+        title="16-35 км", vehicle_type=samosval_type, kind=models.TripType.SAMOSVAL,
+        min_km=0, max_km=None, min_volume=32, max_volume=32,
+        formula="trip", trip_price=5000, comment="samosval_base_rate", is_active=True,
+    )
+    settings = models.IntegrationSetting(
+        provider="bitrix24", webhook_url="https://example/rest/1/token/", secret="s", is_active=True,
+    )
+    db.add_all([samosval_type, tariff, settings]); db.commit()
+
+    schema = {
+        "title": {"title": "Название", "type": "string"},
+        "ufDriverReal": {"title": "Водитель", "type": "enumeration", "items": [{"ID": "501", "VALUE": driver.full_name}]},
+        "ufPlateReal": {"title": "Госномер", "type": "enumeration", "items": [{"ID": "502", "VALUE": "А123ВС196"}]},
+        "ufLoadReal": {"title": "Адрес подачи", "type": "string"},
+        "ufVolumeReal": {"title": "Объём", "type": "enumeration", "items": [{"ID": "716", "VALUE": "32"}]},
+        "ufBaseReal": {"title": "Базовая ставка", "type": "enumeration", "items": [{"ID": "717", "VALUE": "16-35 км"}]},
+        "ufTripsReal": {"title": "Количество рейсов", "type": "integer"},
+    }
+    item = {
+        "id": 9901, "title": "С-ТЕСТ-9901",
+        "ufDriverReal": 501,
+        "ufPlateReal": 502,
+        "ufLoadReal": "г. Екатеринбург, ул. Тестовая, 10",
+        "ufVolumeReal": 716,
+        "ufBaseReal": 717,
+        "ufTripsReal": 2,
+    }
+    monkeypatch.setattr(app_module.bitrix, "get_element_fields", lambda *args, **kwargs: schema)
+    monkeypatch.setattr(app_module.bitrix, "fetch_item", lambda *args, **kwargs: item)
+
+    result = app_module.bitrix.sync_from_bitrix(9901, 1092, db, settings=settings)
+    db.commit()
+    trip = db.query(models.TripRequest).filter_by(bitrix_element_id=9901, bitrix_entity_type_id=1092).one()
+    assert result["ok"] is True
+    assert trip.driver_id == driver.id
+    assert trip.vehicle is not None and trip.vehicle.plate == "А123ВС196"
+    assert trip.load_address == "г. Екатеринбург, ул. Тестовая, 10"
+    assert trip.volume == 32
+    assert trip.base_rate == "16-35 км"
+    assert trip.tariff_id == tariff.id
+    assert trip.sum_driver == 10000
+    db.close()

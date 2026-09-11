@@ -48,9 +48,9 @@ def test_tariff_forms_have_only_requested_fields():
         assert removed not in pukhtovoz
 
     samosval = _form(response.text, "samosval-tariff-form")
-    for required in ("Название тарифа", "Объём, м³", "Километры", "Стоимость рейса, ₽"):
+    for required in ("Базовая ставка", "Объём, м³", "Стоимость для водителя за рейс, ₽"):
         assert required in samosval
-    for removed in ("Тип автомобиля", "Формула", "Коэффициент", "Доплата", "Минимум", "Максимум"):
+    for removed in ("Километры", "Тип автомобиля", "Формула", "Коэффициент", "Доплата", "Минимум", "Максимум"):
         assert removed not in samosval
     db.close()
 
@@ -75,32 +75,27 @@ def test_pukhtovoz_grid_saves_title_and_trip_price_only():
     db.close()
 
 
-def test_samosval_grid_distinguishes_same_km_by_volume():
+def test_samosval_grid_saves_base_rate_volume_and_driver_price():
     db, client, _, samosval_type = _setup()
     response = client.post(
         "/settings/tariffs/samosval-grid",
         data={
-            "samosval_title": ["15 км / 8 м³", "15 км / 12 м³"],
-            "samosval_km": ["15", "15"],
-            "samosval_volume": ["8", "12"],
-            "samosval_price": ["2800", "3400"],
+            "samosval_title": ["до 15 км", "до 15 км", "16-35 км"],
+            "samosval_volume": ["8", "12", "12"],
+            "samosval_price": ["2800", "3400", "4100"],
             "is_active": "on",
         },
         follow_redirects=False,
     )
     assert response.status_code == 302
-    rows = db.query(models.Tariff).order_by(models.Tariff.min_volume).all()
+    rows = db.query(models.Tariff).order_by(models.Tariff.id).all()
     assert [(r.title, r.min_km, r.max_km, r.min_volume, r.max_volume, r.trip_price) for r in rows] == [
-        ("15 км / 8 м³", 15, 15, 8, 8, 2800),
-        ("15 км / 12 м³", 15, 15, 12, 12, 3400),
+        ("до 15 км", 0, None, 8, 8, 2800),
+        ("до 15 км", 0, None, 12, 12, 3400),
+        ("16-35 км", 0, None, 12, 12, 4100),
     ]
-    vehicle = models.Vehicle(name="Самосвал 1", plate="С001СС78", type_id=samosval_type.id, is_active=True)
-    db.add(vehicle)
-    db.commit()
-    first = app_module._select_tariff(db, models.TripType.SAMOSVAL, vehicle, date(2026, 8, 12), 15, 8)
-    second = app_module._select_tariff(db, models.TripType.SAMOSVAL, vehicle, date(2026, 8, 12), 15, 12)
-    assert app_module._tariff_amount(first, 15, 8, 1) == 2800
-    assert app_module._tariff_amount(second, 15, 12, 1) == 3400
+    assert all(r.vehicle_type_id == samosval_type.id for r in rows)
+    assert all(r.comment == "samosval_base_rate" for r in rows)
     db.close()
 
 
@@ -110,7 +105,6 @@ def test_grid_rejects_incomplete_rows():
         "/settings/tariffs/samosval-grid",
         data={
             "samosval_title": ["Первый", "Второй"],
-            "samosval_km": ["15", "20"],
             "samosval_volume": ["8"],
             "samosval_price": ["2800", "3600"],
         },
@@ -135,7 +129,7 @@ def test_settings_sections_are_collapsible_and_anchor_driven():
         ("vehicle-types", "Типы автомобилей"),
         ("routes", "Объекты и маршруты"),
         ("tariffs", "Тарифы пухтовозов"),
-        ("tariffs-samosval", "Тарифы самосвалов"),
+        ("tariffs-samosval", "Базовые ставки самосвалов"),
         ("vehicles", "Автомобили"),
         ("customers", "Заказчики"),
         ("cargo", "Типы грузов"),
@@ -169,27 +163,26 @@ def test_request_form_autoselects_tariff_without_old_vehicle_type_filter():
     assert "tariffEl.value = String(list[0].id)" in html
     assert "let tariffManuallySelected = Boolean(tariffEl.value)" in html
     assert "tariffManuallySelected = false" in html
-    assert "[kmEl, volEl].forEach(el => el.addEventListener('input', autoRecalc))" in html
+    assert "volEl.addEventListener('input', autoRecalc)" in html
     db.close()
 
 
-def test_samosval_exact_tariff_wins_over_legacy_catch_all():
+def test_samosval_base_rate_is_separate_from_legacy_tariffs():
     db, _, _, samosval_type = _setup()
-    vehicle = models.Vehicle(name="Самосвал", plate="С001СС78", type_id=samosval_type.id, is_active=True)
     legacy = models.Tariff(
-        title="Старый общий", kind=models.TripType.SAMOSVAL, vehicle_type_id=samosval_type.id,
-        formula="trip", trip_price=1000, min_km=0, max_km=None, min_volume=0, max_volume=None, is_active=True,
+        title="Старый 15 км", kind=models.TripType.SAMOSVAL, vehicle_type_id=samosval_type.id,
+        formula="trip", trip_price=1000, min_km=15, max_km=15, min_volume=12, max_volume=12, is_active=True,
     )
-    exact = models.Tariff(
-        title="15 км / 12 м³", kind=models.TripType.SAMOSVAL, vehicle_type_id=samosval_type.id,
-        formula="trip", trip_price=3400, min_km=15, max_km=15, min_volume=12, max_volume=12, is_active=True,
+    base = models.Tariff(
+        title="до 15 км", kind=models.TripType.SAMOSVAL, vehicle_type_id=samosval_type.id,
+        formula="trip", trip_price=3400, min_km=0, max_km=None, min_volume=12, max_volume=12,
+        comment="samosval_base_rate", is_active=True,
     )
-    db.add_all([vehicle, legacy, exact])
-    db.commit()
-
-    selected = app_module._select_tariff(db, models.TripType.SAMOSVAL, vehicle, date(2026, 8, 12), 15, 12)
-    assert selected.id == exact.id
-    assert app_module._tariff_amount(selected, 15, 12, 1) == 3400
+    db.add_all([legacy, base]); db.commit()
+    from backend import bitrix
+    selected = bitrix._find_samosval_tariff_by_base_rate_volume(db, "до 15 км", 12)
+    assert selected.id == base.id
+    assert bitrix._tariff_driver_amount(base, type("T", (), {"trips_count": 2, "km": 15, "volume": 12})()) == 6800
     db.close()
 
 
@@ -237,15 +230,12 @@ def test_create_request_flows_into_tariff_salary_and_polygon():
     )
     vehicle = models.Vehicle(name="Самосвал 12 м³", plate="С012СС78", type_id=samosval_type.id, is_active=True)
     polygon = models.Polygon(name="Северная Самарка", address="Санкт-Петербург")
-    legacy = models.Tariff(
-        title="Старый общий", kind=models.TripType.SAMOSVAL, vehicle_type_id=samosval_type.id,
-        formula="trip", trip_price=1000, min_km=0, max_km=None, min_volume=0, max_volume=None, is_active=True,
-    )
     exact = models.Tariff(
-        title="15 км / 12 м³", kind=models.TripType.SAMOSVAL, vehicle_type_id=samosval_type.id,
-        formula="trip", trip_price=3400, min_km=15, max_km=15, min_volume=12, max_volume=12, is_active=True,
+        title="до 15 км", kind=models.TripType.SAMOSVAL, vehicle_type_id=samosval_type.id,
+        formula="trip", trip_price=3400, min_km=0, max_km=None, min_volume=12, max_volume=12,
+        comment="samosval_base_rate", is_active=True,
     )
-    db.add_all([driver, vehicle, polygon, legacy, exact])
+    db.add_all([driver, vehicle, polygon, exact])
     db.commit()
     for row in (driver, vehicle, polygon, exact):
         db.refresh(row)
@@ -254,12 +244,14 @@ def test_create_request_flows_into_tariff_salary_and_polygon():
         "number": "С-101", "planned_date": "2026-08-12", "planned_time": "10:00",
         "driver_id": str(driver.id), "vehicle_id": str(vehicle.id), "polygon_id": str(polygon.id),
         "kind": "самосвал", "km": "15", "volume": "12", "trips_count": "1",
+        "tariff_id": str(exact.id),
         "load_address": "База", "unload_address": "Северная Самарка",
     }, follow_redirects=False)
     assert response.status_code == 303
 
     trip = db.query(models.TripRequest).filter_by(number="С-101").one()
     assert trip.tariff_id == exact.id
+    assert trip.base_rate == "до 15 км"
     assert trip.sum_driver == 3400
     assert trip.polygon_id == polygon.id
     assert trip.volume == 12

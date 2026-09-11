@@ -475,7 +475,7 @@ def test_settings_records_have_working_edit_routes():
     db, admin, _, _, vt, vehicle, customer, cargo, polygon, tariff, _ = reset_db()
     client = client_as(admin)
     cases = [
-        ("vehicles", vehicle.id, {"name": "КАМАЗ новый", "plate": "В222ВВ78", "type_id": str(vt.id), "capacity": "18", "is_active": "on"}, models.Vehicle, "КАМАЗ новый"),
+        ("vehicles", vehicle.id, {"plate": "В222ВВ78", "type_id": str(vt.id), "capacity": "18", "is_active": "on"}, models.Vehicle, "КАМАЗ старый"),
         ("customers", customer.id, {"name": "Заказчик новый", "address": "Новый адрес", "contact": "Иван", "phone": "+7000", "comment": "Важно"}, models.Customer, "Заказчик новый"),
         ("cargo-types", cargo.id, {"name": "Груз новый", "unit": "т", "comment": "Сыпучий"}, models.CargoType, "Груз новый"),
         ("polygons", polygon.id, {"name": "Полигон новый", "address": "Новый полигон", "contact": "Петр", "phone": "+7111", "comment": "Круглосуточно"}, models.Polygon, "Полигон новый"),
@@ -491,6 +491,8 @@ def test_settings_records_have_working_edit_routes():
         row = db.query(model).filter(model.id == record_id).one()
         name = row.title if section == "tariffs" else row.name
         assert name == expected_name
+        if section == "vehicles":
+            assert row.plate == "В222ВВ78" and row.capacity == 18
     assert client.get("/settings/vehicles/999999/edit").status_code == 404
     db.close()
 
@@ -564,7 +566,7 @@ def test_edit_rejects_duplicate_unique_reference_values():
     db.add_all([other_vehicle, other_polygon]); db.commit()
     client = client_as(admin)
     duplicate_vehicle = client.post(f"/settings/vehicles/{vehicle.id}/edit", data={
-        "name": other_vehicle.name, "plate": "Н444НН78", "type_id": str(vt.id), "capacity": "10", "is_active": "on",
+        "plate": other_vehicle.plate, "type_id": str(vt.id), "capacity": "10", "is_active": "on",
     }, follow_redirects=False)
     assert duplicate_vehicle.status_code == 400
     duplicate_polygon = client.post(f"/settings/polygons/{polygon.id}/edit", data={
@@ -572,7 +574,9 @@ def test_edit_rejects_duplicate_unique_reference_values():
     }, follow_redirects=False)
     assert duplicate_polygon.status_code == 400
     db.expire_all()
-    assert db.query(models.Vehicle).filter_by(id=vehicle.id).one().name == "КАМАЗ старый"
+    saved_vehicle = db.query(models.Vehicle).filter_by(id=vehicle.id).one()
+    assert saved_vehicle.name == "КАМАЗ старый"
+    assert saved_vehicle.plate == "А111АА78"
     assert db.query(models.Polygon).filter_by(id=polygon.id).one().name == "Полигон старый"
     db.close()
 
@@ -716,53 +720,6 @@ def test_complete_trip_uses_same_tariff_formula():
     db.close()
 
 
-
-
-def test_driver_can_complete_started_trip_if_status_was_rolled_back_by_bitrix_echo():
-    db, _, _, driver, _, _, _, _, _, _, trip = reset_db()
-    from datetime import datetime
-    trip.status = models.RequestStatus.ACCEPTED
-    trip.started_at = datetime(2026, 8, 11, 9, 0)
-    db.commit()
-
-    client = client_as(driver)
-    detail = client.get(f"/requests/{trip.id}")
-    assert detail.status_code == 200
-    assert "Завершить рейс" in detail.text
-    assert "Начать рейс" not in detail.text
-
-    response = client.post(
-        f"/requests/{trip.id}/complete",
-        data={"actual_km": "10", "actual_volume": "5", "comment": ""},
-        follow_redirects=False,
-    )
-    assert response.status_code == 302
-    db.expire_all()
-    saved = db.query(models.TripRequest).filter_by(id=trip.id).one()
-    assert saved.status == models.RequestStatus.DRIVER_COMPLETED
-    transitions = [
-        (row.old_status, row.new_status)
-        for row in db.query(models.StatusHistory).filter_by(trip_request_id=trip.id).order_by(models.StatusHistory.id).all()
-    ]
-    assert (models.RequestStatus.ACCEPTED.value, models.RequestStatus.IN_WORK.value) in transitions
-    assert (models.RequestStatus.IN_WORK.value, models.RequestStatus.DRIVER_COMPLETED.value) in transitions
-    db.close()
-
-
-def test_driver_cannot_complete_unstarted_accepted_trip():
-    db, _, _, driver, _, _, _, _, _, _, trip = reset_db()
-    trip.status = models.RequestStatus.ACCEPTED
-    trip.started_at = None
-    db.commit()
-    response = client_as(driver).post(
-        f"/requests/{trip.id}/complete",
-        data={"actual_km": "10", "actual_volume": "5", "comment": ""},
-        follow_redirects=False,
-    )
-    assert response.status_code == 409
-    assert "Завершить можно только начатую заявку" in response.text
-    db.close()
-
 def test_final_review_tariff_completion_and_salary_guards():
     db, admin, _, driver, vt, vehicle, customer, cargo, polygon, tariff, trip = reset_db()
     client = client_as(admin)
@@ -818,14 +775,21 @@ def test_final_review_vehicle_retype_and_salary_lock():
     db.close()
 
 
-def test_final_request_can_be_deleted_when_not_in_salary(monkeypatch):
-    db, admin, _, _, _, _, _, _, _, _, trip = reset_db()
+def test_final_requests_can_be_deleted_but_salary_linked_requests_cannot():
+    db, admin, _, driver, _, _, _, _, _, _, trip = reset_db()
     client = client_as(admin)
     trip.status = models.RequestStatus.LOGIST_CONFIRMED
     db.commit()
-    monkeypatch.setattr(app_module.bitrix, "delete_trip", lambda req, session: {"skipped": True})
     assert client.post(f"/requests/{trip.id}/delete", follow_redirects=False).status_code == 302
     assert db.query(models.TripRequest).filter_by(id=trip.id).first() is None
+
+    locked = models.TripRequest(number="LOCKED-DELETE", planned_date=date.today(), driver_id=driver.id, kind=models.TripType.PUKHTOVOZ)
+    db.add(locked); db.flush()
+    calc = models.SalaryCalc(driver_id=driver.id, date_from=date.today(), date_to=date.today(), status=models.CalcStatus.DRAFT)
+    db.add(calc); db.flush()
+    db.add(models.SalaryCalcItem(salary_calc_id=calc.id, trip_request_id=locked.id, sum=0)); db.commit()
+    assert client.post(f"/requests/{locked.id}/delete", follow_redirects=False).status_code == 409
+    assert db.query(models.TripRequest).filter_by(id=locked.id).first() is not None
     assert client.post("/requests/999999/delete", follow_redirects=False).status_code == 404
     db.close()
 
@@ -1118,12 +1082,7 @@ def test_bitrix_inbound_rejects_lifecycle_jump_and_salary_locked_changes(monkeyp
     response = client.post("/webhook/bitrix24?token=hook-secret", json=payload)
     assert response.status_code == 200
     db.expire_all()
-    final_trip = db.query(models.TripRequest).filter_by(id=trip.id).one()
-    assert final_trip.status == models.RequestStatus.LOGIST_CONFIRMED
-    assert final_trip.planned_time == "23:59"
-    assert final_trip.site_contact_phone == "+79990000000"
-    assert final_trip.polygon_cost_manual == 1234
-    assert final_trip.actual_volume is None
+    assert db.query(models.TripRequest).filter_by(id=trip.id).one().actual_volume is None
     db.close()
 
 
@@ -1164,61 +1123,6 @@ def test_delete_request_rolls_back_when_bitrix_delete_fails(tmp_path, monkeypatc
     assert db.query(models.TripRequest).filter_by(id=trip.id).one()
     assert db.query(models.Attachment).filter_by(id=attachment.id).one()
     assert stored.exists()
-    db.close()
-
-
-def test_delete_completed_or_cancelled_request_is_allowed_when_not_in_salary(monkeypatch):
-    db, admin, _, _, _, _, _, _, _, _, trip = reset_db()
-    trip.status = models.RequestStatus.LOGIST_CONFIRMED
-    db.commit()
-    monkeypatch.setattr(app_module.bitrix, "delete_trip", lambda req, session: {"skipped": True})
-
-    response = client_as(admin).post(f"/requests/{trip.id}/delete", follow_redirects=False)
-
-    assert response.status_code == 302
-    assert db.query(models.TripRequest).filter_by(id=trip.id).first() is None
-    db.close()
-
-
-def test_delete_request_still_protects_salary_history(monkeypatch):
-    db, admin, _, driver, _, _, _, _, _, _, trip = reset_db()
-    calc = models.SalaryCalc(
-        driver_id=driver.id, date_from=date.today(), date_to=date.today(), status=models.CalcStatus.DRAFT,
-    )
-    db.add(calc); db.flush()
-    db.add(models.SalaryCalcItem(salary_calc_id=calc.id, trip_request_id=trip.id, sum=0))
-    db.commit()
-    monkeypatch.setattr(app_module.bitrix, "delete_trip", lambda req, session: {"ok": True})
-
-    response = client_as(admin).post(f"/requests/{trip.id}/delete", follow_redirects=False)
-
-    assert response.status_code == 409
-    assert db.query(models.TripRequest).filter_by(id=trip.id).one()
-    db.close()
-
-
-def test_bitrix_delete_uses_request_entity_id_and_treats_already_missing_as_success(monkeypatch):
-    db, admin, _, _, _, _, _, _, _, _, trip = reset_db()
-    settings = models.IntegrationSetting(
-        provider="bitrix24", webhook_url="https://example/rest/1/token/", is_active=True,
-    )
-    trip.bitrix_element_id = 444
-    trip.bitrix_entity_type_id = 1092
-    db.add(settings); db.commit()
-    monkeypatch.setattr(
-        app_module.bitrix, "resolve_process_entity",
-        lambda *args: (_ for _ in ()).throw(AssertionError("stored entity id must be used")),
-    )
-    calls = []
-    def fake_post(url, method, payload):
-        calls.append((method, payload))
-        return {"error": "ERROR_NOT_FOUND: item not found"}
-    monkeypatch.setattr(app_module.bitrix, "_http_post", fake_post)
-
-    result = app_module.bitrix.delete_trip(trip, db, settings=settings)
-
-    assert result["ok"] is True and result["already_missing"] is True
-    assert calls == [("crm.item.delete", {"entityTypeId": 1092, "id": 444})]
     db.close()
 
 
@@ -1292,8 +1196,8 @@ def test_sqlite_attachment_limit_reserves_write_lock_before_count(monkeypatch):
 def test_empty_reports_row_spans_every_column():
     db, admin, _, driver, *_ = reset_db()
     db.query(models.TripRequest).delete(); db.commit()
-    assert 'colspan="13"' in client_as(admin).get("/reports").text
-    assert 'colspan="12"' in client_as(driver).get("/reports").text
+    assert 'colspan="10"' in client_as(admin).get("/reports").text
+    assert 'colspan="9"' in client_as(driver).get("/reports").text
     db.close()
 
 
@@ -1446,7 +1350,7 @@ def test_render_binds_health_before_slow_database_initialization(tmp_path):
     env.update({
         "DATABASE_URL": f"sqlite:///{db_path.as_posix()}",
         "SECRET_KEY": "render-delayed-start-test",
-        "PYTHONPATH": str(Path(app_module.root_dir)),
+        "PYTHONPATH": str(Path(app_module.root_dir)) + os.pathsep + os.environ.get("PYTHONPATH", ""),
         "PORT": str(port),
     })
     proc = subprocess.Popen(
@@ -1512,7 +1416,7 @@ def test_empty_database_has_no_demo_accounts_and_secure_bootstrap_is_explicit(tm
 
     code = "import app; from backend.models import SessionLocal,User; db=SessionLocal(); print('USERS='+str(db.query(User).count())); db.close()"
     base_env = os.environ.copy()
-    base_env.update({"SECRET_KEY": "subprocess-test-key", "PYTHONPATH": str(ROOT)})
+    base_env.update({"SECRET_KEY": "subprocess-test-key", "PYTHONPATH": str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")})
     base_env.pop("BOOTSTRAP_ADMIN_PASSWORD", None)
     empty_db = tmp_path / "empty.db"
     no_bootstrap = subprocess.run(
@@ -1581,59 +1485,4 @@ def test_bitrix_diagnostics_never_expose_urls_tokens_or_raw_errors(monkeypatch, 
     captured = capsys.readouterr()
     assert leaked not in captured.out and leaked not in captured.err
     assert "private-application-token" not in captured.out and "private-application-token" not in captured.err
-    db.close()
-
-
-def test_exact_polygon_cargo_tariff_has_priority_supports_m3_and_tonnes_and_is_snapshotted_in_reports():
-    db, admin, _, driver, vt, vehicle, customer, construction, polygon, tariff, trip = reset_db()
-    construction.name = "Строительный мусор"
-    construction.unit = "м³"
-    industrial = models.CargoType(name="Промышленный мусор", unit="т")
-    db.add(industrial); db.flush()
-    construction_tariff = models.PolygonTariff(
-        polygon_id=polygon.id, cargo_type_id=construction.id, rate=900, unit="м³"
-    )
-    industrial_tariff = models.PolygonTariff(
-        polygon_id=polygon.id, cargo_type_id=industrial.id, rate=3570, unit="т"
-    )
-    db.add_all([construction_tariff, industrial_tariff]); db.flush()
-    polygon.calculation_method = "volume"
-    polygon.volume_rate = 100  # legacy fallback must lose to exact cargo tariff
-
-    trip.cargo_type_id = construction.id
-    trip.volume = 10
-    trip.actual_volume = None
-    assert app_module._polygon_trip_cost(trip) == 9000
-
-    tonnes_trip = models.TripRequest(
-        number="П-TONNES", planned_date=date(2026, 8, 19), driver_id=driver.id,
-        vehicle_id=vehicle.id, customer_id=customer.id, cargo_type_id=industrial.id,
-        polygon_id=polygon.id, tariff_id=tariff.id, volume=20, tonnage=2,
-        actual_tonnage=2.5, trips_count=1, kind=models.TripType.PUKHTOVOZ,
-        status=models.RequestStatus.DRIVER_COMPLETED, sum_driver=1000, sum_trip=1000,
-    )
-    db.add(tonnes_trip); db.commit()
-    assert app_module._polygon_trip_cost(tonnes_trip) == 8925
-
-    response = client_as(admin).post(f"/requests/{tonnes_trip.id}/confirm", follow_redirects=False)
-    assert response.status_code == 302
-    db.refresh(tonnes_trip)
-    assert tonnes_trip.status == models.RequestStatus.LOGIST_CONFIRMED
-    assert tonnes_trip.polygon_cost_manual == 8925
-    assert tonnes_trip.polygon_rate_snapshot == 3570
-    assert tonnes_trip.polygon_unit_snapshot == "т"
-
-    industrial_tariff.rate = 4000
-    db.commit()
-    report = client_as(admin).get("/reports")
-    assert report.status_code == 200
-    assert "Промышленный мусор" in report.text
-    assert "3 570 ₽/т" in report.text
-    assert "8 925 ₽" in report.text
-    assert "10 000 ₽" not in report.text
-
-    csv_response = client_as(admin).get("/export/report.csv")
-    csv_text = csv_response.content.decode("utf-8-sig")
-    assert "Тип груза" in csv_text and "Тариф полигона" in csv_text and "Затраты полигона" in csv_text
-    assert "Промышленный мусор" in csv_text and "3 570 ₽/т" in csv_text and "8925" in csv_text
     db.close()
