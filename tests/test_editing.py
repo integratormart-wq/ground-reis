@@ -1196,8 +1196,8 @@ def test_sqlite_attachment_limit_reserves_write_lock_before_count(monkeypatch):
 def test_empty_reports_row_spans_every_column():
     db, admin, _, driver, *_ = reset_db()
     db.query(models.TripRequest).delete(); db.commit()
-    assert 'colspan="10"' in client_as(admin).get("/reports").text
-    assert 'colspan="9"' in client_as(driver).get("/reports").text
+    assert 'colspan="13"' in client_as(admin).get("/reports").text
+    assert 'colspan="12"' in client_as(driver).get("/reports").text
     db.close()
 
 
