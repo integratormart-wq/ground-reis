@@ -33,9 +33,7 @@ BITRIX_RECONCILE_LOCK = threading.Lock()
 
 @app.middleware("http")
 async def reject_cross_origin_writes(request: Request, call_next):
-    # This exact POST only renders public HTML; it never writes CRM/app data.
-    widget_bootstrap = request.method == "POST" and request.url.path == "/static/address-selector/index.html"
-    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/webhook/bitrix24" and not widget_bootstrap:
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/webhook/bitrix24":
         source = request.headers.get("origin") or request.headers.get("referer")
         if not source:
             return JSONResponse({"detail": "Запрос отклонен защитой CSRF"}, status_code=403)
@@ -47,28 +45,6 @@ async def reject_cross_origin_writes(request: Request, call_next):
     return await call_next(request)
 
 root_dir = os.path.dirname(os.path.abspath(__file__))
-
-@app.api_route("/static/address-selector/index.html", methods=["GET", "POST"], include_in_schema=False)
-async def address_selector_widget(request: Request):
-    # Bitrix placement bootstrap, not an authenticated data endpoint.
-    # Allowlist context: never reflect auth tokens or arbitrary script content.
-    ctx = {}
-    if request.method == "POST":
-        form = await request.form()
-        try:
-            options = json.loads(form.get("PLACEMENT_OPTIONS", "{}"))
-            value = options.get("ID") if isinstance(options, dict) else None
-            if isinstance(value, (str, int)) and str(value).isascii() and str(value).isdigit() and 0 < len(str(value)) <= 18:
-                ctx["deal_id"] = str(value)
-            if form.get("PLACEMENT") == "CRM_DEAL_DETAIL_TAB":
-                ctx["placement"] = "CRM_DEAL_DETAIL_TAB"
-        except (ValueError, TypeError):
-            pass
-    with open(os.path.join(root_dir, "static", "address-selector", "index.html"), encoding="utf-8") as source:
-        html = source.read()
-    return HTMLResponse("<script>window.__CTX__=" + json.dumps(ctx) + ";</script>" + html,
-                        headers={"Cache-Control": "no-store"})
-
 app.mount("/static", StaticFiles(directory=os.path.join(root_dir, "static"), html=True), name="static")
 jinja_env = Environment(loader=FileSystemLoader(os.path.join(root_dir, "templates")), autoescape=select_autoescape(["html", "xml"]))
 STATUS_SLUGS = {
@@ -612,8 +588,9 @@ def dashboard(request: Request, current_user: models.User = Depends(get_current_
 
 @app.get("/requests", response_class=HTMLResponse)
 def requests_list(request: Request, status_f: Optional[str] = None, kind: Optional[str] = None, q: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if current_user.role in {UserRole.ADMIN, UserRole.LOGIST}:
-        _schedule_bitrix_reconcile()
+    # Не запускаем массовую REST-сверку Bitrix при обычном открытии списка.
+    # Основной канал синхронизации — webhook; ручная страховочная сверка доступна
+    # администратору через /settings/bitrix/sync-now.
     rs = db.query(models.TripRequest).options(
         joinedload(models.TripRequest.customer),
         joinedload(models.TripRequest.driver),
@@ -640,8 +617,7 @@ def requests_list(request: Request, status_f: Optional[str] = None, kind: Option
 @app.get("/pukhtovoz", response_class=HTMLResponse)
 def pukhtovoz_list(request: Request, status_f: Optional[str] = None, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, q: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
-    if current_user.role in {UserRole.ADMIN, UserRole.LOGIST}:
-        _schedule_bitrix_reconcile()
+    # Переход на страницу не должен инициировать до 20+ REST-проверок Bitrix.
     rs = db.query(models.TripRequest).options(
         joinedload(models.TripRequest.customer),
         joinedload(models.TripRequest.driver),
@@ -669,8 +645,7 @@ def pukhtovoz_list(request: Request, status_f: Optional[str] = None, driver_id: 
 @app.get("/samosval", response_class=HTMLResponse)
 def samosval_list(request: Request, status_f: Optional[str] = None, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, q: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
-    if current_user.role in {UserRole.ADMIN, UserRole.LOGIST}:
-        _schedule_bitrix_reconcile()
+    # Переход на страницу не должен инициировать до 20+ REST-проверок Bitrix.
     rs = db.query(models.TripRequest).options(
         joinedload(models.TripRequest.customer),
         joinedload(models.TripRequest.driver),
@@ -2781,18 +2756,6 @@ async def bitrix24_webhook(request: Request, db: Session = Depends(get_db)):
     if not item_id or not entity_type_id:
         BITRIX_LAST_EVENT["result"] = "missing_item_or_entity"
         return JSONResponse({"ok": False, "error": "missing_item_or_entity"}, status_code=400)
-
-    # Автозаполнение рейса из родительской сделки (Вариант B / REST).
-    # Только при создании элемента; не затирает уже заполненные поля и не трогает UPDATE.
-    if event == "ONCRMDYNAMICITEMADD":
-        try:
-            enrich_result = bitrix.enrich_trip_from_deal(settings.webhook_url, entity_type_id, item_id)
-            BITRIX_LAST_EVENT["enrich"] = _safe_bitrix_result(enrich_result)
-            print("BITRIX_ENRICH", enrich_result.get("status"), entity_type_id, item_id,
-                  enrich_result.get("fields_updated", []), flush=True)
-        except Exception as exc:
-            BITRIX_LAST_EVENT["enrich"] = {"status": "exception", "detail": type(exc).__name__}
-            print("BITRIX_ENRICH_EXCEPTION", type(exc).__name__, flush=True)
 
     trip = db.query(models.TripRequest).filter(
         models.TripRequest.bitrix_element_id == item_id,
