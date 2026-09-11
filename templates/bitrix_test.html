@@ -33,7 +33,7 @@
       {% if info.userfield_access.ok %}
         <span style="color:green">есть — ID вариантов преобразуются в реальные значения (например, 716 → 32) ✅</span>
       {% elif info.userfield_access.reason == 'insufficient_scope' %}
-        <span style="color:#b00">нет — во входящем webhook нужно добавить право <b>userfieldconfig</b>. Без него поля-списки «Водитель», «Госномер», «Объём», «Базовая ставка» могут приходить внутренними ID Bitrix.</span>
+        <span style="color:#b00">нет — во входящем webhook нужно добавить право <b>userfieldconfig</b>. Без него поля-списки «Водитель», «Госномер», «Тип мусора», «Тариф», «Объём», «Базовая ставка» могут приходить внутренними ID Bitrix.</span>
       {% else %}
         <span style="color:#b00">нет доступа к настройкам пользовательских полей смарт-процесса.</span>
       {% endif %}
@@ -65,14 +65,14 @@
 
   {% if info.field_diagnostics %}
     <h3 style="margin-top:18px">Диагностика полей последнего рейса</h3>
-    <p class="hint">Здесь нет webhook и секретных ключей. Если водитель или госномер не подгрузятся, пришлите скрин именно этой таблицы.</p>
+    <p class="hint">Здесь нет webhook и секретных ключей. Если какое-то поле не подгрузится, эта таблица покажет его реальное название, тип и значение из Bitrix.</p>
     {% for d in info.field_diagnostics %}
       <div class="card" style="padding:14px;margin-top:10px">
         <b>Процесс {{ d.entity_type_id }}, элемент #{{ d.item_id }}</b>
         <table class="table" style="margin-top:10px">
           <thead><tr><th>Куда</th><th>Поле Bitrix</th><th>Тип</th><th>Что реально отдаёт Bitrix</th></tr></thead>
           <tbody>
-          {% for logical, label in [('driver_name','Водитель'),('vehicle_name','Госномер'),('load_address','Адрес подачи'),('base_rate','Базовая ставка'),('volume','Объём'),('polygon_cost','Затраты полигона')] %}
+          {% for logical, label in [('driver_name','Водитель'),('vehicle_name','Госномер'),('load_address','Адрес подачи'),('cargo_type_name','Тип мусора / груза'),('tariff_name','Тариф'),('base_rate','Базовая ставка'),('volume','Объём'),('tonnage','Тоннаж'),('polygon_cost','Затраты полигона')] %}
             {% set rows = d.fields.get(logical, []) %}
             {% if rows %}
               {% for f in rows %}
