@@ -6,7 +6,7 @@ from fastapi import FastAPI, Depends, HTTPException, status, Form, Request, Quer
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload, defer
 from sqlalchemy.exc import IntegrityError
 from urllib.parse import urlsplit
 from sqlalchemy import func, text
@@ -32,6 +32,9 @@ BITRIX_LAST_RECONCILE_AT = None
 BITRIX_RECONCILE_LOCK = threading.Lock()
 DB_INIT_ERROR_INFO = {}  # тип/текст/traceback последней ошибки инициализации БД (для диагностики)
 DB_STATE = {"status": "initializing", "attempts": 0, "connected_at": None}  # connected|retrying|unavailable|recovered
+EGRESS_STATS = {}  # path -> [count, bytes] — источники исходящего трафика
+EGRESS_STATS_LOCK = threading.Lock()
+EGRESS_LOG_INTERVAL = 300  # сек: как часто логировать топ эндпоинтов
 
 @app.middleware("http")
 async def reject_cross_origin_writes(request: Request, call_next):
@@ -45,6 +48,38 @@ async def reject_cross_origin_writes(request: Request, call_next):
         if parsed.scheme not in {"http", "https"} or source_host != request_host:
             return JSONResponse({"detail": "Запрос отклонен защитой CSRF"}, status_code=403)
     return await call_next(request)
+
+
+@app.middleware("http")
+async def egress_metrics(request: Request, call_next):
+    response = await call_next(request)
+    try:
+        body_size = len(getattr(response, "body", b"") or b"")
+    except Exception:
+        body_size = 0
+    path = request.url.path
+    with EGRESS_STATS_LOCK:
+        entry = EGRESS_STATS.get(path)
+        if entry is None:
+            entry = EGRESS_STATS[path] = [0, 0]
+        entry[0] += 1
+        entry[1] += body_size
+    return response
+
+
+def _egress_stats_reporter():
+    while True:
+        time.sleep(EGRESS_LOG_INTERVAL)
+        with EGRESS_STATS_LOCK:
+            if not EGRESS_STATS:
+                continue
+            top = sorted(EGRESS_STATS.items(), key=lambda kv: kv[1][1], reverse=True)[:12]
+            total_count = sum(v[0] for v in EGRESS_STATS.values())
+            total_bytes = sum(v[1] for v in EGRESS_STATS.values())
+        print(f"EGRESS_STATS total={total_count}req {total_bytes}B", flush=True)
+        for path, (cnt, byt) in top:
+            print(f"EGRESS_STATS  {path}  {cnt}req  {byt}B", flush=True)
+
 
 root_dir = os.path.dirname(os.path.abspath(__file__))
 app.mount("/static", StaticFiles(directory=os.path.join(root_dir, "static"), html=True), name="static")
@@ -300,6 +335,7 @@ if _DEFER_DB_INIT:
     @app.on_event("startup")
     def start_render_database_init():
         threading.Thread(target=_initialize_database_or_exit, name="database-init", daemon=True).start()
+        threading.Thread(target=_egress_stats_reporter, name="egress-reporter", daemon=True).start()
 else:
     try:
         _initialize_database()
@@ -689,6 +725,7 @@ def pukhtovoz_list(request: Request, status_f: Optional[str] = None, driver_id: 
         joinedload(models.TripRequest.customer),
         joinedload(models.TripRequest.driver),
         joinedload(models.TripRequest.vehicle),
+        joinedload(models.TripRequest.tariff),
     ).filter(models.TripRequest.kind == TripType.PUKHTOVOZ)
     if current_user.role == UserRole.DRIVER:
         rs = rs.filter(models.TripRequest.driver_id == current_user.id)
@@ -717,6 +754,7 @@ def samosval_list(request: Request, status_f: Optional[str] = None, driver_id: O
         joinedload(models.TripRequest.customer),
         joinedload(models.TripRequest.driver),
         joinedload(models.TripRequest.vehicle),
+        joinedload(models.TripRequest.tariff),
     ).filter(models.TripRequest.kind == TripType.SAMOSVAL)
     if current_user.role == UserRole.DRIVER:
         rs = rs.filter(models.TripRequest.driver_id == current_user.id)
@@ -927,7 +965,13 @@ def _resolve_customer_from_form(db, customer_id=None, customer_name_manual=None,
         customer = db.query(models.Customer).filter(models.Customer.inn == clean_inn).first()
     if not customer and clean_name:
         normalized = bitrix._normalize(clean_name)
-        customer = next((row for row in db.query(models.Customer).all() if bitrix._normalize(row.name) == normalized), None)
+        # SQL-фильтр вместо полной загрузки таблицы: сначала точное совпадение без учёта регистра.
+        customer = db.query(models.Customer).filter(
+            func.lower(models.Customer.name) == clean_name.lower().strip()
+        ).first()
+        if not customer:
+            # Редкий случай (различия в пунктуации/«ё»): нормализуем только всех, но это малая таблица.
+            customer = next((row for row in db.query(models.Customer).all() if bitrix._normalize(row.name) == normalized), None)
     if not customer and clean_name:
         customer = models.Customer(name=clean_name, inn=clean_inn or None, address=clean_address)
         db.add(customer)
@@ -1218,7 +1262,7 @@ def _deletable_request_ids(db, rows):
 
 def _delete_local_request_rows(db, req):
     """Удаляет локальную заявку и её дочерние строки; commit делает вызывающий код."""
-    attachments = db.query(models.Attachment).filter(models.Attachment.trip_request_id == req.id).all()
+    attachments = db.query(models.Attachment).options(defer(models.Attachment.content)).filter(models.Attachment.trip_request_id == req.id).all()
     attachment_paths = [row.path for row in attachments if row.path]
     db.query(models.Attachment).filter(models.Attachment.trip_request_id == req.id).delete(
         synchronize_session=False
@@ -1423,7 +1467,7 @@ def request_detail(request: Request, req_id: int, current_user: models.User = De
         raise HTTPException(404)
     menu = menu_for(current_user.role)
     history = db.query(models.StatusHistory).filter(models.StatusHistory.trip_request_id == req_id).order_by(models.StatusHistory.created_at.desc()).all()
-    attachments = db.query(models.Attachment).filter(models.Attachment.trip_request_id == req_id).order_by(models.Attachment.created_at.desc()).all()
+    attachments = db.query(models.Attachment).options(defer(models.Attachment.content)).filter(models.Attachment.trip_request_id == req_id).order_by(models.Attachment.created_at.desc()).all()
     return render_template("request_detail.html", {"request": request, "user": current_user, "menu": menu, "req": req, "history": history, "attachments": attachments, "can_delete": req.id in _deletable_request_ids(db, [req]), "app_name": "ГРАУНД | Рейсы"})
 
 
@@ -1846,13 +1890,18 @@ def day_reports(
     if driver_id:
         driver_value = _form_fk(db, models.User, driver_id, "Водитель")
         query = query.filter(models.DriverDayReport.driver_id == driver_value)
-    rows = query.order_by(models.DriverDayReport.report_date.desc()).all()
+    rows = query.options(
+        joinedload(models.DriverDayReport.driver),
+        joinedload(models.DriverDayReport.vehicle),
+    ).order_by(models.DriverDayReport.report_date.desc()).all()
     trips_by_report = {row.id: [] for row in rows}
     if rows:
         report_keys = {(row.driver_id, row.report_date) for row in rows}
         driver_ids = {row.driver_id for row in rows}
         report_dates = {row.report_date for row in rows}
-        trips = db.query(models.TripRequest).filter(
+        trips = db.query(models.TripRequest).options(
+            joinedload(models.TripRequest.polygon),
+        ).filter(
             models.TripRequest.driver_id.in_(driver_ids),
             models.TripRequest.planned_date.in_(report_dates),
         ).order_by(models.TripRequest.planned_date.desc(), models.TripRequest.planned_time, models.TripRequest.id).all()
@@ -1883,7 +1932,9 @@ def salary(request: Request, driver_id: Optional[str] = None, date_from: Optiona
     if date_from: query = query.filter(models.TripRequest.planned_date >= date.fromisoformat(date_from))
     if date_to: query = query.filter(models.TripRequest.planned_date <= date.fromisoformat(date_to))
     if q: query = query.filter(models.TripRequest.number.contains(q.strip()))
-    rows = query.order_by(models.TripRequest.planned_date.desc()).all()
+    rows = query.options(
+        joinedload(models.TripRequest.polygon),
+    ).order_by(models.TripRequest.planned_date.desc()).all()
     if current_user.role == UserRole.DRIVER:
         driver = current_user
         trips = rows
@@ -1931,7 +1982,12 @@ def reports(request: Request, status_f: Optional[str] = None, driver_id: Optiona
     if q:
         like = f"%{q}%"
         q_base = q_base.filter(models.TripRequest.number.ilike(like))
-    rows = q_base.order_by(models.TripRequest.planned_date.desc()).all()
+    rows = q_base.options(
+        joinedload(models.TripRequest.driver),
+        joinedload(models.TripRequest.customer),
+        joinedload(models.TripRequest.cargo_type),
+        joinedload(models.TripRequest.polygon).selectinload(models.Polygon.tariffs),
+    ).order_by(models.TripRequest.planned_date.desc()).all()
     if current_user.role == UserRole.DRIVER:
         polygon_ids, customer_ids = _driver_reference_scope(db, current_user.id)
         drivers = [current_user]
@@ -1970,7 +2026,12 @@ def export_report(status_f: Optional[str] = None, driver_id: Optional[str] = Non
     if date_from: q = q.filter(models.TripRequest.planned_date >= date.fromisoformat(date_from))
     if date_to: q = q.filter(models.TripRequest.planned_date <= date.fromisoformat(date_to))
     if search: q = q.filter(models.TripRequest.number.ilike(f"%{search}%"))
-    rows = q.order_by(models.TripRequest.planned_date.desc()).all()
+    rows = q.options(
+        joinedload(models.TripRequest.driver),
+        joinedload(models.TripRequest.customer),
+        joinedload(models.TripRequest.cargo_type),
+        joinedload(models.TripRequest.polygon).selectinload(models.Polygon.tariffs),
+    ).order_by(models.TripRequest.planned_date.desc()).all()
     out = io.StringIO(); writer = csv.writer(out)
     writer.writerow(["Номер", "Дата", "Время", "Статус", "Водитель", "Полигон", "Тип груза", "Тариф полигона", "Затраты полигона", "Компания", "Объём, м³", "Тоннаж план, т", "Тоннаж факт, т", "Сумма"])
     for r in rows:
@@ -1992,7 +2053,12 @@ def export_report_xlsx(status_f: Optional[str] = None, driver_id: Optional[str] 
     if date_from: q = q.filter(models.TripRequest.planned_date >= date.fromisoformat(date_from))
     if date_to: q = q.filter(models.TripRequest.planned_date <= date.fromisoformat(date_to))
     if search: q = q.filter(models.TripRequest.number.ilike(f"%{search}%"))
-    rows = q.order_by(models.TripRequest.planned_date.desc()).all()
+    rows = q.options(
+        joinedload(models.TripRequest.driver),
+        joinedload(models.TripRequest.customer),
+        joinedload(models.TripRequest.cargo_type),
+        joinedload(models.TripRequest.polygon).selectinload(models.Polygon.tariffs),
+    ).order_by(models.TripRequest.planned_date.desc()).all()
     wb = Workbook(); ws = wb.active; ws.append(["Номер", "Дата", "Время", "Статус", "Водитель", "Полигон", "Тип груза", "Тариф полигона", "Затраты полигона", "Компания", "Объём, м³", "Тоннаж план, т", "Тоннаж факт, т", "Сумма"])
     for r in rows:
         ws.append(_export_row([r.number, r.planned_date, r.planned_time or "", r.status.value, r.driver.full_name if r.driver else "", r.polygon.name if r.polygon else "", r.cargo_type.name if r.cargo_type else "", _polygon_tariff_label(r), _polygon_trip_cost(r), r.customer.name if r.customer else "", r.actual_volume if r.actual_volume is not None else (r.volume or 0), r.tonnage if r.tonnage is not None else "", r.actual_tonnage if r.actual_tonnage is not None else "", r.sum_driver or 0]))
@@ -2100,7 +2166,9 @@ def polygons_list(request: Request, polygon_id: Optional[str] = None, driver_id:
     else:
         polygons = db.query(models.Polygon).order_by(models.Polygon.name).all()
     visible_polygons = [p for p in polygons if not polygon_id or p.id == int(polygon_id)]
-    polygon_query = db.query(models.TripRequest)
+    polygon_query = db.query(models.TripRequest).options(
+        joinedload(models.TripRequest.polygon).selectinload(models.Polygon.tariffs),
+    )
     if current_user.role == UserRole.DRIVER:
         polygon_query = polygon_query.filter(models.TripRequest.driver_id == current_user.id)
         driver_id = str(current_user.id)
@@ -2185,7 +2253,12 @@ def export_polygon(polygon_id: str, driver_id: Optional[str] = None, date_from: 
         models.TripRequest.polygon_id == polygon.id,
     ).first():
         raise HTTPException(404, "Полигон не найден")
-    polygon_query = db.query(models.TripRequest)
+    polygon_query = db.query(models.TripRequest).options(
+        joinedload(models.TripRequest.driver),
+        joinedload(models.TripRequest.vehicle),
+        joinedload(models.TripRequest.cargo_type),
+        joinedload(models.TripRequest.polygon).selectinload(models.Polygon.tariffs),
+    )
     if current_user.role == UserRole.DRIVER:
         polygon_query = polygon_query.filter(models.TripRequest.driver_id == current_user.id)
         driver_id = str(current_user.id)
@@ -2198,7 +2271,9 @@ def export_polygon(polygon_id: str, driver_id: Optional[str] = None, date_from: 
 
 @app.get("/export/polygons.csv")
 def export_polygons(polygon_id: Optional[str] = None, driver_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    polygon_query = db.query(models.TripRequest)
+    polygon_query = db.query(models.TripRequest).options(
+        joinedload(models.TripRequest.polygon).selectinload(models.Polygon.tariffs),
+    )
     if current_user.role == UserRole.DRIVER:
         polygon_query = polygon_query.filter(models.TripRequest.driver_id == current_user.id)
         driver_id = str(current_user.id)
@@ -2288,10 +2363,17 @@ def add_settings_polygon(name: str = Form(...), address: str = Form(""), contact
 def add_customer(name: str = Form(...), address: str = Form(""), contact: str = Form(""), phone: str = Form(""), inn: str = Form(""), bitrix_company_id: str = Form(""), bitrix_contact_id: str = Form(""), current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
     clean_name = name.strip()
     normalized_name = bitrix._normalize(clean_name)
-    duplicate_name = next(
-        (row for row in db.query(models.Customer).all() if bitrix._normalize(row.name) == normalized_name),
-        None,
-    ) if normalized_name else None
+    duplicate_name = None
+    if normalized_name:
+        # SQL-фильтр вместо полной загрузки таблицы.
+        duplicate_name = db.query(models.Customer).filter(
+            func.lower(models.Customer.name) == clean_name.lower()
+        ).first()
+        if not duplicate_name:
+            duplicate_name = next(
+                (row for row in db.query(models.Customer).all() if bitrix._normalize(row.name) == normalized_name),
+                None,
+            )
     if duplicate_name:
         raise HTTPException(409, "Заказчик с таким названием уже существует")
     if clean_name:
@@ -3010,7 +3092,9 @@ def delete_request(req_id: int, current_user: models.User = Depends(require_role
 @app.get("/archive", response_class=HTMLResponse)
 def archive_list(request: Request, current_user: models.User = Depends(require_role(UserRole.ADMIN)), db: Session = Depends(get_db)):
     menu = menu_for(current_user.role)
-    rows = db.query(models.TripArchive).order_by(models.TripArchive.archived_at.desc()).all()
+    rows = db.query(models.TripArchive).options(
+        joinedload(models.TripArchive.driver),
+    ).order_by(models.TripArchive.archived_at.desc()).all()
     return render_template("archive.html", {"request": request, "user": current_user, "menu": menu, "rows": rows, "app_name": "ГРАУНД | Рейсы"})
 
 @app.post("/archive/{archive_id}/restore")
@@ -3163,7 +3247,10 @@ def export_csv(status_f: Optional[str] = None, kind: Optional[str] = None, drive
         q = q.filter(models.TripRequest.planned_date >= date.fromisoformat(date_from))
     if date_to:
         q = q.filter(models.TripRequest.planned_date <= date.fromisoformat(date_to))
-    rows = q.order_by(models.TripRequest.planned_date.desc()).all()
+    rows = q.options(
+        joinedload(models.TripRequest.driver),
+        joinedload(models.TripRequest.vehicle),
+    ).order_by(models.TripRequest.planned_date.desc()).all()
     out = io.StringIO(); writer = csv.writer(out)
     writer.writerow(["Номер", "Дата", "Статус", "Водитель", "Автомобиль", "Сумма водителю"])
     for r in rows:
@@ -3180,7 +3267,9 @@ def export_xlsx(driver_id: Optional[str] = None, date_from: Optional[str] = None
     if date_from: query = query.filter(models.TripRequest.planned_date >= date.fromisoformat(date_from))
     if date_to: query = query.filter(models.TripRequest.planned_date <= date.fromisoformat(date_to))
     if q: query = query.filter(models.TripRequest.number.contains(q.strip()))
-    trips = query.order_by(models.TripRequest.driver_id, models.TripRequest.planned_date).all()
+    trips = query.options(
+        joinedload(models.TripRequest.driver),
+    ).order_by(models.TripRequest.driver_id, models.TripRequest.planned_date).all()
     grouped = {}
     for trip in trips:
         grouped.setdefault(trip.driver_id, []).append(trip)
