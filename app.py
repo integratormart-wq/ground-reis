@@ -30,6 +30,7 @@ BITRIX_LAST_EVENT = {"received": False}
 BITRIX_LAST_OUTBOUND = {"attempted": False}
 BITRIX_LAST_RECONCILE_AT = None
 BITRIX_RECONCILE_LOCK = threading.Lock()
+DB_INIT_ERROR_INFO = {}  # тип/текст/traceback последней ошибки инициализации БД (для диагностики)
 
 @app.middleware("http")
 async def reject_cross_origin_writes(request: Request, call_next):
@@ -91,7 +92,12 @@ def _initialize_database():
         models.Base.metadata.create_all(bind=engine)
         print("BOOT tables_created", flush=True)
     except Exception as exc:
-        print("BOOT DB_INIT_ERROR", type(exc).__name__, flush=True)
+        import traceback
+        DB_INIT_ERROR_INFO["type"] = type(exc).__name__
+        DB_INIT_ERROR_INFO["text"] = str(exc)
+        DB_INIT_ERROR_INFO["traceback"] = traceback.format_exc()
+        print("BOOT DB_INIT_ERROR", type(exc).__name__, str(exc), flush=True)
+        print("BOOT DB_INIT_TRACEBACK:\n" + traceback.format_exc(), flush=True)
         raise
 
     # create_all не добавляет колонки в существующие таблицы.
@@ -269,6 +275,8 @@ def healthz():
     if render_commit:
         payload["commit"] = render_commit[:12]
     if not _DB_READY.is_set():
+        if DB_INIT_ERROR_INFO:
+            payload["db_error"] = DB_INIT_ERROR_INFO
         return JSONResponse(payload, status_code=503)
     return payload
 

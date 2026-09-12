@@ -14,7 +14,20 @@ def _build_engine(url: str):
         return create_engine(url, connect_args={"check_same_thread": False})
     # Внешняя БД запускается fail-closed: скрытая запись в локальную SQLite недопустима.
     # connect_timeout не даёт зависнуть при холодном старте Neon (бесплатный тариф засыпает).
-    return create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 15})
+    from sqlalchemy.engine import make_url
+    try:
+        _u = make_url(url)
+        # Логируем только несекретное: хост, база, флаг SSL. Пароль не выводим.
+        print(f"BOOT DB_URL host={_u.host} db={_u.database} sslmode={_u.query.get('sslmode', 'NONE')}", flush=True)
+    except Exception:
+        pass
+    connect_args = {"connect_timeout": 15}
+    try:
+        if "sslmode" not in make_url(url).query:
+            connect_args["sslmode"] = "require"   # Neon требует SSL
+    except Exception:
+        connect_args["sslmode"] = "require"
+    return create_engine(url, pool_pre_ping=True, connect_args=connect_args)
 
 engine = _build_engine(DATABASE_URL)
 if DATABASE_URL.startswith("sqlite"):
