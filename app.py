@@ -88,6 +88,23 @@ print(
 
 def _initialize_database():
     print("BOOT creating tables", flush=True)
+    # Быстрый путь для уже инициализированной схемы: если таблица рейсов есть и
+    # содержит самую свежую колонку (base_rate — последняя миграция), схема
+    # актуальна — пропускаем create_all/миграции/сид. Экономит квоту data-transfer
+    # Neon (бесплатный тариф лимитирован). При любой неоднозначности идём в полную
+    # инициализацию (там всё идемпотентно).
+    try:
+        from sqlalchemy import inspect as _inspect
+        _insp = _inspect(engine)
+        if _insp.has_table("trip_requests"):
+            _cols = [c["name"] for c in _insp.get_columns("trip_requests")]
+            if "base_rate" in _cols:
+                print("BOOT schema_up_to_date (skip create_all/migrations/seed)", flush=True)
+                _DB_READY.set()
+                print("BOOT database_ready", flush=True)
+                return
+    except Exception:
+        pass
     try:
         models.Base.metadata.create_all(bind=engine)
         print("BOOT tables_created", flush=True)
