@@ -1,4 +1,4 @@
-import os, io, csv, sys, math, json, threading, uuid, base64, binascii, urllib.parse, urllib.request
+import os, io, csv, sys, math, json, threading, time, uuid, base64, binascii, urllib.parse, urllib.request
 from datetime import datetime, timedelta, date
 from typing import Optional, List
 from dotenv import load_dotenv
@@ -238,10 +238,17 @@ def _initialize_database():
 
 
 def _initialize_database_or_exit():
-    try:
-        _initialize_database()
-    except BaseException:
-        os._exit(1)
+    # Neon (внешний PostgreSQL) при холодном старте может быть недоступен первые
+    # секунды. Пробуем несколько раз с задержкой, чтобы не падать в crash-loop
+    # из-за кратковременной недоступности БД.
+    for attempt in range(6):
+        try:
+            _initialize_database()
+            return
+        except BaseException as exc:
+            print(f"BOOT DB_INIT_RETRY {attempt + 1}/6 {type(exc).__name__}", flush=True)
+            time.sleep(10 * (attempt + 1))
+    os._exit(1)
 
 
 if _DEFER_DB_INIT:

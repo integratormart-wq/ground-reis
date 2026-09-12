@@ -13,7 +13,8 @@ def _build_engine(url: str):
     if url.startswith("sqlite"):
         return create_engine(url, connect_args={"check_same_thread": False})
     # Внешняя БД запускается fail-closed: скрытая запись в локальную SQLite недопустима.
-    return create_engine(url, pool_pre_ping=True)
+    # connect_timeout не даёт зависнуть при холодном старте Neon (бесплатный тариф засыпает).
+    return create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 15})
 
 engine = _build_engine(DATABASE_URL)
 if DATABASE_URL.startswith("sqlite"):
