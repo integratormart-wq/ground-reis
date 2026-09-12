@@ -31,6 +31,7 @@ BITRIX_LAST_OUTBOUND = {"attempted": False}
 BITRIX_LAST_RECONCILE_AT = None
 BITRIX_RECONCILE_LOCK = threading.Lock()
 DB_INIT_ERROR_INFO = {}  # тип/текст/traceback последней ошибки инициализации БД (для диагностики)
+DB_STATE = {"status": "initializing", "attempts": 0, "connected_at": None}  # connected|retrying|unavailable|recovered
 
 @app.middleware("http")
 async def reject_cross_origin_writes(request: Request, call_next):
@@ -261,17 +262,38 @@ def _initialize_database():
 
 
 def _initialize_database_or_exit():
-    # Neon (внешний PostgreSQL) при холодном старте может быть недоступен первые
-    # секунды. Пробуем несколько раз с задержкой, чтобы не падать в crash-loop
-    # из-за кратковременной недоступности БД.
-    for attempt in range(6):
+    # Neon (внешний PostgreSQL) при холодном старте/квоте может быть недоступен.
+    # НЕ убиваем сервис из-за кратковременной недоступности БД: ограниченный retry
+    # с exponential backoff, затем degraded-режим с редкими попытками восстановления.
+    max_attempts = 8
+    for attempt in range(max_attempts):
         try:
+            _start = time.time()
             _initialize_database()
+            DB_STATE.update(status="connected", attempts=attempt + 1,
+                            connected_at=datetime.now().isoformat())
+            print(f"DB connected (attempt {attempt + 1}, {time.time() - _start:.1f}s)", flush=True)
             return
         except BaseException as exc:
-            print(f"BOOT DB_INIT_RETRY {attempt + 1}/6 {type(exc).__name__}", flush=True)
-            time.sleep(10 * (attempt + 1))
-    os._exit(1)
+            DB_STATE.update(status="retrying", attempts=attempt + 1)
+            _backoff = min(2 ** attempt, 30)  # 1,2,4,8,16,30,30,30 сек
+            print(f"DB retry {attempt + 1}/{max_attempts} {type(exc).__name__}: "
+                  f"{str(exc)[:200]} (backoff {_backoff}s)", flush=True)
+            time.sleep(_backoff)
+    DB_STATE["status"] = "unavailable"
+    print("DB unavailable: исчерпаны попытки; degraded-режим (/readyz=503), сервис продолжает работу", flush=True)
+    # Редкие фоновые попытки восстановления (не лавина запросов к Neon).
+    while True:
+        time.sleep(60)
+        try:
+            _initialize_database()
+            DB_STATE.update(status="recovered",
+                            attempts=DB_STATE.get("attempts", 0) + 1,
+                            connected_at=datetime.now().isoformat())
+            print("DB recovered", flush=True)
+            return
+        except BaseException as exc:
+            print(f"DB unavailable (recovery retry) {type(exc).__name__}: {str(exc)[:200]}", flush=True)
 
 
 if _DEFER_DB_INIT:
@@ -287,11 +309,24 @@ else:
 
 @app.get("/healthz", include_in_schema=False)
 def healthz():
-    payload = {"status": "ready" if _DB_READY.is_set() else "starting"}
+    # Liveness: процесс приложения жив. Всегда 200, если процесс работает, —
+    # Render не должен убивать сервис из-за недоступной БД.
+    payload = {"status": "alive"}
+    render_commit = os.getenv("RENDER_GIT_COMMIT", "").strip()
+    if render_commit:
+        payload["commit"] = render_commit[:12]
+    return payload
+
+
+@app.get("/readyz", include_in_schema=False)
+def readyz():
+    # Readiness: приложение готово работать и БД доступна.
+    payload = {"status": "ready" if _DB_READY.is_set() else DB_STATE.get("status", "starting")}
     render_commit = os.getenv("RENDER_GIT_COMMIT", "").strip()
     if render_commit:
         payload["commit"] = render_commit[:12]
     if not _DB_READY.is_set():
+        payload["db_state"] = dict(DB_STATE)
         if DB_INIT_ERROR_INFO:
             payload["db_error"] = DB_INIT_ERROR_INFO
         return JSONResponse(payload, status_code=503)

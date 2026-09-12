@@ -217,21 +217,24 @@ def test_manifest_is_installable_and_has_maskable_icon():
     assert "installButton.remove()" in login_html
 
 
-def test_healthz_reports_starting_then_ready():
+def test_healthz_liveness_and_readyz_readiness():
     app_module._DB_READY.clear()
-    starting = TestClient(app_module.app).get("/healthz")
-    assert starting.status_code == 503 and starting.json() == {"status": "starting"}
+    # liveness: процесс жив всегда 200, даже если БД недоступна
+    alive = TestClient(app_module.app).get("/healthz")
+    assert alive.status_code == 200 and alive.json()["status"] == "alive"
+    # readiness: БД не готова → 503
+    not_ready = TestClient(app_module.app).get("/readyz")
+    assert not_ready.status_code == 503
     app_module._DB_READY.set()
-    ready = TestClient(app_module.app).get("/healthz")
-    assert ready.status_code == 200 and ready.json() == {"status": "ready"}
+    ready = TestClient(app_module.app).get("/readyz")
+    assert ready.status_code == 200 and ready.json()["status"] == "ready"
 
 
 def test_healthz_exposes_safe_render_commit_marker(monkeypatch):
     monkeypatch.setenv("RENDER_GIT_COMMIT", "b163b972ea05eb1662090a18ca04ee1216a303bf")
-    app_module._DB_READY.set()
     response = TestClient(app_module.app).get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ready", "commit": "b163b972ea05"}
+    assert response.json() == {"status": "alive", "commit": "b163b972ea05"}
 
 
 def test_bitrix_form_encoder_flattens_nested_fields():
@@ -467,6 +470,7 @@ def test_polygon_edit_rejects_non_http_navigator_url():
 
 def test_healthz_is_registered_once():
     assert sum(route.path == "/healthz" for route in app_module.app.routes) == 1
+    assert sum(route.path == "/readyz" for route in app_module.app.routes) == 1
 
 
 def test_bitrix_status_transitions_set_real_stages_for_both_processes(monkeypatch):

@@ -27,7 +27,17 @@ def _build_engine(url: str):
             connect_args["sslmode"] = "require"   # Neon требует SSL
     except Exception:
         connect_args["sslmode"] = "require"
-    return create_engine(url, pool_pre_ping=True, connect_args=connect_args)
+    # Пул настроен под Neon: не держим десятки простаивающих соединений.
+    # pool_recycle < idle-timeout Neon (~5 мин), чтобы не ловить оборванные соединения.
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        connect_args=connect_args,
+        pool_size=5,           # базовый пул
+        max_overflow=5,        # максимум 10 одновременных соединений
+        pool_recycle=240,      # переподключать простаивающие через 4 мин
+        pool_timeout=10,       # ждать свободное соединение не более 10 с
+    )
 
 engine = _build_engine(DATABASE_URL)
 if DATABASE_URL.startswith("sqlite"):
